@@ -9,7 +9,6 @@ from elasticsearch.helpers import scan
 import click
 import matplotlib.pyplot as plt
 from typing import List
-LOOKBACK = 7
 
 def epochs(start, end = 0):
     print(f"start: {start}, end: {end}")
@@ -95,11 +94,12 @@ def get_gpus():
 
 @click.command()
 @click.option('--refresh', is_flag=True, help='Refresh data from Elasticsearch')
-def main(refresh):
+@click.option('--lookback', default=7, help='Number of days to look back')
+def main(refresh, lookback):
     client = Elasticsearch("http://localhost:9200")
     end = 0
     jkeys = set([])
-    query = es_query(LOOKBACK, end)
+    query = es_query(lookback, end)
     if os.path.exists("gpu_jobs.csv") and not refresh:
         df = pd.read_csv("gpu_jobs.csv")
     else:
@@ -112,6 +112,7 @@ def main(refresh):
             jkeys = jkeys.union(set(doc["_source"].keys()))
             df = pd.concat([pd.DataFrame([doc['_source']], columns=df.columns), df], ignore_index=True)
         df['waittime'] = df['JobStartDate'] - df['FirstjobmatchDate']
+        import pdb; pdb.set_trace()
         #df = df.apply(pd.to_numeric)
         df.to_csv("gpu_jobs.csv", index=False)
     nodedf = pd.DataFrame([dict(i) for i in get_prioritized_nodes()])
