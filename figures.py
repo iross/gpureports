@@ -78,7 +78,7 @@ def gpu_gantt_chart(df, gpu_id):
     ax.set_ylabel('GPU')
     ax.set_title(f'Usage Chart for {gpu_id} ({startd_name})')
     plt.show()
-    plt.savefig(f"./images/gpu_{gpu_id}_gantt.png")
+    plt.savefig(f"./images/usage/gpu_{gpu_id}_gantt.png")
 
     
 def boxplot(df):
