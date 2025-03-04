@@ -114,9 +114,10 @@ def main(refresh, lookback):
         df['waittime'] = df['JobStartDate'] - df['FirstjobmatchDate']
         df['Prioritized'] = df['StartdName'].isin(nodedf['Machine']) & df['ProjectName'].isin(nodedf['PrioritizedProjects']).fillna(False)
         df['waittime'] = df['waittime'] / 3600
-        import pdb; pdb.set_trace()
-        #df = df.apply(pd.to_numeric)
-        df.to_csv("gpu_jobs.csv", index=False)
+        current_date = time.strftime('%Y-%m-%d', time.localtime(time.time()))
+        lookback_date = time.strftime('%Y-%m-%d', time.localtime(time.time() - lookback*86400))
+        df.to_csv(f"gpu_jobs_{lookback_date}-{current_date}.csv", index=False)
+        df.to_csv(f"gpu_jobs.csv", index=False) # save "most recent" snapshot too
 
     gpusdf = get_gpus()
     gpusdf.to_csv("gpus.csv")
