@@ -62,3 +62,37 @@ def boxplot(df):
     plt.show()
     plt.savefig("./images/boxplot.png")
 
+
+def gpu_capabilities(gpusdf):
+    # Plot a histogram of gpusdf GPUs_Capability
+    plt.figure(figsize=(10, 6))
+    plt.hist(gpusdf['GPUs_Capability'], bins=20)
+    plt.title('Distribution of GPU Capabilities')
+    plt.xlabel('GPU Capability')
+    plt.ylabel('Count')
+    plt.tight_layout()
+    plt.savefig('./images/gpu_capabilities.png')
+    
+def gpu_model_by_prio(gpusdf):
+        # Combine the data into a DataFrame for plotting
+    priodf = gpusdf[gpusdf["PrioritizedProjects"]!=""]
+    nonpriodf = gpusdf[gpusdf["PrioritizedProjects"]==""]
+    # Create a histogram of count of grouped GPUs_DeviceName, stacking based on prioritization
+    plt.figure(figsize=(12, 6))
+
+    prio_counts = priodf['GPUs_DeviceName'].value_counts()
+    nonprio_counts = nonpriodf['GPUs_DeviceName'].value_counts()
+    plot_data = pd.DataFrame({
+        'Non-Prioritized': nonprio_counts,
+        'Prioritized': prio_counts
+    }).fillna(0)
+
+    plot_data.plot(kind='bar', stacked=True)
+
+    plt.title('GPU Types by Prioritization Status')
+    plt.xlabel('GPU Model')
+    plt.ylabel('Count')
+    plt.xticks(rotation=45, ha='right')
+    plt.tight_layout()
+    plt.savefig('./images/gpu_prioritization.png')
+    #gpu_gantt_chart(df, "GPU-003470e7")

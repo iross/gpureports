@@ -103,72 +103,30 @@ def main(refresh, lookback):
     if os.path.exists("gpu_jobs.csv") and not refresh:
         df = pd.read_csv("gpu_jobs.csv")
     else:
+        nodedf = pd.DataFrame([dict(i) for i in get_nodes()])
         df = pd.DataFrame(columns=['JobStartDate', 'FirstjobmatchDate', 'ScheddName', 'StartdName',
                                     'ProjectName', 'Owner', 'RequestGpus', 'AssignedGPUs', 
                                     'JobCurrentStartDate', 'CompletionDate', 
                                     'WantGpulab', 'gpujoblength'])
         for doc in scan(client=client, query=query, index="chtc-schedd", scroll="60s"):
-
             jkeys = jkeys.union(set(doc["_source"].keys()))
             df = pd.concat([pd.DataFrame([doc['_source']], columns=df.columns), df], ignore_index=True)
         df['waittime'] = df['JobStartDate'] - df['FirstjobmatchDate']
+        df['Prioritized'] = df['StartdName'].isin(nodedf['Machine']) & df['ProjectName'].isin(nodedf['PrioritizedProjects']).fillna(False)
+        df['waittime'] = df['waittime'] / 3600
         import pdb; pdb.set_trace()
         #df = df.apply(pd.to_numeric)
         df.to_csv("gpu_jobs.csv", index=False)
-    nodedf = pd.DataFrame([dict(i) for i in get_prioritized_nodes()])
+
     gpusdf = get_gpus()
     gpusdf.to_csv("gpus.csv")
-    priodf = gpusdf[gpusdf["PrioritizedProjects"]!=""]
-    nonpriodf = gpusdf[gpusdf["PrioritizedProjects"]==""]
-    # Create a histogram of count of grouped GPUs_DeviceName, stacking based on prioritization
-    plt.figure(figsize=(12, 6))
-    # Create a stacked bar chart
-    prio_counts = priodf['GPUs_DeviceName'].value_counts()
-    nonprio_counts = nonpriodf['GPUs_DeviceName'].value_counts()
 
-    # Combine the data into a DataFrame for plotting
-    plot_data = pd.DataFrame({
-        'Non-Prioritized': nonprio_counts,
-        'Prioritized': prio_counts
-    }).fillna(0)
-    
-    plot_data.plot(kind='bar', stacked=True)
-    plt.title('GPU Types by Prioritization Status')
-    plt.xlabel('GPU Model')
-    plt.ylabel('Count')
-    plt.xticks(rotation=45, ha='right')
-    plt.tight_layout()
-    plt.savefig('./images/gpu_prioritization.png')
-
-    # Plot a histogram of gpusdf GPUs_Capability
-    plt.figure(figsize=(10, 6))
-    plt.hist(gpusdf['GPUs_Capability'], bins=20)
-    plt.title('Distribution of GPU Capabilities')
-    plt.xlabel('GPU Capability')
-    plt.ylabel('Count')
-    plt.tight_layout()
-    plt.savefig('./images/gpu_capabilities.png')
-    # filter out rows where StarddName is in the nodedf['Machine'] column and where ProjectName is set
-    print(df.shape)
-    # priodf = df[df['StartdName'].isin(nodedf['Machine']) & df['ProjectName'].isin(nodedf['PrioritizedProjects'])]
-    # nonpriodf = df[~df['StartdName'].isin(nodedf['Machine']) | ~df['ProjectName'].isin(nodedf['PrioritizedProjects'])]
-    # add a column to df to indicate if the job is in priodf, default to False
-    # df['Prioritized'] = False
-    df['Prioritized'] = df['StartdName'].isin(nodedf['Machine']) & df['ProjectName'].isin(nodedf['PrioritizedProjects']).fillna(False)
-    # print(priodf.shape)
-    # print(nonpriodf.shape)
-    # df['JobStartDay'] = pd.to_datetime(df['JobStartDate'], unit='s').dt.date
-    #df = df[df['JobStartDay'] >= (pd.Timestamp.now() - pd.Timedelta(days=7)).date()]
-    # convert waittime to hours
-    df['waittime'] = df['waittime'] / 3600
     hosts = df['StartdName'].unique()
     for host in hosts:
         if "chtc.wisc.edu" not in host: continue
         print(host)
         gpu_host_gantt_chart(df, host)
-    #gpu_host_gantt_chart(df, "gpu4003.chtc.wisc.edu")
     gpu_host_gantt_chart(df, "gitter0000.chtc.wisc.edu")
-    #gpu_gantt_chart(df, "GPU-003470e7")
 
 if __name__ == "__main__":
     main()
