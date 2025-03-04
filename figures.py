@@ -1,6 +1,43 @@
 import pandas as pd
 import matplotlib.pyplot as plt
 
+def gpu_host_utilization(df, startd_name):
+    """
+    Create a % utilization over time, based on the total number of GPUs in use per hour
+    """
+    df = df[df['StartdName'] == startd_name]
+    
+    # Convert timestamps to datetime
+    df['start'] = pd.to_datetime(df['JobCurrentStartDate'], unit='s')
+    df['end'] = pd.to_datetime(df['CompletionDate'], unit='s')
+    
+    # Create hourly bins spanning the full time range
+    time_range = pd.date_range(start=df['start'].min(), 
+                             end=df['end'].max(),
+                             freq='H')
+    
+    # Calculate GPUs in use for each hour
+    utilization = []
+    for t in time_range[:-1]:
+        active_jobs = df[(df['start'] <= t) & (df['end'] >= t)]
+        gpus_in_use = active_jobs['RequestGpus'].sum()
+        utilization.append({'time': t, 'gpus_used': gpus_in_use})
+        
+    util_df = pd.DataFrame(utilization)
+    
+    # Plot utilization over time
+    plt.figure(figsize=(12,6))
+    plt.plot(util_df['time'], util_df['gpus_used'])
+    plt.title(f'GPU Utilization for {startd_name}')
+    plt.xlabel('Time')
+    plt.ylabel('Number of GPUs in Use')
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.savefig(f"./images/utilization/gpu_{startd_name}_utilization.png")
+    plt.close()
+    
+    return util_df
+
 def gpu_host_gantt_chart(df, startd_name):
     df = df[df['StartdName'] == startd_name]
     # print the number of jobs for each owner
