@@ -8,7 +8,7 @@ from elasticsearch import Elasticsearch
 from elasticsearch.helpers import scan
 import click
 from typing import List
-from figures import gpu_gantt_chart, gpu_host_gantt_chart
+from figures import gpu_gantt_chart, gpu_host_gantt_chart, gpu_host_utilization
 
 def epochs(start, end = 0):
     print(f"start: {start}, end: {end}")
@@ -93,9 +93,10 @@ def get_gpus():
     return gpusdf
 
 @click.command()
+@click.option('--ep', default=None, help="EP to analyze")
 @click.option('--refresh', is_flag=True, help='Refresh data from Elasticsearch')
 @click.option('--lookback', default=7, help='Number of days to look back')
-def main(refresh, lookback):
+def main(ep, refresh, lookback):
     client = Elasticsearch("http://localhost:9200")
     end = 0
     jkeys = set([])
@@ -123,11 +124,12 @@ def main(refresh, lookback):
     gpusdf.to_csv("gpus.csv")
 
     hosts = df['StartdName'].unique()
-    for host in hosts:
-        if "chtc.wisc.edu" not in host: continue
-        print(host)
-        gpu_host_gantt_chart(df, host)
-    gpu_host_gantt_chart(df, "gitter0000.chtc.wisc.edu")
+    # for host in hosts:
+        # if "chtc.wisc.edu" not in host: continue
+        # print(host)
+    #     gpu_host_gantt_chart(df, host)
+    gpu_host_utilization(df, f"{ep}.chtc.wisc.edu")
+    # gpu_host_gantt_chart(df, "gitter0000.chtc.wisc.edu")
 
 if __name__ == "__main__":
     main()
