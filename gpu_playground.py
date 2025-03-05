@@ -115,13 +115,14 @@ def main(ep, refresh, lookback):
         df['waittime'] = df['JobStartDate'] - df['FirstjobmatchDate']
         df['Prioritized'] = df['StartdName'].isin(nodedf['Machine']) & df['ProjectName'].isin(nodedf['PrioritizedProjects']).fillna(False)
         df['waittime'] = df['waittime'] / 3600
+        df['runtime'] = df['CompletionDate'] - df['JobCurrentStartDate']
         current_date = time.strftime('%Y-%m-%d', time.localtime(time.time()))
         lookback_date = time.strftime('%Y-%m-%d', time.localtime(time.time() - lookback*86400))
         df.to_csv(f"gpu_jobs_{lookback_date}-{current_date}.csv", index=False)
         df.to_csv(f"gpu_jobs.csv", index=False) # save "most recent" snapshot too
 
-    gpusdf = get_gpus()
-    gpusdf.to_csv("gpus.csv")
+    # gpusdf = get_gpus()
+    # gpusdf.to_csv("gpus.csv")
 
     hosts = df['StartdName'].unique()
     # for host in hosts:
