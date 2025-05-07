@@ -1,7 +1,7 @@
 [project]
-name = "single_file_submit"
+name = "gpureports"
 version = "0.1.0"
-description = "Experiments in single-file interfaces for HTCondor joblist submission"
+description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -11,8 +11,6 @@ dependencies = [
     "jupyter>=1.1.1",
     "matplotlib>=3.10.0",
     "pandas>=2.2.3",
-    "ruff>=0.8.6",
+    "sqlalchemy>=2.0.40",
+    "typer>=0.15.3",
 ]
-
-[tool.uv.workspace]
-members = ["place_joblist"]
