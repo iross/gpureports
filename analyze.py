@@ -77,7 +77,7 @@ def get_binned_usage(df, utilization, host=""):
     df['15min_bucket'] = df['timestamp'].dt.floor('15min')
     df = df.groupby(['15min_bucket', 'AssignedGPUs', 'State', 'Name', 'PrioritizedProjects']).size().reset_index(name='count')
     # For each 15 minute bucket, calculate the usage
-    bins = []
+    bins_data = []
     for bucket in df['15min_bucket'].unique():
         df_bucket = df[df['15min_bucket'] == bucket]
         if utilization == "Shared":
@@ -89,11 +89,13 @@ def get_binned_usage(df, utilization, host=""):
         elif utilization == "Backfill":
             num = count_backfill(df_bucket, "Claimed", host)
             den = count_backfill(df_bucket, "Claimed", host) + count_backfill(df_bucket, "Unclaimed", host)
-        bins.append((bucket, num, den))
+        bins_data.append((bucket, num, den))
         print(f"{bucket}: {num} / {den}")
-    return bins
+    
+    df = pd.DataFrame(bins_data, columns=['timestamp', 'used', 'total'])
+    return df
 
-def plot_binned_usage(prio_bins, shared_bins, backfill_bins):
+def plot_binned_usage(prio_df, shared_df, backfill_df):
     """
     Create a time series plot of the usage over time, showing percent usage for each utilization on
     the same plot.
@@ -102,10 +104,6 @@ def plot_binned_usage(prio_bins, shared_bins, backfill_bins):
     import matplotlib.pyplot as plt
     
     fig, ax = plt.subplots(figsize=(12, 6))
-    # Convert bins to dataframes for easier plotting
-    prio_df = pd.DataFrame(prio_bins, columns=['timestamp', 'used', 'total'])
-    shared_df = pd.DataFrame(shared_bins, columns=['timestamp', 'used', 'total'])
-    backfill_df = pd.DataFrame(backfill_bins, columns=['timestamp', 'used', 'total'])
     
     # Calculate usage percentage, avoiding division by zero
     prio_df['usage'] = prio_df.apply(lambda row: row['used'] / row['total'] if row['total'] > 0 else 0, axis=1)
@@ -124,6 +122,9 @@ def plot_binned_usage(prio_bins, shared_bins, backfill_bins):
     
     # Format the x-axis to show dates nicely
     fig.autofmt_xdate()
+    # show hours and minues on the x-axis
+    ax.xaxis.set_major_locator(plt.matplotlib.dates.HourLocator(byhour=range(0, 24, 3)))
+    ax.xaxis.set_major_formatter(plt.matplotlib.dates.DateFormatter('%Y-%m-%d %H:%M'))
     ax.set_ylabel('Usage (%)')
     ax.set_ylim(0, 1.0)
     ax.set_title('GPU Usage Over Time')
