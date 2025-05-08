@@ -4,13 +4,4 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = [
-    "click>=8.1.8",
-    "elasticsearch>=8.17.1",
-    "htcondor>=24.3.0",
-    "jupyter>=1.1.1",
-    "matplotlib>=3.10.0",
-    "pandas>=2.2.3",
-    "sqlalchemy>=2.0.40",
-    "typer>=0.15.3",
-]
+dependencies = []

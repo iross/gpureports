@@ -45,5 +45,5 @@ def get_gpus() -> pd.DataFrame:
 if __name__ == "__main__":
     df = get_gpus()
     month = datetime.datetime.now().strftime("%Y-%m")
-    disk_engine = create_engine(f'sqlite:////home/iaross/gpu_reports/gpu_state_{month}.db')
+    disk_engine = create_engine(f'sqlite:////home/iaross/gpureports/gpu_state_{month}.db')
     df.to_sql('gpu_state', disk_engine, if_exists='append', index=False)
