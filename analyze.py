@@ -62,7 +62,7 @@ def report_by_device_type(df, utilization, state="", host=""):
     # print(df['Machine'].sort_values().value_counts(sort=False).to_string(header=False))
     return
 
-def get_binned_usage(df, utilization, host=""):
+def get_binned_usage(df, utilization, host="", group_by=""):
     """
     Create a figure that shows the usages over time for each device type. 
     The input df has a timestamp column, but we want to group by 15 minute buckets.
@@ -75,9 +75,10 @@ def get_binned_usage(df, utilization, host=""):
     # Split the df into 15 minute buckets
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     df['15min_bucket'] = df['timestamp'].dt.floor('15min')
-    df = df.groupby(['15min_bucket', 'AssignedGPUs', 'State', 'Name', 'PrioritizedProjects']).size().reset_index(name='count')
     # For each 15 minute bucket, calculate the usage
     bins_data = []
+    if group_by == "":
+        df = df.groupby(['15min_bucket', 'AssignedGPUs', 'State', 'Name', 'PrioritizedProjects']).size().reset_index(name='count')
     for bucket in df['15min_bucket'].unique():
         df_bucket = df[df['15min_bucket'] == bucket]
         if utilization == "Shared":
@@ -93,16 +94,40 @@ def get_binned_usage(df, utilization, host=""):
         print(f"{bucket}: {num} / {den}")
     
     df = pd.DataFrame(bins_data, columns=['timestamp', 'used', 'total'])
+    else:
+        df = df.groupby(['15min_bucket', 'AssignedGPUs', 'State', 'Name', 'PrioritizedProjects', group_by]).size().reset_index(name='count')
+        for bucket in df['15min_bucket'].unique():
+            df_bucket = df[df['15min_bucket'] == bucket]
+            for group_value in df_bucket[group_by].unique():
+                if "GTX 1080" in group_value : continue
+                if "A30" in group_value : continue
+                if "A40" in group_value : continue
+                if "P100" in group_value : continue
+                if "Quadro" in group_value : continue
+                df_group = df_bucket[df_bucket[group_by] == group_value]
+                if utilization == "Shared":
+                    num = count_shared(df_group, "Claimed", host) 
+                    den = count_shared(df_group, "Claimed", host) + count_shared(df_group, "Unclaimed", host)
+                elif utilization == "Priority":
+                    num = count_prioritized(df_group, "Claimed", host)
+                    den = count_prioritized(df_group, "Claimed", host) + count_prioritized(df_group, "Unclaimed", host)
+                elif utilization == "Backfill":
+                    num = count_backfill(df_group, "Claimed", host)
+                    den = count_backfill(df_group, "Claimed", host) + count_backfill(df_group, "Unclaimed", host)
+                bins_data.append((bucket, group_value, num, den))
+        df = pd.DataFrame(bins_data, columns=['timestamp', 'group', 'used', 'total'])
     return df
 
-def plot_binned_usage(prio_df, shared_df, backfill_df):
+def plot_binned_usage(prio_df, shared_df, backfill_df, name=""):
     """
     Create a time series plot of the usage over time, showing percent usage for each utilization on
-    the same plot.
+    the same plot. If data is grouped, create a subfigure for each group.
     """
-    # print priority bins, shared_bin, and backfill_bins on the same plot
-    import matplotlib.pyplot as plt
+    # Check if we have grouped data
+    has_groups = 'group' in prio_df.columns
     
+    if not has_groups:
+        # Single plot for ungrouped data
     fig, ax = plt.subplots(figsize=(12, 6))
     
     # Calculate usage percentage, avoiding division by zero
@@ -125,14 +150,73 @@ def plot_binned_usage(prio_df, shared_df, backfill_df):
     # show hours and minues on the x-axis
     ax.xaxis.set_major_locator(plt.matplotlib.dates.HourLocator(byhour=range(0, 24, 3)))
     ax.xaxis.set_major_formatter(plt.matplotlib.dates.DateFormatter('%Y-%m-%d %H:%M'))
-    ax.set_ylabel('Usage (%)')
-    ax.set_ylim(0, 1.0)
+        ax.set_ylabel('Usage')
+        ax.set_ylim(0, 1.1)
     ax.set_title('GPU Usage Over Time')
     ax.grid(True, linestyle='--', alpha=0.7)
     ax.legend()
+        
+    else:
+        # Get all unique groups across all dataframes
+        all_groups = set(prio_df['group'].unique())
+        all_groups.update(shared_df['group'].unique())
+        all_groups.update(backfill_df['group'].unique())
+        all_groups = sorted(all_groups)
+        
+        # Create a subplot for each group
+        num_groups = len(all_groups)
+        fig, axes = plt.subplots(num_groups, 1, figsize=(12, 5 * num_groups), sharex=True)
+        
+        # If there's only one group, axes won't be an array
+        if num_groups == 1:
+            axes = [axes]
+        
+        for i, group in enumerate(all_groups):
+            ax = axes[i]
+            
+            # Filter data for this group
+            prio_group = prio_df[prio_df['group'] == group]
+            shared_group = shared_df[shared_df['group'] == group]
+            backfill_group = backfill_df[backfill_df['group'] == group]
+            
+            # Calculate usage percentage for each group
+            if not prio_group.empty:
+                prio_group['usage'] = prio_group.apply(lambda row: row['used'] / row['total'] if row['total'] > 0 else 0, axis=1)
+                ax.plot(prio_group['timestamp'], prio_group['usage'], 'b-', linewidth=2, label=f"Priority {str(prio_group['total'].max())} peak")
+            
+            if not shared_group.empty:
+                shared_group['usage'] = shared_group.apply(lambda row: row['used'] / row['total'] if row['total'] > 0 else 0, axis=1)
+                ax.plot(shared_group['timestamp'], shared_group['usage'], 'g-', linewidth=2, label=f"Shared {str(shared_group['total'].max())} peak")
+            
+            if not backfill_group.empty:
+                backfill_group['usage'] = backfill_group.apply(lambda row: row['used'] / row['total'] if row['total'] > 0 else 0, axis=1)
+                ax.plot(backfill_group['timestamp'], backfill_group['usage'], 'r-', linewidth=2, label=f"Backfill {str(backfill_group['total'].max())} peak")
+            
+            # Set plot properties
+            ax.set_ylabel('Usage')
+            ax.set_ylim(0, 1.1)
+            ax.set_title(f'GPU Usage Over Time - {group}')
+            ax.grid(True, linestyle='--', alpha=0.7)
+            ax.legend()
+            
+            # Only format x-axis for the last subplot
+            if i == num_groups - 1:
+                # Format the x-axis to show dates nicely
+                ax.xaxis.set_major_locator(plt.matplotlib.dates.HourLocator(byhour=range(0, 24, 3)))
+                ax.xaxis.set_major_formatter(plt.matplotlib.dates.DateFormatter('%Y-%m-%d %H:%M'))
+        
+        # Set common x-axis limits
+        all_timestamps = pd.concat([prio_df['timestamp'], shared_df['timestamp'], backfill_df['timestamp']])
+        min_time = all_timestamps.min()
+        max_time = all_timestamps.max()
+        for ax in axes:
+            ax.set_xlim(min_time, max_time)
+        
+        fig.autofmt_xdate()
+        plt.tight_layout()
     
     # Save the figure first, then show it
-    plt.savefig("usage_over_time.png")
+    plt.savefig(f"usage_over_time{name}.png")
     plt.show()
     return
 
@@ -159,10 +243,11 @@ def main(
     # report_by_device_type(df, "Shared", "Unclaimed", "")
     # report_by_device_type(df, "Backfill", "Claimed", "")
     # report_by_device_type(df, "Backfill", "Unclaimed", "")
-    _prio = get_binned_usage(df, "Priority", host)
-    _shared = get_binned_usage(df, "Shared", host)
-    _backfill = get_binned_usage(df, "Backfill", host)
-    plot_binned_usage(_prio, _shared, _backfill)
+    for group_by in ["GPUs_DeviceName", ""]:
+        _prio = get_binned_usage(df, "Priority", host, group_by)
+        _shared = get_binned_usage(df, "Shared", host, group_by)
+        _backfill = get_binned_usage(df, "Backfill", host, group_by)
+        plot_binned_usage(_prio, _shared, _backfill, f"{'' if group_by == '' else f'_{group_by}'}")
     
     # TODO: fold in some of the figures.py to generate plots from the stored
     # data. It'll have to change, potentially a lot, due to different data
