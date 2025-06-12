@@ -79,21 +79,21 @@ def get_binned_usage(df, utilization, host="", group_by=""):
     bins_data = []
     if group_by == "":
         df = df.groupby(['15min_bucket', 'AssignedGPUs', 'State', 'Name', 'PrioritizedProjects']).size().reset_index(name='count')
-    for bucket in df['15min_bucket'].unique():
-        df_bucket = df[df['15min_bucket'] == bucket]
-        if utilization == "Shared":
-            num = count_shared(df_bucket, "Claimed", host) 
-            den = count_shared(df_bucket, "Claimed", host) + count_shared(df_bucket, "Unclaimed", host)
-        elif utilization == "Priority":
-            num = count_prioritized(df_bucket, "Claimed", host)
-            den = count_prioritized(df_bucket, "Claimed", host) + count_prioritized(df_bucket, "Unclaimed", host)
-        elif utilization == "Backfill":
-            num = count_backfill(df_bucket, "Claimed", host)
-            den = count_backfill(df_bucket, "Claimed", host) + count_backfill(df_bucket, "Unclaimed", host)
-        bins_data.append((bucket, num, den))
-        print(f"{bucket}: {num} / {den}")
-    
-    df = pd.DataFrame(bins_data, columns=['timestamp', 'used', 'total'])
+        for bucket in df['15min_bucket'].unique():
+            df_bucket = df[df['15min_bucket'] == bucket]
+            if utilization == "Shared":
+                num = count_shared(df_bucket, "Claimed", host) 
+                den = count_shared(df_bucket, "Claimed", host) + count_shared(df_bucket, "Unclaimed", host)
+            elif utilization == "Priority":
+                num = count_prioritized(df_bucket, "Claimed", host)
+                den = count_prioritized(df_bucket, "Claimed", host) + count_prioritized(df_bucket, "Unclaimed", host)
+            elif utilization == "Backfill":
+                num = count_backfill(df_bucket, "Claimed", host)
+                den = count_backfill(df_bucket, "Claimed", host) + count_backfill(df_bucket, "Unclaimed", host)
+            bins_data.append((bucket, num, den))
+            print(f"{bucket}: {num} / {den}")
+        
+        df = pd.DataFrame(bins_data, columns=['timestamp', 'used', 'total'])
     else:
         df = df.groupby(['15min_bucket', 'AssignedGPUs', 'State', 'Name', 'PrioritizedProjects', group_by]).size().reset_index(name='count')
         for bucket in df['15min_bucket'].unique():
@@ -128,33 +128,33 @@ def plot_binned_usage(prio_df, shared_df, backfill_df, name=""):
     
     if not has_groups:
         # Single plot for ungrouped data
-    fig, ax = plt.subplots(figsize=(12, 6))
-    
-    # Calculate usage percentage, avoiding division by zero
-    prio_df['usage'] = prio_df.apply(lambda row: row['used'] / row['total'] if row['total'] > 0 else 0, axis=1)
-    shared_df['usage'] = shared_df.apply(lambda row: row['used'] / row['total'] if row['total'] > 0 else 0, axis=1)
-    backfill_df['usage'] = backfill_df.apply(lambda row: row['used'] / row['total'] if row['total'] > 0 else 0, axis=1)
-    print(prio_df)
-    print(shared_df)
-    print(backfill_df)
-    
-    # Plot each line, but only once in the legend
-    ax.plot(prio_df['timestamp'], prio_df['usage'], 'b-', linewidth=2, label="Priority")
-    ax.plot(shared_df['timestamp'], shared_df['usage'], 'g-', linewidth=2, label="Shared")
-    ax.plot(backfill_df['timestamp'], backfill_df['usage'], 'r-', linewidth=2, label="Backfill")
-    # Set x-axis to the min and max of the timestamp
-    ax.set_xlim(prio_df['timestamp'].min(), prio_df['timestamp'].max())
-    
-    # Format the x-axis to show dates nicely
-    fig.autofmt_xdate()
-    # show hours and minues on the x-axis
-    ax.xaxis.set_major_locator(plt.matplotlib.dates.HourLocator(byhour=range(0, 24, 3)))
-    ax.xaxis.set_major_formatter(plt.matplotlib.dates.DateFormatter('%Y-%m-%d %H:%M'))
+        fig, ax = plt.subplots(figsize=(12, 6))
+        
+        # Calculate usage percentage, avoiding division by zero
+        prio_df['usage'] = prio_df.apply(lambda row: row['used'] / row['total'] if row['total'] > 0 else 0, axis=1)
+        shared_df['usage'] = shared_df.apply(lambda row: row['used'] / row['total'] if row['total'] > 0 else 0, axis=1)
+        backfill_df['usage'] = backfill_df.apply(lambda row: row['used'] / row['total'] if row['total'] > 0 else 0, axis=1)
+        print(prio_df)
+        print(shared_df)
+        print(backfill_df)
+        
+        # Plot each line, but only once in the legend
+        ax.plot(prio_df['timestamp'], prio_df['usage'], 'b-', linewidth=2, label="Priority")
+        ax.plot(shared_df['timestamp'], shared_df['usage'], 'g-', linewidth=2, label="Shared")
+        ax.plot(backfill_df['timestamp'], backfill_df['usage'], 'r-', linewidth=2, label="Backfill")
+        # Set x-axis to the min and max of the timestamp
+        ax.set_xlim(prio_df['timestamp'].min(), prio_df['timestamp'].max())
+        
+        # Format the x-axis to show dates nicely
+        fig.autofmt_xdate()
+        # show hours and minues on the x-axis
+        ax.xaxis.set_major_locator(plt.matplotlib.dates.HourLocator(byhour=range(0, 24, 3)))
+        ax.xaxis.set_major_formatter(plt.matplotlib.dates.DateFormatter('%Y-%m-%d %H:%M'))
         ax.set_ylabel('Usage')
         ax.set_ylim(0, 1.1)
-    ax.set_title('GPU Usage Over Time')
-    ax.grid(True, linestyle='--', alpha=0.7)
-    ax.legend()
+        ax.set_title('GPU Usage Over Time')
+        ax.grid(True, linestyle='--', alpha=0.7)
+        ax.legend()
         
     else:
         # Get all unique groups across all dataframes

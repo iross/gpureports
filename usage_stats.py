@@ -12,8 +12,6 @@ import datetime
 import typer
 import sqlite3
 from typing import Optional
-import sys
-from pathlib import Path
 
 # Define the filtering functions locally to avoid htcondor dependency
 
@@ -339,6 +337,166 @@ def calculate_allocation_usage_by_device(df: pd.DataFrame, host: str = "", inclu
     return stats
 
 
+def run_analysis(
+    db_path: str,
+    hours_back: int = 24,
+    host: str = "",
+    analysis_type: str = "allocation",
+    bucket_minutes: int = 15,
+    end_time: Optional[datetime.datetime] = None,
+    group_by_device: bool = False,
+    all_devices: bool = False
+) -> dict:
+    """
+    Core analysis function that can be called programmatically.
+    
+    Returns:
+        Dictionary containing analysis results and metadata
+    """
+    # Get filtered data
+    df = get_time_filtered_data(db_path, hours_back, end_time)
+    
+    if len(df) == 0:
+        return {"error": "No data found in the specified time range."}
+    
+    # Calculate time buckets for interval counting
+    df_temp = df.copy()
+    df_temp['timestamp'] = pd.to_datetime(df_temp['timestamp'])
+    df_temp['15min_bucket'] = df_temp['timestamp'].dt.floor('15min')
+    num_intervals = df_temp['15min_bucket'].nunique()
+    
+    result = {
+        "metadata": {
+            "start_time": df['timestamp'].min(),
+            "end_time": df['timestamp'].max(),
+            "num_intervals": num_intervals,
+            "total_records": len(df)
+        }
+    }
+    
+    if analysis_type == "allocation":
+        if group_by_device:
+            result["device_stats"] = calculate_allocation_usage_by_device(df, host, all_devices)
+        else:
+            result["allocation_stats"] = calculate_allocation_usage(df, host)
+    
+    elif analysis_type == "timeseries":
+        result["timeseries_data"] = calculate_time_series_usage(df, bucket_minutes, host)
+    
+    return result
+
+
+def print_analysis_results(results: dict):
+    """Print analysis results in a formatted way."""
+    if "error" in results:
+        print(results["error"])
+        return
+    
+    metadata = results["metadata"]
+    
+    print(f"\n{'='*70}")
+    print(f"{'CHTC GPU UTILIZATION REPORT':^70}")
+    print(f"{'='*70}")
+    print(f"Period: {metadata['start_time'].strftime('%Y-%m-%d %H:%M')} to {metadata['end_time'].strftime('%Y-%m-%d %H:%M')} ({metadata['num_intervals']} intervals)")
+    print(f"{'='*70}")
+    print("NOTES:")
+    print("A100-80GB - voyles2000 appears to be prioritized but not using PrioritizedProjects attribute")
+    print("A100-40GB - Interactive slots are not filtered out")
+    
+    if "allocation_stats" in results:
+        print(f"\nUtilization Summary:")
+        print(f"{'-'*70}")
+        allocation_stats = results["allocation_stats"]
+        
+        for class_name, stats in allocation_stats.items():
+            print(f"{class_name:>10}: {stats['allocation_usage_percent']:6.1f}% "
+                  f"({stats['avg_claimed']:5.1f}/{stats['avg_total_available']:5.1f} GPUs)")
+    
+    elif "device_stats" in results:
+        print(f"\nUsage by Device Type:")
+        print(f"{'-'*70}")
+        device_stats = results["device_stats"]
+        
+        # Calculate and display grand totals
+        grand_totals = {}
+        
+        for class_name, device_data in device_stats.items():
+            if device_data:  # Only show classes that have data
+                print(f"\n{class_name}:")
+                print(f"{'-'*50}")
+                
+                # Calculate totals for this class
+                total_claimed = 0
+                total_available = 0
+                
+                for device_type, stats in device_data.items():
+                    print(f"  {device_type[:35]:35}: {stats['allocation_usage_percent']:6.1f}% "
+                          f"(avg {stats['avg_claimed']:4.1f}/{stats['avg_total_available']:4.1f} GPUs)")
+                    total_claimed += stats['avg_claimed']
+                    total_available += stats['avg_total_available']
+                
+                # Calculate and store grand total for this class
+                if total_available > 0:
+                    grand_total_percent = (total_claimed / total_available) * 100
+                    grand_totals[class_name] = {
+                        'claimed': total_claimed,
+                        'total': total_available,
+                        'percent': grand_total_percent
+                    }
+                    
+                    print(f"  {'-'*35:35}   {'-'*6}   {'-'*15}")
+                    print(f"  {'TOTAL ' + class_name:35}: {grand_total_percent:6.1f}% "
+                          f"(avg {total_claimed:4.1f}/{total_available:4.1f} GPUs)")
+        
+        # Display overall summary
+        if grand_totals:
+            print(f"\nCluster Summary:")
+            print(f"{'-'*70}")
+            
+            overall_claimed = sum(stats['claimed'] for stats in grand_totals.values())
+            overall_total = sum(stats['total'] for stats in grand_totals.values())
+            overall_percent = (overall_claimed / overall_total * 100) if overall_total > 0 else 0
+            
+            for class_name, stats in grand_totals.items():
+                print(f"{class_name:>10}: {stats['percent']:6.1f}% "
+                      f"({stats['claimed']:5.1f}/{stats['total']:5.1f} GPUs)")
+            
+            print(f"{'-'*35}")
+            print(f"{'TOTAL':>10}: {overall_percent:6.1f}% "
+                  f"({overall_claimed:5.1f}/{overall_total:5.1f} GPUs)")
+    
+    elif "timeseries_data" in results:
+        print(f"\nTime Series Analysis:")
+        print(f"{'-'*70}")
+        ts_df = results["timeseries_data"]
+        
+        # Calculate and display averages
+        for class_name in ["priority", "shared", "backfill"]:
+            usage_col = f"{class_name}_usage_percent"
+            claimed_col = f"{class_name}_claimed"
+            total_col = f"{class_name}_total"
+            
+            if all(col in ts_df.columns for col in [usage_col, claimed_col, total_col]):
+                avg_usage = ts_df[usage_col].mean()
+                avg_claimed = ts_df[claimed_col].mean()
+                avg_total = ts_df[total_col].mean()
+                print(f"{class_name.title():>10}: {avg_usage:6.1f}% "
+                      f"({avg_claimed:5.1f}/{avg_total:5.1f} GPUs)")
+        
+        # Show recent trend
+        print(f"\nRecent Trend:")
+        print(f"{'-'*70}")
+        recent_df = ts_df.tail(5)
+        for _, row in recent_df.iterrows():
+            print(f"{row['timestamp'].strftime('%m-%d %H:%M')}: "
+                  f"Priority {row['priority_usage_percent']:5.1f}% "
+                  f"({int(row['priority_claimed'])}/{int(row['priority_total'])}), "
+                  f"Shared {row['shared_usage_percent']:5.1f}% "
+                  f"({int(row['shared_claimed'])}/{int(row['shared_total'])}), "
+                  f"Backfill {row['backfill_usage_percent']:5.1f}% "
+                  f"({int(row['backfill_claimed'])}/{int(row['backfill_total'])})")
+
+
 def main(
     hours_back: int = typer.Option(24, help="Number of hours to analyze (default: 24)"),
     host: str = typer.Option("", help="Host name to filter results"),
@@ -366,120 +524,20 @@ def main(
             print(f"Error: Invalid end_time format. Use YYYY-MM-DD HH:MM:SS")
             return
     
-    # Get filtered data
-    df = get_time_filtered_data(db_path, hours_back, parsed_end_time)
+    # Run the analysis
+    results = run_analysis(
+        db_path=db_path,
+        hours_back=hours_back,
+        host=host,
+        analysis_type=analysis_type,
+        bucket_minutes=bucket_minutes,
+        end_time=parsed_end_time,
+        group_by_device=group_by_device,
+        all_devices=all_devices
+    )
     
-    if len(df) == 0:
-        print("No data found in the specified time range.")
-        return
-    
-    # Calculate time buckets for interval counting
-    df_temp = df.copy()
-    df_temp['timestamp'] = pd.to_datetime(df_temp['timestamp'])
-    df_temp['15min_bucket'] = df_temp['timestamp'].dt.floor('15min')
-    num_intervals = df_temp['15min_bucket'].nunique()
-    
-    print(f"\n{'='*70}")
-    print(f"{'CHTC GPU UTILIZATION REPORT':^70}")
-    print(f"{'='*70}")
-    print(f"Period: {df['timestamp'].min().strftime('%Y-%m-%d %H:%M')} to {df['timestamp'].max().strftime('%Y-%m-%d %H:%M')} ({num_intervals} intervals)")
-    print(f"{'='*70}")
-    print("NOTES:")
-    print("A100-80GB - voyles2000 appears to be prioritized but not using PrioritizedProjects attribute")
-    print("A100-40GB - Interactive slots are not filtered out")
-    
-    if analysis_type == "allocation":
-        if group_by_device:
-            print(f"\nUsage by Device Type:")
-            print(f"{'-'*70}")
-            device_stats = calculate_allocation_usage_by_device(df, host, all_devices)
-            
-            # Calculate and display grand totals
-            grand_totals = {}
-            
-            for class_name, device_data in device_stats.items():
-                if device_data:  # Only show classes that have data
-                    print(f"\n{class_name}:")
-                    print(f"{'-'*50}")
-                    
-                    # Calculate totals for this class
-                    total_claimed = 0
-                    total_available = 0
-                    
-                    for device_type, stats in device_data.items():
-                        print(f"  {device_type[:35]:35}: {stats['allocation_usage_percent']:6.1f}% "
-                              f"(avg {stats['avg_claimed']:4.1f}/{stats['avg_total_available']:4.1f} GPUs)")
-                        total_claimed += stats['avg_claimed']
-                        total_available += stats['avg_total_available']
-                    
-                    # Calculate and store grand total for this class
-                    if total_available > 0:
-                        grand_total_percent = (total_claimed / total_available) * 100
-                        grand_totals[class_name] = {
-                            'claimed': total_claimed,
-                            'total': total_available,
-                            'percent': grand_total_percent
-                        }
-                        
-                        print(f"  {'-'*35:35}   {'-'*6}   {'-'*15}")
-                        print(f"  {'TOTAL ' + class_name:35}: {grand_total_percent:6.1f}% "
-                              f"(avg {total_claimed:4.1f}/{total_available:4.1f} GPUs)")
-            
-            # Display overall summary
-            if grand_totals:
-                print(f"\nCluster Summary:")
-                print(f"{'-'*70}")
-                
-                overall_claimed = sum(stats['claimed'] for stats in grand_totals.values())
-                overall_total = sum(stats['total'] for stats in grand_totals.values())
-                overall_percent = (overall_claimed / overall_total * 100) if overall_total > 0 else 0
-                
-                for class_name, stats in grand_totals.items():
-                    print(f"{class_name:>10}: {stats['percent']:6.1f}% "
-                          f"({stats['claimed']:5.1f}/{stats['total']:5.1f} GPUs)")
-                
-                print(f"{'-'*35}")
-                print(f"{'TOTAL':>10}: {overall_percent:6.1f}% "
-                      f"({overall_claimed:5.1f}/{overall_total:5.1f} GPUs)")
-        else:
-            print(f"\nUtilization Summary:")
-            print(f"{'-'*70}")
-            allocation_stats = calculate_allocation_usage(df, host)
-            
-            for class_name, stats in allocation_stats.items():
-                print(f"{class_name:>10}: {stats['allocation_usage_percent']:6.1f}% "
-                      f"({stats['avg_claimed']:5.1f}/{stats['avg_total_available']:5.1f} GPUs)")
-    
-    if analysis_type == "timeseries":
-        print(f"\nTime Series Analysis:")
-        print(f"{'-'*70}")
-        ts_df = calculate_time_series_usage(df, bucket_minutes, host)
-        
-        # Calculate and display averages
-        for class_name in ["priority", "shared", "backfill"]:
-            usage_col = f"{class_name}_usage_percent"
-            claimed_col = f"{class_name}_claimed"
-            total_col = f"{class_name}_total"
-            
-            if all(col in ts_df.columns for col in [usage_col, claimed_col, total_col]):
-                avg_usage = ts_df[usage_col].mean()
-                avg_claimed = ts_df[claimed_col].mean()
-                avg_total = ts_df[total_col].mean()
-                print(f"{class_name.title():>10}: {avg_usage:6.1f}% "
-                      f"({avg_claimed:5.1f}/{avg_total:5.1f} GPUs)")
-        
-        # Show recent trend
-        print(f"\nRecent Trend:")
-        print(f"{'-'*70}")
-        recent_df = ts_df.tail(5)
-        for _, row in recent_df.iterrows():
-            print(f"{row['timestamp'].strftime('%m-%d %H:%M')}: "
-                  f"Priority {row['priority_usage_percent']:5.1f}% "
-                  f"({int(row['priority_claimed'])}/{int(row['priority_total'])}), "
-                  f"Shared {row['shared_usage_percent']:5.1f}% "
-                  f"({int(row['shared_claimed'])}/{int(row['shared_total'])}), "
-                  f"Backfill {row['backfill_usage_percent']:5.1f}% "
-                  f"({int(row['backfill_claimed'])}/{int(row['backfill_total'])})")
+    # Print results
+    print_analysis_results(results)
 
 
 if __name__ == "__main__":
