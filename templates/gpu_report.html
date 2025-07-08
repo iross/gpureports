@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ title }}</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            border-radius: 10px;
+            margin-bottom: 30px;
+            text-align: center;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        
+        .header h1 {
+            margin: 0;
+            font-size: 2.5em;
+            font-weight: 300;
+        }
+        
+        .header .subtitle {
+            font-size: 1.2em;
+            margin-top: 10px;
+            opacity: 0.9;
+        }
+        
+        .metadata {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 30px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+        
+        .metadata h2 {
+            color: #667eea;
+            margin-top: 0;
+            border-bottom: 2px solid #667eea;
+            padding-bottom: 10px;
+        }
+        
+        .notes {
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 30px;
+        }
+        
+        .notes h3 {
+            color: #856404;
+            margin-top: 0;
+        }
+        
+        .notes ul {
+            margin: 10px 0;
+            padding-left: 20px;
+        }
+        
+        .excluded-hosts {
+            background: #f8d7da;
+            border: 1px solid #f5c6cb;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 30px;
+        }
+        
+        .excluded-hosts h3 {
+            color: #721c24;
+            margin-top: 0;
+        }
+        
+        .filtering-impact {
+            background: #d1ecf1;
+            border: 1px solid #bee5eb;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 30px;
+        }
+        
+        .filtering-impact h3 {
+            color: #0c5460;
+            margin-top: 0;
+        }
+        
+        .summary-section {
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            margin-bottom: 30px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+        
+        .summary-section h2 {
+            color: #667eea;
+            margin-top: 0;
+            border-bottom: 2px solid #667eea;
+            padding-bottom: 10px;
+        }
+        
+        .utilization-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }
+        
+        .utilization-table th,
+        .utilization-table td {
+            text-align: left;
+            padding: 12px;
+            border-bottom: 1px solid #ddd;
+        }
+        
+        .utilization-table th {
+            background-color: #667eea;
+            color: white;
+            font-weight: 600;
+        }
+        
+        .utilization-table tr:hover {
+            background-color: #f5f5f5;
+        }
+        
+        .device-group {
+            margin-bottom: 40px;
+        }
+        
+        .device-group h3 {
+            color: #4a5568;
+            font-size: 1.4em;
+            margin-bottom: 20px;
+            padding: 10px 0;
+            border-bottom: 2px solid #e2e8f0;
+        }
+        
+        .device-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        
+        .device-table th,
+        .device-table td {
+            text-align: left;
+            padding: 10px;
+            border-bottom: 1px solid #e2e8f0;
+        }
+        
+        .device-table th {
+            background-color: #4a5568;
+            color: white;
+            font-weight: 600;
+        }
+        
+        .device-table tr:nth-child(even) {
+            background-color: #f7fafc;
+        }
+        
+        .device-table tr:hover {
+            background-color: #edf2f7;
+        }
+        
+        .device-table .total-row {
+            background-color: #e2e8f0 !important;
+            font-weight: 600;
+            border-top: 2px solid #4a5568;
+        }
+        
+        .cluster-summary {
+            background: linear-gradient(135deg, #48bb78 0%, #38a169 100%);
+            color: white;
+            padding: 30px;
+            border-radius: 10px;
+            margin-bottom: 30px;
+        }
+        
+        .cluster-summary h2 {
+            margin-top: 0;
+            border-bottom: 2px solid rgba(255, 255, 255, 0.3);
+            padding-bottom: 10px;
+        }
+        
+        .cluster-summary .summary-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }
+        
+        .cluster-summary .summary-table th,
+        .cluster-summary .summary-table td {
+            text-align: left;
+            padding: 12px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        
+        .cluster-summary .summary-table th {
+            background-color: rgba(255, 255, 255, 0.1);
+            font-weight: 600;
+        }
+        
+        .cluster-summary .summary-table .total-row {
+            background-color: rgba(255, 255, 255, 0.1);
+            font-weight: 700;
+            border-top: 2px solid rgba(255, 255, 255, 0.3);
+        }
+        
+        .percentage {
+            font-weight: 600;
+        }
+        
+        .percentage.high {
+            color: #38a169;
+        }
+        
+        .percentage.medium {
+            color: #d69e2e;
+        }
+        
+        .percentage.low {
+            color: #e53e3e;
+        }
+        
+        .chart-container {
+            text-align: center;
+            margin: 30px 0;
+        }
+        
+        .chart-container img {
+            max-width: 100%;
+            height: auto;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        
+        .footer {
+            text-align: center;
+            padding: 30px;
+            color: #718096;
+            font-size: 0.9em;
+            border-top: 1px solid #e2e8f0;
+            margin-top: 40px;
+        }
+        
+        @media (max-width: 768px) {
+            body {
+                padding: 10px;
+            }
+            
+            .header h1 {
+                font-size: 2em;
+            }
+            
+            .header .subtitle {
+                font-size: 1em;
+            }
+            
+            .utilization-table,
+            .device-table {
+                font-size: 0.9em;
+            }
+            
+            .utilization-table th,
+            .utilization-table td,
+            .device-table th,
+            .device-table td {
+                padding: 8px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>{{ title }}</h1>
+        <div class="subtitle">{{ subtitle }}</div>
+    </div>
+    
+    <div class="metadata">
+        <h2>Report Information</h2>
+        <p><strong>Period:</strong> {{ period }}</p>
+        <p><strong>Intervals:</strong> {{ intervals }}</p>
+        <p><strong>Generated:</strong> {{ generated_at }}</p>
+    </div>
+    
+    {% if notes %}
+    <div class="notes">
+        <h3>⚠️ Notes</h3>
+        <ul>
+        {% for note in notes %}
+            <li>{{ note }}</li>
+        {% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+    
+    {% if excluded_hosts %}
+    <div class="excluded-hosts">
+        <h3>🚫 Excluded Hosts</h3>
+        <ul>
+        {% for host, reason in excluded_hosts.items() %}
+            <li><strong>{{ host }}:</strong> {{ reason }}</li>
+        {% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+    
+    {% if filtering_impact %}
+    <div class="filtering-impact">
+        <h3>📊 Filtering Impact</h3>
+        <p><strong>Records excluded:</strong> {{ filtering_impact.excluded|number_format }}</p>
+        <p><strong>Records analyzed:</strong> {{ filtering_impact.analyzed|number_format }}</p>
+    </div>
+    {% endif %}
+    
+    {% if chart_path %}
+    <div class="chart-container">
+        <h2>GPU Utilization Chart</h2>
+        <img src="{{ chart_path }}" alt="GPU Utilization Chart" />
+    </div>
+    {% endif %}
+    
+    {% if simple_summary %}
+    <div class="summary-section">
+        <h2>Utilization Summary</h2>
+        <table class="utilization-table">
+            <thead>
+                <tr>
+                    <th>Class</th>
+                    <th>Utilization</th>
+                    <th>Average GPUs</th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for class_name, stats in simple_summary.items() %}
+                <tr>
+                    <td>{{ class_name }}</td>
+                    <td><span class="percentage {{ 'high' if stats.allocation_usage_percent > 70 else 'medium' if stats.allocation_usage_percent > 40 else 'low' }}">{{ "%.1f"|format(stats.allocation_usage_percent) }}%</span></td>
+                    <td>{{ "%.1f"|format(stats.avg_claimed) }} / {{ "%.1f"|format(stats.avg_total_available) }}</td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+    
+    {% if device_stats %}
+    <div class="summary-section">
+        <h2>Usage by Device Type</h2>
+        
+        {% for class_name, device_data in device_stats.items() %}
+            {% if device_data %}
+            <div class="device-group">
+                <h3>{{ class_name }}</h3>
+                <table class="device-table">
+                    <thead>
+                        <tr>
+                            <th>Device Type</th>
+                            <th>Utilization</th>
+                            <th>Average GPUs</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                    {% for device_type, stats in device_data.items() %}
+                        <tr>
+                            <td>{{ device_type }}</td>
+                            <td><span class="percentage {{ 'high' if stats.allocation_usage_percent > 70 else 'medium' if stats.allocation_usage_percent > 40 else 'low' }}">{{ "%.1f"|format(stats.allocation_usage_percent) }}%</span></td>
+                            <td>{{ "%.1f"|format(stats.avg_claimed) }} / {{ "%.1f"|format(stats.avg_total_available) }}</td>
+                        </tr>
+                    {% endfor %}
+                    {% if class_totals[class_name] %}
+                        <tr class="total-row">
+                            <td><strong>TOTAL {{ class_name }}</strong></td>
+                            <td><strong><span class="percentage {{ 'high' if class_totals[class_name].percent > 70 else 'medium' if class_totals[class_name].percent > 40 else 'low' }}">{{ "%.1f"|format(class_totals[class_name].percent) }}%</span></strong></td>
+                            <td><strong>{{ "%.1f"|format(class_totals[class_name].claimed) }} / {{ "%.1f"|format(class_totals[class_name].total) }}</strong></td>
+                        </tr>
+                    {% endif %}
+                    </tbody>
+                </table>
+            </div>
+            {% endif %}
+        {% endfor %}
+    </div>
+    {% endif %}
+    
+    {% if cluster_summary %}
+    <div class="cluster-summary">
+        <h2>📈 Cluster Summary</h2>
+        <table class="summary-table">
+            <thead>
+                <tr>
+                    <th>Class</th>
+                    <th>Utilization</th>
+                    <th>Average GPUs</th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for class_name, stats in cluster_summary.items() %}
+                {% if class_name != 'TOTAL' %}
+                <tr>
+                    <td>{{ class_name }}</td>
+                    <td><span class="percentage">{{ "%.1f"|format(stats.percent) }}%</span></td>
+                    <td>{{ "%.1f"|format(stats.claimed) }} / {{ "%.1f"|format(stats.total) }}</td>
+                </tr>
+                {% endif %}
+            {% endfor %}
+            {% if cluster_summary.TOTAL %}
+                <tr class="total-row">
+                    <td><strong>TOTAL</strong></td>
+                    <td><strong><span class="percentage">{{ "%.1f"|format(cluster_summary.TOTAL.percent) }}%</span></strong></td>
+                    <td><strong>{{ "%.1f"|format(cluster_summary.TOTAL.claimed) }} / {{ "%.1f"|format(cluster_summary.TOTAL.total) }}</strong></td>
+                </tr>
+            {% endif %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+    
+    <div class="footer">
+        <p>Generated by CHTC GPU Health Monitoring System | {{ generated_at }}</p>
+    </div>
+</body>
+</html>

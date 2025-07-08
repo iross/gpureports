@@ -13,7 +13,11 @@ import typer
 import sqlite3
 import json
 import yaml
+import base64
+import io
 from typing import Optional, Dict
+from jinja2 import Environment, FileSystemLoader
+from pathlib import Path
 
 # Define the filtering functions locally to avoid htcondor dependency
 
@@ -739,8 +743,244 @@ def print_gpu_model_analysis(analysis: dict):
         print("\nNo inactive GPUs found.")
 
 
-def print_analysis_results(results: dict):
-    """Print analysis results in a formatted way."""
+def create_utilization_chart(results: dict, output_path: Optional[str] = None) -> Optional[str]:
+    """
+    Create a utilization chart for the HTML report.
+    
+    Args:
+        results: Analysis results dictionary
+        output_path: Path to save the chart image (optional)
+    
+    Returns:
+        Path to the chart image or base64 encoded image data
+    """
+    try:
+        import matplotlib.pyplot as plt
+        
+        # Create figure
+        fig, ax = plt.subplots(figsize=(12, 8))
+        
+        # Determine data source
+        if "device_stats" in results:
+            # Create device-grouped chart
+            device_stats = results["device_stats"]
+            
+            # Calculate totals for each class
+            class_totals = {}
+            for class_name, device_data in device_stats.items():
+                if device_data:
+                    total_claimed = sum(stats['avg_claimed'] for stats in device_data.values())
+                    total_available = sum(stats['avg_total_available'] for stats in device_data.values())
+                    if total_available > 0:
+                        class_totals[class_name] = {
+                            'claimed': total_claimed,
+                            'total': total_available,
+                            'percent': (total_claimed / total_available) * 100
+                        }
+            
+            # Create bar chart
+            classes = list(class_totals.keys())
+            percentages = [class_totals[cls]['percent'] for cls in classes]
+            
+            colors = ['#667eea', '#48bb78', '#ed8936']
+            bars = ax.bar(classes, percentages, color=colors[:len(classes)])
+            
+            # Add value labels on bars
+            for bar, pct in zip(bars, percentages):
+                height = bar.get_height()
+                ax.text(bar.get_x() + bar.get_width()/2., height + 1,
+                       f'{pct:.1f}%', ha='center', va='bottom', fontweight='bold')
+            
+            ax.set_ylabel('Utilization Percentage')
+            ax.set_title('GPU Utilization by Class', fontsize=16, fontweight='bold')
+            ax.set_ylim(0, 100)
+            
+        elif "allocation_stats" in results:
+            # Create simple allocation chart
+            allocation_stats = results["allocation_stats"]
+            
+            classes = list(allocation_stats.keys())
+            percentages = [allocation_stats[cls]['allocation_usage_percent'] for cls in classes]
+            
+            colors = ['#667eea', '#48bb78', '#ed8936']
+            bars = ax.bar(classes, percentages, color=colors[:len(classes)])
+            
+            # Add value labels on bars
+            for bar, pct in zip(bars, percentages):
+                height = bar.get_height()
+                ax.text(bar.get_x() + bar.get_width()/2., height + 1,
+                       f'{pct:.1f}%', ha='center', va='bottom', fontweight='bold')
+            
+            ax.set_ylabel('Utilization Percentage')
+            ax.set_title('GPU Utilization by Class', fontsize=16, fontweight='bold')
+            ax.set_ylim(0, 100)
+        
+        # Style the chart
+        ax.grid(True, alpha=0.3)
+        ax.set_axisbelow(True)
+        
+        # Add background color
+        ax.set_facecolor('#f8f9fa')
+        fig.patch.set_facecolor('white')
+        
+        plt.tight_layout()
+        
+        if output_path:
+            plt.savefig(output_path, dpi=300, bbox_inches='tight')
+            plt.close()
+            return output_path
+        else:
+            # Return base64 encoded image
+            buffer = io.BytesIO()
+            plt.savefig(buffer, format='png', dpi=300, bbox_inches='tight')
+            buffer.seek(0)
+            image_base64 = base64.b64encode(buffer.getvalue()).decode()
+            plt.close()
+            return f"data:image/png;base64,{image_base64}"
+            
+    except ImportError:
+        print("Warning: matplotlib not available, charts will not be generated")
+        return None
+    except Exception as e:
+        print(f"Warning: Error generating chart: {e}")
+        return None
+
+
+def number_format(value):
+    """Format numbers with commas for thousands separator."""
+    if isinstance(value, (int, float)):
+        return f"{value:,}"
+    return str(value)
+
+
+def generate_html_report(results: dict, output_file: Optional[str] = None) -> str:
+    """
+    Generate an HTML report from analysis results.
+    
+    Args:
+        results: Analysis results dictionary
+        output_file: Optional path to save HTML file
+    
+    Returns:
+        HTML content as string
+    """
+    if "error" in results:
+        return f"<html><body><h1>Error</h1><p>{results['error']}</p></body></html>"
+    
+    metadata = results["metadata"]
+    
+    # Prepare template data
+    template_data = {
+        'title': 'CHTC GPU UTILIZATION REPORT',
+        'subtitle': f"Analysis Period: {metadata['start_time'].strftime('%Y-%m-%d %H:%M')} to {metadata['end_time'].strftime('%Y-%m-%d %H:%M')}",
+        'period': f"{metadata['start_time'].strftime('%Y-%m-%d %H:%M')} to {metadata['end_time'].strftime('%Y-%m-%d %H:%M')} ({metadata['num_intervals']} intervals)",
+        'intervals': metadata['num_intervals'],
+        'generated_at': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'notes': [
+            "A100-80GB - voyles2000 appears to be prioritized but not using PrioritizedProjects attribute",
+            "A100-40GB - Interactive slots are not filtered out"
+        ]
+    }
+    
+    # Add excluded hosts information
+    excluded_hosts = metadata.get('excluded_hosts', {})
+    if excluded_hosts:
+        template_data['excluded_hosts'] = excluded_hosts
+    
+    # Add filtering impact
+    filtered_info = metadata.get('filtered_hosts_info', [])
+    if filtered_info:
+        total_original = sum(info['original_count'] for info in filtered_info)
+        total_filtered = sum(info['filtered_count'] for info in filtered_info)
+        records_excluded = total_original - total_filtered
+        if records_excluded > 0:
+            template_data['filtering_impact'] = {
+                'excluded': records_excluded,
+                'analyzed': total_filtered
+            }
+    
+    # Generate chart
+    chart_path = create_utilization_chart(results)
+    if chart_path:
+        template_data['chart_path'] = chart_path
+    
+    # Add utilization data
+    if "allocation_stats" in results:
+        template_data['simple_summary'] = results["allocation_stats"]
+    
+    elif "device_stats" in results:
+        template_data['device_stats'] = results["device_stats"]
+        
+        # Calculate class totals
+        class_totals = {}
+        device_stats = results["device_stats"]
+        
+        for class_name, device_data in device_stats.items():
+            if device_data:
+                total_claimed = sum(stats['avg_claimed'] for stats in device_data.values())
+                total_available = sum(stats['avg_total_available'] for stats in device_data.values())
+                if total_available > 0:
+                    class_totals[class_name] = {
+                        'claimed': total_claimed,
+                        'total': total_available,
+                        'percent': (total_claimed / total_available) * 100
+                    }
+        
+        template_data['class_totals'] = class_totals
+        
+        # Calculate cluster summary
+        if class_totals:
+            overall_claimed = sum(stats['claimed'] for stats in class_totals.values())
+            overall_total = sum(stats['total'] for stats in class_totals.values())
+            overall_percent = (overall_claimed / overall_total * 100) if overall_total > 0 else 0
+            
+            cluster_summary = dict(class_totals)
+            cluster_summary['TOTAL'] = {
+                'claimed': overall_claimed,
+                'total': overall_total,
+                'percent': overall_percent
+            }
+            template_data['cluster_summary'] = cluster_summary
+    
+    # Load and render template
+    template_dir = Path(__file__).parent / "templates"
+    env = Environment(loader=FileSystemLoader(template_dir))
+    env.filters['number_format'] = number_format
+    
+    template = env.get_template('gpu_report.html')
+    html_content = template.render(**template_data)
+    
+    # Save to file if specified
+    if output_file:
+        try:
+            with open(output_file, 'w') as f:
+                f.write(html_content)
+            print(f"HTML report saved to: {output_file}")
+        except Exception as e:
+            import sys
+            print(f"Error saving HTML report to {output_file}: {e}", file=sys.stderr)
+            # Fall back to stdout
+            print(html_content)
+            return html_content
+    
+    return html_content
+
+
+def print_analysis_results(results: dict, output_format: str = "text", output_file: Optional[str] = None):
+    """Print analysis results in a formatted way.
+    
+    Args:
+        results: Analysis results dictionary
+        output_format: Output format ('text' or 'html')
+        output_file: Optional file path to save output
+    """
+    if output_format == "html":
+        html_content = generate_html_report(results, output_file)
+        if not output_file:
+            print(html_content)
+        return
+    
+    # Original text output
     if "error" in results:
         print(results["error"])
         return
@@ -884,7 +1124,9 @@ def main(
     snapshot_time: Optional[str] = typer.Option(None, help="Specific time for GPU model snapshot (YYYY-MM-DD HH:MM:SS)"),
     window_minutes: int = typer.Option(5, help="Time window in minutes for snapshot search"),
     exclude_hosts: Optional[str] = typer.Option(None, help="JSON string of hosts to exclude from analysis with reasons, e.g., '{\"host1\": \"misconfigured\", \"host2\": \"maintenance\"}'"),
-    exclude_hosts_yaml: Optional[str] = typer.Option("masked_hosts.yaml", help="Path to YAML file containing host exclusions in format: hostname1: reason1")
+    exclude_hosts_yaml: Optional[str] = typer.Option("masked_hosts.yaml", help="Path to YAML file containing host exclusions in format: hostname1: reason1"),
+    output_format: str = typer.Option("text", help="Output format: 'text' or 'html'"),
+    output_file: Optional[str] = typer.Option(None, help="Output file path (optional)")
 ):
     """
     Calculate GPU usage statistics for Priority, Shared, and Backfill classes.
@@ -962,7 +1204,7 @@ def main(
         return
     
     # Print results
-    print_analysis_results(results)
+    print_analysis_results(results, output_format, output_file)
 
 
 if __name__ == "__main__":
