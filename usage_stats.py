@@ -11,14 +11,39 @@ import pandas as pd
 import datetime
 import typer
 import sqlite3
-from typing import Optional
+import json
+import yaml
+from typing import Optional, Dict
 
 # Define the filtering functions locally to avoid htcondor dependency
+
+# Global variable to store host exclusion configuration
+HOST_EXCLUSIONS = {}
+FILTERED_HOSTS_INFO = []
 
 def filter_df(df, utilization="", state="", host=""):
     """Filter DataFrame based on utilization type, state, and host."""
     # Always work with a copy to avoid SettingWithCopyWarning
     df = df.copy()
+    
+    # Apply host exclusions if configured
+    if HOST_EXCLUSIONS:
+        original_count = len(df)
+        # Filter out excluded hosts
+        for excluded_host in HOST_EXCLUSIONS.keys():
+            df = df[~df['Machine'].str.contains(excluded_host, case=False, na=False)]
+        
+        filtered_count = len(df)
+        if filtered_count < original_count:
+            # Track that filtering occurred
+            filtered_info = {
+                'original_count': original_count,
+                'filtered_count': filtered_count,
+                'excluded_hosts': HOST_EXCLUSIONS
+            }
+            # Update global tracking (avoid duplicates)
+            if filtered_info not in FILTERED_HOSTS_INFO:
+                FILTERED_HOSTS_INFO.append(filtered_info)
     
     if utilization == "Backfill":
         df = df[(df['State'] == state if state != "" else True) & (df['Name'].str.contains(host) if host != "" else True) & (df['Name'].str.contains("backfill"))]
@@ -337,6 +362,51 @@ def calculate_allocation_usage_by_device(df: pd.DataFrame, host: str = "", inclu
     return stats
 
 
+def load_host_exclusions(exclusions_config: Optional[str] = None, yaml_file: Optional[str] = None) -> Dict[str, str]:
+    """
+    Load host exclusions from JSON string or YAML file.
+    
+    Args:
+        exclusions_config: JSON string with host exclusions in format:
+                          {"hostname1": "reason1", "hostname2": "reason2"}
+        yaml_file: Path to YAML file with host exclusions
+    
+    Returns:
+        Dictionary mapping hostnames to exclusion reasons
+    """
+    if yaml_file:
+        try:
+            with open(yaml_file, 'r') as f:
+                exclusions = yaml.safe_load(f)
+            if exclusions is None:
+                return {}  # Empty file
+            if not isinstance(exclusions, dict):
+                raise ValueError("YAML file must contain a dictionary mapping hostnames to reasons")
+            return exclusions
+        except FileNotFoundError:
+            # If it's the default file, silently ignore if it doesn't exist
+            if yaml_file == "masked_hosts.yaml":
+                return {}
+            raise ValueError(f"YAML file not found: {yaml_file}")
+        except yaml.YAMLError as e:
+            raise ValueError(f"Invalid YAML format: {e}")
+        except Exception as e:
+            raise ValueError(f"Error reading YAML file: {e}")
+    
+    if not exclusions_config:
+        return {}
+    
+    try:
+        exclusions = json.loads(exclusions_config)
+        if not isinstance(exclusions, dict):
+            raise ValueError("Host exclusions must be a JSON object (dictionary)")
+        return exclusions
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Invalid JSON format for host exclusions: {e}")
+    except Exception as e:
+        raise ValueError(f"Error processing host exclusions: {e}")
+
+
 def run_analysis(
     db_path: str,
     hours_back: int = 24,
@@ -345,14 +415,25 @@ def run_analysis(
     bucket_minutes: int = 15,
     end_time: Optional[datetime.datetime] = None,
     group_by_device: bool = False,
-    all_devices: bool = False
+    all_devices: bool = False,
+    exclude_hosts: Optional[str] = None,
+    exclude_hosts_yaml: Optional[str] = None
 ) -> dict:
     """
     Core analysis function that can be called programmatically.
     
+    Args:
+        exclude_hosts: JSON string with host exclusions
+        exclude_hosts_yaml: Path to YAML file with host exclusions
+    
     Returns:
         Dictionary containing analysis results and metadata
     """
+    # Set up host exclusions
+    global HOST_EXCLUSIONS, FILTERED_HOSTS_INFO
+    HOST_EXCLUSIONS = load_host_exclusions(exclude_hosts, exclude_hosts_yaml)
+    FILTERED_HOSTS_INFO = []  # Reset tracking
+    
     # Get filtered data
     df = get_time_filtered_data(db_path, hours_back, end_time)
     
@@ -370,7 +451,9 @@ def run_analysis(
             "start_time": df['timestamp'].min(),
             "end_time": df['timestamp'].max(),
             "num_intervals": num_intervals,
-            "total_records": len(df)
+            "total_records": len(df),
+            "excluded_hosts": HOST_EXCLUSIONS,
+            "filtered_hosts_info": FILTERED_HOSTS_INFO
         }
     }
     
@@ -608,7 +691,7 @@ def print_gpu_model_analysis(analysis: dict):
     print(f"Snapshot Time: {snapshot_time.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"Time Difference: {abs((snapshot_time - target_time).total_seconds())} seconds")
     
-    print(f"\nSUMMARY:")
+    print("\nSUMMARY:")
     print(f"{'-'*40}")
     print(f"Total GPUs: {summary['total_gpus']}")
     print(f"Active (with jobs): {summary['claimed_gpus']} ({summary['utilization_percent']:.1f}%)")
@@ -616,7 +699,7 @@ def print_gpu_model_analysis(analysis: dict):
     print(f"Avg GPU Usage: {summary['avg_gpu_usage_percent']:.1f}%")
     print(f"Machines: {summary['num_machines']}")
     
-    print(f"\nBY UTILIZATION CLASS:")
+    print("\nBY UTILIZATION CLASS:")
     print(f"{'-'*40}")
     for class_name, stats in by_class.items():
         if stats['total'] > 0:
@@ -640,7 +723,7 @@ def print_gpu_model_analysis(analysis: dict):
             machine = (job.get('Machine') or 'N/A')[:19]
             print(f"{user:<20} {job_id:<15} {gpu_id:<12} {machine:<20}")
     else:
-        print(f"\nNo active jobs found.")
+        print("\nNo active jobs found.")
     
     if inactive_gpus:
         print(f"\nINACTIVE GPUs ({len(inactive_gpus)}):")
@@ -653,7 +736,7 @@ def print_gpu_model_analysis(analysis: dict):
             priority_projects = (gpu.get('PrioritizedProjects') or 'None')[:29]
             print(f"{gpu_id:<12} {machine:<20} {priority_projects:<30}")
     else:
-        print(f"\nNo inactive GPUs found.")
+        print("\nNo inactive GPUs found.")
 
 
 def print_analysis_results(results: dict):
@@ -673,8 +756,26 @@ def print_analysis_results(results: dict):
     print("A100-80GB - voyles2000 appears to be prioritized but not using PrioritizedProjects attribute")
     print("A100-40GB - Interactive slots are not filtered out")
     
+    # Show host exclusion information
+    excluded_hosts = metadata.get('excluded_hosts', {})
+    if excluded_hosts:
+        print("\nEXCLUDED HOSTS:")
+        for host, reason in excluded_hosts.items():
+            print(f"  {host}: {reason}")
+    
+    # Show filtering impact
+    filtered_info = metadata.get('filtered_hosts_info', [])
+    if filtered_info:
+        total_original = sum(info['original_count'] for info in filtered_info)
+        total_filtered = sum(info['filtered_count'] for info in filtered_info)
+        records_excluded = total_original - total_filtered
+        if records_excluded > 0:
+            print("\nFILTERING IMPACT:")
+            print(f"  Records excluded: {records_excluded:,}")
+            print(f"  Records analyzed: {total_filtered:,}")
+    
     if "allocation_stats" in results:
-        print(f"\nUtilization Summary:")
+        print("\nUtilization Summary:")
         print(f"{'-'*70}")
         allocation_stats = results["allocation_stats"]
         
@@ -683,7 +784,7 @@ def print_analysis_results(results: dict):
                   f"({stats['avg_claimed']:5.1f}/{stats['avg_total_available']:5.1f} GPUs)")
     
     elif "device_stats" in results:
-        print(f"\nUsage by Device Type:")
+        print("\nUsage by Device Type:")
         print(f"{'-'*70}")
         device_stats = results["device_stats"]
         
@@ -720,7 +821,7 @@ def print_analysis_results(results: dict):
         
         # Display overall summary
         if grand_totals:
-            print(f"\nCluster Summary:")
+            print("\nCluster Summary:")
             print(f"{'-'*70}")
             
             overall_claimed = sum(stats['claimed'] for stats in grand_totals.values())
@@ -736,7 +837,7 @@ def print_analysis_results(results: dict):
                   f"({overall_claimed:5.1f}/{overall_total:5.1f} GPUs)")
     
     elif "timeseries_data" in results:
-        print(f"\nTime Series Analysis:")
+        print("\nTime Series Analysis:")
         print(f"{'-'*70}")
         ts_df = results["timeseries_data"]
         
@@ -754,7 +855,7 @@ def print_analysis_results(results: dict):
                       f"({avg_claimed:5.1f}/{avg_total:5.1f} GPUs)")
         
         # Show recent trend
-        print(f"\nRecent Trend:")
+        print("\nRecent Trend:")
         print(f"{'-'*70}")
         recent_df = ts_df.tail(5)
         for _, row in recent_df.iterrows():
@@ -777,24 +878,36 @@ def main(
     ),
     bucket_minutes: int = typer.Option(15, help="Time bucket size in minutes for timeseries analysis"),
     end_time: Optional[str] = typer.Option(None, help="End time for analysis (YYYY-MM-DD HH:MM:SS), defaults to latest in DB"),
-    group_by_device: bool = typer.Option(False, help="Group results by GPU device type"),
+    group_by_device: bool = typer.Option(True, help="Group results by GPU device type"),
     all_devices: bool = typer.Option(False, help="Include all device types (if False, filters out older GPUs)"),
     gpu_model: Optional[str] = typer.Option(None, help="GPU model for snapshot analysis (e.g., 'NVIDIA A100-SXM4-80GB')"),
     snapshot_time: Optional[str] = typer.Option(None, help="Specific time for GPU model snapshot (YYYY-MM-DD HH:MM:SS)"),
-    window_minutes: int = typer.Option(5, help="Time window in minutes for snapshot search")
+    window_minutes: int = typer.Option(5, help="Time window in minutes for snapshot search"),
+    exclude_hosts: Optional[str] = typer.Option(None, help="JSON string of hosts to exclude from analysis with reasons, e.g., '{\"host1\": \"misconfigured\", \"host2\": \"maintenance\"}'"),
+    exclude_hosts_yaml: Optional[str] = typer.Option("masked_hosts.yaml", help="Path to YAML file containing host exclusions in format: hostname1: reason1")
 ):
     """
     Calculate GPU usage statistics for Priority, Shared, and Backfill classes.
     
     This tool provides flexible analysis of GPU usage patterns over time.
     """
+    # Validate host exclusion options
+    if exclude_hosts and exclude_hosts_yaml and exclude_hosts_yaml != "masked_hosts.yaml":
+        print("Error: Cannot use both --exclude-hosts and --exclude-hosts-yaml. Choose one.")
+        return
+    
+    # If both exclude_hosts is provided and we're using the default yaml file,
+    # prioritize the explicit exclude_hosts option
+    if exclude_hosts and exclude_hosts_yaml == "masked_hosts.yaml":
+        exclude_hosts_yaml = None
+    
     # Parse end_time if provided
     parsed_end_time = None
     if end_time:
         try:
             parsed_end_time = datetime.datetime.strptime(end_time, "%Y-%m-%d %H:%M:%S")
         except ValueError:
-            print(f"Error: Invalid end_time format. Use YYYY-MM-DD HH:MM:SS")
+            print("Error: Invalid end_time format. Use YYYY-MM-DD HH:MM:SS")
             return
     
     # Handle GPU model snapshot analysis
@@ -807,7 +920,7 @@ def main(
         try:
             parsed_snapshot_time = datetime.datetime.strptime(snapshot_time, "%Y-%m-%d %H:%M:%S")
         except ValueError:
-            print(f"Error: Invalid snapshot_time format. Use YYYY-MM-DD HH:MM:SS")
+            print("Error: Invalid snapshot_time format. Use YYYY-MM-DD HH:MM:SS")
             return
         
         if gpu_model:
@@ -826,21 +939,27 @@ def main(
             for i, model in enumerate(available_models, 1):
                 print(f"{i:2d}. {model}")
             
-            print(f"\nTo analyze a specific model, use:")
+            print("\nTo analyze a specific model, use:")
             print(f"  --analysis-type gpu_model_snapshot --gpu-model \"<model_name>\" --snapshot-time \"{snapshot_time}\"")
         return
     
     # Run the standard analysis
-    results = run_analysis(
-        db_path=db_path,
-        hours_back=hours_back,
-        host=host,
-        analysis_type=analysis_type,
-        bucket_minutes=bucket_minutes,
-        end_time=parsed_end_time,
-        group_by_device=group_by_device,
-        all_devices=all_devices
-    )
+    try:
+        results = run_analysis(
+            db_path=db_path,
+            hours_back=hours_back,
+            host=host,
+            analysis_type=analysis_type,
+            bucket_minutes=bucket_minutes,
+            end_time=parsed_end_time,
+            group_by_device=group_by_device,
+            all_devices=all_devices,
+            exclude_hosts=exclude_hosts,
+            exclude_hosts_yaml=exclude_hosts_yaml
+        )
+    except ValueError as e:
+        print(f"Error: {e}")
+        return
     
     # Print results
     print_analysis_results(results)
