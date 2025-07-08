@@ -386,6 +386,276 @@ def run_analysis(
     return result
 
 
+def get_gpu_models_at_time(
+    db_path: str,
+    target_time: datetime.datetime,
+    window_minutes: int = 5
+) -> list:
+    """
+    Get all GPU models available at a specific time.
+    
+    Args:
+        db_path: Path to SQLite database
+        target_time: Time to query for GPU models
+        window_minutes: Time window around target_time to search (default: 5 minutes)
+    
+    Returns:
+        List of GPU model names available at the specified time
+    """
+    conn = sqlite3.connect(db_path)
+    
+    # Define time window
+    start_time = target_time - datetime.timedelta(minutes=window_minutes)
+    end_time = target_time + datetime.timedelta(minutes=window_minutes)
+    
+    query = """
+    SELECT DISTINCT GPUs_DeviceName
+    FROM gpu_state 
+    WHERE GPUs_DeviceName IS NOT NULL
+    AND timestamp BETWEEN ? AND ?
+    ORDER BY GPUs_DeviceName
+    """
+    
+    df = pd.read_sql_query(query, conn, params=[start_time, end_time])
+    conn.close()
+    
+    return df['GPUs_DeviceName'].tolist()
+
+
+def get_gpu_model_activity_at_time(
+    db_path: str,
+    gpu_model: str,
+    target_time: datetime.datetime,
+    window_minutes: int = 5
+) -> pd.DataFrame:
+    """
+    Get detailed activity for a specific GPU model at a specific time.
+    
+    Args:
+        db_path: Path to SQLite database
+        gpu_model: GPU model name (e.g., 'NVIDIA A100-SXM4-80GB')
+        target_time: Time to query for activity
+        window_minutes: Time window around target_time to search (default: 5 minutes)
+    
+    Returns:
+        DataFrame with detailed GPU activity information
+    """
+    conn = sqlite3.connect(db_path)
+    
+    # Define time window
+    start_time = target_time - datetime.timedelta(minutes=window_minutes)
+    end_time = target_time + datetime.timedelta(minutes=window_minutes)
+    
+    query = """
+    SELECT timestamp, Name, AssignedGPUs, State, GPUs_DeviceName, 
+           GPUsAverageUsage, Machine, RemoteOwner, GlobalJobId,
+           PrioritizedProjects
+    FROM gpu_state 
+    WHERE GPUs_DeviceName = ? 
+    AND timestamp BETWEEN ? AND ?
+    ORDER BY timestamp DESC, Machine, AssignedGPUs
+    """
+    
+    df = pd.read_sql_query(query, conn, params=[gpu_model, start_time, end_time])
+    conn.close()
+    
+    if len(df) > 0:
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+    
+    return df
+
+
+def analyze_gpu_model_at_time(
+    db_path: str,
+    gpu_model: str,
+    target_time: datetime.datetime,
+    window_minutes: int = 5
+) -> dict:
+    """
+    Analyze what's happening with a specific GPU model at a specific time.
+    
+    Args:
+        db_path: Path to SQLite database
+        gpu_model: GPU model name
+        target_time: Time to analyze
+        window_minutes: Time window to search
+    
+    Returns:
+        Dictionary with analysis results
+    """
+    df = get_gpu_model_activity_at_time(db_path, gpu_model, target_time, window_minutes)
+    
+    if len(df) == 0:
+        return {
+            "error": f"No data found for {gpu_model} around {target_time.strftime('%Y-%m-%d %H:%M:%S')}"
+        }
+    
+    # Get the closest timestamp to target
+    df['time_diff'] = abs(df['timestamp'] - target_time)
+    closest_time = df.loc[df['time_diff'].idxmin(), 'timestamp']
+    
+    # Filter to records from the closest timestamp
+    snapshot_df = df[df['timestamp'] == closest_time]
+    
+    # Analyze the snapshot - count unique GPUs only
+    unique_gpus = snapshot_df['AssignedGPUs'].dropna().nunique()
+    
+    # Count active GPUs (those actually running jobs with RemoteOwner)
+    active_gpus_count = snapshot_df[
+        (snapshot_df['State'] == 'Claimed') & 
+        (snapshot_df['RemoteOwner'].notna())
+    ]['AssignedGPUs'].dropna().nunique()
+    
+    # Count idle GPUs (those not running jobs)
+    idle_gpus_count = unique_gpus - active_gpus_count
+    
+    total_gpus = unique_gpus
+    claimed_gpus = active_gpus_count  # Rename for compatibility with existing code
+    unclaimed_gpus = idle_gpus_count  # Rename for compatibility with existing code
+    
+    # Categorize by utilization class
+    priority_gpus = filter_df(snapshot_df, "Priority", "", "")
+    shared_gpus = filter_df(snapshot_df, "Shared", "", "")
+    backfill_gpus = filter_df(snapshot_df, "Backfill", "", "")
+    
+    # Get unique machines
+    machines = snapshot_df['Machine'].unique()
+    
+    # Calculate utilization stats
+    claimed_with_usage = snapshot_df[
+        (snapshot_df['State'] == 'Claimed') & 
+        (snapshot_df['GPUsAverageUsage'].notna())
+    ]
+    
+    avg_utilization = claimed_with_usage['GPUsAverageUsage'].mean() if len(claimed_with_usage) > 0 else 0
+    
+    # Get job information - ensure unique GPU IDs
+    active_jobs_df = snapshot_df[
+        (snapshot_df['State'] == 'Claimed') & 
+        (snapshot_df['RemoteOwner'].notna())
+    ][['RemoteOwner', 'GlobalJobId', 'AssignedGPUs', 'Machine']].copy()
+    
+    # Remove duplicates based on AssignedGPUs, keeping first occurrence
+    active_jobs = active_jobs_df.drop_duplicates(subset=['AssignedGPUs'], keep='first')
+    
+    # Get inactive GPUs - ensure unique GPU IDs and exclude ones that appear in active jobs
+    inactive_gpus_df = snapshot_df[
+        snapshot_df['State'] == 'Unclaimed'
+    ][['AssignedGPUs', 'Machine', 'PrioritizedProjects']].copy()
+    
+    # Remove duplicates based on AssignedGPUs, keeping first occurrence
+    inactive_gpus_unique = inactive_gpus_df.drop_duplicates(subset=['AssignedGPUs'], keep='first')
+    
+    # Get list of GPU IDs that are active (have jobs running)
+    active_gpu_ids = set(active_jobs['AssignedGPUs'].dropna().tolist())
+    
+    # Filter out GPUs that appear in active jobs list
+    inactive_gpus = inactive_gpus_unique[~inactive_gpus_unique['AssignedGPUs'].isin(active_gpu_ids)]
+    
+    return {
+        "gpu_model": gpu_model,
+        "snapshot_time": closest_time,
+        "target_time": target_time,
+        "window_minutes": window_minutes,
+        "summary": {
+            "total_gpus": total_gpus,
+            "claimed_gpus": claimed_gpus,  # This is now active_gpus_count
+            "unclaimed_gpus": unclaimed_gpus,  # This is now idle_gpus_count
+            "utilization_percent": (claimed_gpus / total_gpus * 100) if total_gpus > 0 else 0,
+            "avg_gpu_usage_percent": avg_utilization * 100 if avg_utilization else 0,
+            "num_machines": len(machines)
+        },
+        "by_class": {
+            "Priority": {
+                "total": priority_gpus['AssignedGPUs'].dropna().nunique(),
+                "claimed": priority_gpus[priority_gpus['State'] == 'Claimed']['AssignedGPUs'].dropna().nunique()
+            },
+            "Shared": {
+                "total": shared_gpus['AssignedGPUs'].dropna().nunique(),
+                "claimed": shared_gpus[shared_gpus['State'] == 'Claimed']['AssignedGPUs'].dropna().nunique()
+            },
+            "Backfill": {
+                "total": backfill_gpus['AssignedGPUs'].dropna().nunique(),
+                "claimed": backfill_gpus[backfill_gpus['State'] == 'Claimed']['AssignedGPUs'].dropna().nunique()
+            }
+        },
+        "machines": list(machines),
+        "active_jobs": active_jobs.to_dict('records') if len(active_jobs) > 0 else [],
+        "inactive_gpus": inactive_gpus.to_dict('records') if len(inactive_gpus) > 0 else [],
+        "raw_data": snapshot_df
+    }
+
+
+def print_gpu_model_analysis(analysis: dict):
+    """Print GPU model analysis results in a formatted way."""
+    if "error" in analysis:
+        print(analysis["error"])
+        return
+    
+    gpu_model = analysis["gpu_model"]
+    snapshot_time = analysis["snapshot_time"]
+    target_time = analysis["target_time"]
+    summary = analysis["summary"]
+    by_class = analysis["by_class"]
+    machines = analysis["machines"]
+    active_jobs = analysis["active_jobs"]
+    inactive_gpus = analysis["inactive_gpus"]
+    
+    print(f"\n{'='*80}")
+    print(f"GPU MODEL ACTIVITY REPORT: {gpu_model}")
+    print(f"{'='*80}")
+    print(f"Target Time: {target_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Snapshot Time: {snapshot_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Time Difference: {abs((snapshot_time - target_time).total_seconds())} seconds")
+    
+    print(f"\nSUMMARY:")
+    print(f"{'-'*40}")
+    print(f"Total GPUs: {summary['total_gpus']}")
+    print(f"Active (with jobs): {summary['claimed_gpus']} ({summary['utilization_percent']:.1f}%)")
+    print(f"Idle (no jobs): {summary['unclaimed_gpus']}")
+    print(f"Avg GPU Usage: {summary['avg_gpu_usage_percent']:.1f}%")
+    print(f"Machines: {summary['num_machines']}")
+    
+    print(f"\nBY UTILIZATION CLASS:")
+    print(f"{'-'*40}")
+    for class_name, stats in by_class.items():
+        if stats['total'] > 0:
+            usage_pct = (stats['claimed'] / stats['total'] * 100) if stats['total'] > 0 else 0
+            print(f"{class_name:>10}: {stats['claimed']:2d}/{stats['total']:2d} ({usage_pct:5.1f}%)")
+    
+    print(f"\nMACHINES ({len(machines)}):")
+    print(f"{'-'*40}")
+    for machine in sorted(machines):
+        print(f"  {machine}")
+    
+    if active_jobs:
+        print(f"\nACTIVE JOBS ({len(active_jobs)}):")
+        print(f"{'-'*70}")
+        print(f"{'User':<20} {'Job ID':<15} {'GPU ID':<12} {'Machine':<20}")
+        print(f"{'-'*70}")
+        for job in active_jobs:
+            user = (job.get('RemoteOwner') or 'N/A')[:19]
+            job_id = (job.get('GlobalJobId') or 'N/A')[:14]
+            gpu_id = (job.get('AssignedGPUs') or 'N/A')[:11]
+            machine = (job.get('Machine') or 'N/A')[:19]
+            print(f"{user:<20} {job_id:<15} {gpu_id:<12} {machine:<20}")
+    else:
+        print(f"\nNo active jobs found.")
+    
+    if inactive_gpus:
+        print(f"\nINACTIVE GPUs ({len(inactive_gpus)}):")
+        print(f"{'-'*70}")
+        print(f"{'GPU ID':<12} {'Machine':<20} {'Priority Projects':<30}")
+        print(f"{'-'*70}")
+        for gpu in inactive_gpus:
+            gpu_id = (gpu.get('AssignedGPUs') or 'N/A')[:11]
+            machine = (gpu.get('Machine') or 'N/A')[:19]
+            priority_projects = (gpu.get('PrioritizedProjects') or 'None')[:29]
+            print(f"{gpu_id:<12} {machine:<20} {priority_projects:<30}")
+    else:
+        print(f"\nNo inactive GPUs found.")
+
+
 def print_analysis_results(results: dict):
     """Print analysis results in a formatted way."""
     if "error" in results:
@@ -500,15 +770,18 @@ def print_analysis_results(results: dict):
 def main(
     hours_back: int = typer.Option(24, help="Number of hours to analyze (default: 24)"),
     host: str = typer.Option("", help="Host name to filter results"),
-    db_path: str = typer.Option("gpu_state_2025-06.db", help="Path to SQLite database"),
+    db_path: str = typer.Option("gpu_state_2025-07.db", help="Path to SQLite database"),
     analysis_type: str = typer.Option(
         "allocation", 
-        help="Type of analysis: allocation (% GPUs claimed) or timeseries"
+        help="Type of analysis: allocation (% GPUs claimed), timeseries, or gpu_model_snapshot"
     ),
     bucket_minutes: int = typer.Option(15, help="Time bucket size in minutes for timeseries analysis"),
     end_time: Optional[str] = typer.Option(None, help="End time for analysis (YYYY-MM-DD HH:MM:SS), defaults to latest in DB"),
     group_by_device: bool = typer.Option(False, help="Group results by GPU device type"),
-    all_devices: bool = typer.Option(False, help="Include all device types (if False, filters out older GPUs)")
+    all_devices: bool = typer.Option(False, help="Include all device types (if False, filters out older GPUs)"),
+    gpu_model: Optional[str] = typer.Option(None, help="GPU model for snapshot analysis (e.g., 'NVIDIA A100-SXM4-80GB')"),
+    snapshot_time: Optional[str] = typer.Option(None, help="Specific time for GPU model snapshot (YYYY-MM-DD HH:MM:SS)"),
+    window_minutes: int = typer.Option(5, help="Time window in minutes for snapshot search")
 ):
     """
     Calculate GPU usage statistics for Priority, Shared, and Backfill classes.
@@ -524,7 +797,40 @@ def main(
             print(f"Error: Invalid end_time format. Use YYYY-MM-DD HH:MM:SS")
             return
     
-    # Run the analysis
+    # Handle GPU model snapshot analysis
+    if analysis_type == "gpu_model_snapshot":
+        if not snapshot_time:
+            print("Error: --snapshot-time is required for gpu_model_snapshot analysis")
+            return
+        
+        # Parse snapshot_time
+        try:
+            parsed_snapshot_time = datetime.datetime.strptime(snapshot_time, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            print(f"Error: Invalid snapshot_time format. Use YYYY-MM-DD HH:MM:SS")
+            return
+        
+        if gpu_model:
+            # Analyze specific GPU model
+            analysis = analyze_gpu_model_at_time(db_path, gpu_model, parsed_snapshot_time, window_minutes)
+            print_gpu_model_analysis(analysis)
+        else:
+            # Show all available GPU models at that time
+            available_models = get_gpu_models_at_time(db_path, parsed_snapshot_time, window_minutes)
+            if not available_models:
+                print(f"No GPU models found around {parsed_snapshot_time.strftime('%Y-%m-%d %H:%M:%S')}")
+                return
+            
+            print(f"\nAvailable GPU models at {parsed_snapshot_time.strftime('%Y-%m-%d %H:%M:%S')}:")
+            print("="*60)
+            for i, model in enumerate(available_models, 1):
+                print(f"{i:2d}. {model}")
+            
+            print(f"\nTo analyze a specific model, use:")
+            print(f"  --analysis-type gpu_model_snapshot --gpu-model \"<model_name>\" --snapshot-time \"{snapshot_time}\"")
+        return
+    
+    # Run the standard analysis
     results = run_analysis(
         db_path=db_path,
         hours_back=hours_back,
