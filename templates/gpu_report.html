@@ -293,7 +293,7 @@
         <p><strong>Generated:</strong> {{ generated_at }}</p>
     </div>
     
-    {% if notes %}
+    {% if notes and notes|length > 0 %}
     <div class="notes">
         <h3>⚠️ Notes</h3>
         <ul>

@@ -876,10 +876,7 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
         'period': f"{metadata['start_time'].strftime('%Y-%m-%d %H:%M')} to {metadata['end_time'].strftime('%Y-%m-%d %H:%M')} ({metadata['num_intervals']} intervals)",
         'intervals': metadata['num_intervals'],
         'generated_at': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        'notes': [
-            "A100-80GB - voyles2000 appears to be prioritized but not using PrioritizedProjects attribute",
-            "A100-40GB - Interactive slots are not filtered out"
-        ]
+        'notes': []
     }
     
     # Add excluded hosts information
@@ -992,9 +989,6 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
     print(f"{'='*70}")
     print(f"Period: {metadata['start_time'].strftime('%Y-%m-%d %H:%M')} to {metadata['end_time'].strftime('%Y-%m-%d %H:%M')} ({metadata['num_intervals']} intervals)")
     print(f"{'='*70}")
-    print("NOTES:")
-    print("A100-80GB - voyles2000 appears to be prioritized but not using PrioritizedProjects attribute")
-    print("A100-40GB - Interactive slots are not filtered out")
     
     # Show host exclusion information
     excluded_hosts = metadata.get('excluded_hosts', {})
