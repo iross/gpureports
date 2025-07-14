@@ -765,24 +765,32 @@ def send_email_report(
     
     Args:
         html_content: HTML content to send
-        to_email: Recipient email address
+        to_email: Recipient email address(es) - can be comma-separated
         from_email: Sender email address
         smtp_server: SMTP server hostname
         smtp_port: SMTP server port
         subject_prefix: Subject line prefix
         use_auth: Whether to use SMTP authentication
         timeout: Connection timeout in seconds
+        debug: Enable debug output
     
     Returns:
         True if email sent successfully, False otherwise
     """
     try:
+        # Parse comma-separated email addresses
+        recipients = [email.strip() for email in to_email.split(',') if email.strip()]
+        
+        if not recipients:
+            print("Error: No valid email addresses provided")
+            return False
+        
         # Create message
         msg = MIMEMultipart('alternative')
         today = datetime.datetime.now().strftime('%Y-%m-%d')
         msg['Subject'] = f"{subject_prefix} {today}"
         msg['From'] = from_email
-        msg['To'] = to_email
+        msg['To'] = ', '.join(recipients)
         
         # Attach HTML content
         html_part = MIMEText(html_content, 'html')
@@ -821,8 +829,8 @@ def send_email_report(
                     if use_auth:
                         print("Note: Authentication not attempted (matching mailx behavior)")
                     
-                    server.send_message(msg)
-                    print(f"Email sent successfully to {to_email}")
+                    server.send_message(msg, to_addrs=recipients)
+                    print(f"Email sent successfully to {len(recipients)} recipient(s): {', '.join(recipients)}")
                     return True
                     
             except (smtplib.SMTPException, OSError) as e:
@@ -1161,7 +1169,7 @@ def main(
     exclude_hosts_yaml: Optional[str] = typer.Option("masked_hosts.yaml", help="Path to YAML file containing host exclusions in format: hostname1: reason1"),
     output_format: str = typer.Option("text", help="Output format: 'text' or 'html'"),
     output_file: Optional[str] = typer.Option(None, help="Output file path (optional)"),
-    email_to: Optional[str] = typer.Option(None, help="Email address to send HTML report to"),
+    email_to: Optional[str] = typer.Option(None, help="Email address(es) to send HTML report to (comma-separated)"),
     email_from: str = typer.Option("iaross@wisc.edu", help="Sender email address"),
     smtp_server: str = typer.Option("smtp.wiscmail.wisc.edu", help="SMTP server hostname"),
     smtp_port: int = typer.Option(25, help="SMTP server port (25 for standard SMTP, 587 for submission)"),
