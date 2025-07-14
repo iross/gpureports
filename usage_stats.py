@@ -990,24 +990,6 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
     print(f"Period: {metadata['start_time'].strftime('%Y-%m-%d %H:%M')} to {metadata['end_time'].strftime('%Y-%m-%d %H:%M')} ({metadata['num_intervals']} intervals)")
     print(f"{'='*70}")
     
-    # Show host exclusion information
-    excluded_hosts = metadata.get('excluded_hosts', {})
-    if excluded_hosts:
-        print("\nEXCLUDED HOSTS:")
-        for host, reason in excluded_hosts.items():
-            print(f"  {host}: {reason}")
-    
-    # Show filtering impact
-    filtered_info = metadata.get('filtered_hosts_info', [])
-    if filtered_info:
-        total_original = sum(info['original_count'] for info in filtered_info)
-        total_filtered = sum(info['filtered_count'] for info in filtered_info)
-        records_excluded = total_original - total_filtered
-        if records_excluded > 0:
-            print("\nFILTERING IMPACT:")
-            print(f"  Records excluded: {records_excluded:,}")
-            print(f"  Records analyzed: {total_filtered:,}")
-    
     if "allocation_stats" in results:
         print("\nUtilization Summary:")
         print(f"{'-'*70}")
@@ -1100,6 +1082,27 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
                   f"({int(row['shared_claimed'])}/{int(row['shared_total'])}), "
                   f"Backfill {row['backfill_usage_percent']:5.1f}% "
                   f"({int(row['backfill_claimed'])}/{int(row['backfill_total'])})")
+    
+    # Show host exclusion information at the bottom
+    excluded_hosts = metadata.get('excluded_hosts', {})
+    if excluded_hosts:
+        print(f"\n{'='*70}")
+        print("EXCLUDED HOSTS:")
+        for host, reason in excluded_hosts.items():
+            print(f"  {host}: {reason}")
+    
+    # Show filtering impact at the bottom
+    filtered_info = metadata.get('filtered_hosts_info', [])
+    if filtered_info:
+        total_original = sum(info['original_count'] for info in filtered_info)
+        total_filtered = sum(info['filtered_count'] for info in filtered_info)
+        records_excluded = total_original - total_filtered
+        if records_excluded > 0:
+            if not excluded_hosts:  # Only print separator if excluded hosts wasn't shown
+                print(f"\n{'='*70}")
+            print("FILTERING IMPACT:")
+            print(f"  Records excluded: {records_excluded:,}")
+            print(f"  Records analyzed: {total_filtered:,}")
 
 
 def main(
