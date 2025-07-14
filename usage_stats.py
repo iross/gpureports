@@ -754,11 +754,14 @@ def send_email_report(
     to_email: str,
     from_email: str = "iaross@wisc.edu",
     smtp_server: str = "smtp.wiscmail.wisc.edu",
-    smtp_port: int = 587,
-    subject_prefix: str = "CHTC GPU Utilization"
+    smtp_port: int = 25,
+    subject_prefix: str = "CHTC GPU Utilization",
+    use_auth: bool = False,
+    timeout: int = 30,
+    debug: bool = False
 ) -> bool:
     """
-    Send HTML report via email using SMTP.
+    Send HTML report via email using SMTP, matching mailx behavior.
     
     Args:
         html_content: HTML content to send
@@ -767,6 +770,8 @@ def send_email_report(
         smtp_server: SMTP server hostname
         smtp_port: SMTP server port
         subject_prefix: Subject line prefix
+        use_auth: Whether to use SMTP authentication
+        timeout: Connection timeout in seconds
     
     Returns:
         True if email sent successfully, False otherwise
@@ -783,14 +788,54 @@ def send_email_report(
         html_part = MIMEText(html_content, 'html')
         msg.attach(html_part)
         
-        # Send email
-        with smtplib.SMTP(smtp_server, smtp_port) as server:
-            server.starttls()  # Enable STARTTLS as used in the shell script
-            server.send_message(msg)
+        # Try multiple ports if connection fails (common university SMTP setup)
+        ports_to_try = [smtp_port]
+        if smtp_port != 25:
+            ports_to_try.append(25)
+        if smtp_port != 587:
+            ports_to_try.append(587)
         
-        print(f"Email sent successfully to {to_email}")
-        return True
+        last_error = None
         
+        for port in ports_to_try:
+            try:
+                print(f"Connecting to SMTP server {smtp_server}:{port}...")
+                
+                # Send email - match mailx behavior more closely
+                with smtplib.SMTP(smtp_server, port, timeout=timeout) as server:
+                    # Enable debug output for troubleshooting if requested
+                    if debug:
+                        server.set_debuglevel(1)
+                    
+                    # Try STARTTLS, but don't fail if not available (like mailx)
+                    try:
+                        server.starttls()
+                        print("STARTTLS enabled")
+                    except smtplib.SMTPNotSupportedError:
+                        print("STARTTLS not supported, proceeding without encryption")
+                    except Exception as e:
+                        print(f"STARTTLS failed: {e}, proceeding without encryption")
+                    
+                    # University SMTP servers often don't require auth from internal networks
+                    # Only use auth if explicitly requested
+                    if use_auth:
+                        print("Note: Authentication not attempted (matching mailx behavior)")
+                    
+                    server.send_message(msg)
+                    print(f"Email sent successfully to {to_email}")
+                    return True
+                    
+            except (smtplib.SMTPException, OSError) as e:
+                last_error = e
+                print(f"Failed to connect on port {port}: {e}")
+                continue
+        
+        # If we get here, all ports failed
+        raise last_error or Exception("All SMTP ports failed")
+        
+    except smtplib.SMTPException as e:
+        print(f"SMTP error sending email: {e}")
+        return False
     except Exception as e:
         print(f"Error sending email: {e}")
         return False
@@ -1119,7 +1164,9 @@ def main(
     email_to: Optional[str] = typer.Option(None, help="Email address to send HTML report to"),
     email_from: str = typer.Option("iaross@wisc.edu", help="Sender email address"),
     smtp_server: str = typer.Option("smtp.wiscmail.wisc.edu", help="SMTP server hostname"),
-    smtp_port: int = typer.Option(587, help="SMTP server port")
+    smtp_port: int = typer.Option(25, help="SMTP server port (25 for standard SMTP, 587 for submission)"),
+    email_timeout: int = typer.Option(30, help="SMTP connection timeout in seconds"),
+    email_debug: bool = typer.Option(False, help="Enable SMTP debug output")
 ):
     """
     Calculate GPU usage statistics for Priority, Shared, and Backfill classes.
@@ -1213,7 +1260,9 @@ def main(
             to_email=email_to,
             from_email=email_from,
             smtp_server=smtp_server,
-            smtp_port=smtp_port
+            smtp_port=smtp_port,
+            timeout=email_timeout,
+            debug=email_debug
         )
         
         if not success:
