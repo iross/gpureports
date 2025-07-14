@@ -708,7 +708,7 @@ def print_gpu_model_analysis(analysis: dict):
     for class_name, stats in by_class.items():
         if stats['total'] > 0:
             usage_pct = (stats['claimed'] / stats['total'] * 100) if stats['total'] > 0 else 0
-            print(f"{class_name:>10}: {stats['claimed']:2d}/{stats['total']:2d} ({usage_pct:5.1f}%)")
+            print(f"  {class_name}: {stats['claimed']}/{stats['total']} ({usage_pct:.1f}%)")
     
     print(f"\nMACHINES ({len(machines)}):")
     print(f"{'-'*40}")
@@ -717,28 +717,28 @@ def print_gpu_model_analysis(analysis: dict):
     
     if active_jobs:
         print(f"\nACTIVE JOBS ({len(active_jobs)}):")
-        print(f"{'-'*70}")
-        print(f"{'User':<20} {'Job ID':<15} {'GPU ID':<12} {'Machine':<20}")
-        print(f"{'-'*70}")
+        print(f"{'-'*60}")
+        print("  User                | Job ID          | GPU ID      | Machine")
+        print(f"{'-'*60}")
         for job in active_jobs:
             user = (job.get('RemoteOwner') or 'N/A')[:19]
             job_id = (job.get('GlobalJobId') or 'N/A')[:14]
             gpu_id = (job.get('AssignedGPUs') or 'N/A')[:11]
             machine = (job.get('Machine') or 'N/A')[:19]
-            print(f"{user:<20} {job_id:<15} {gpu_id:<12} {machine:<20}")
+            print(f"  {user:<18} | {job_id:<15} | {gpu_id:<11} | {machine}")
     else:
         print("\nNo active jobs found.")
     
     if inactive_gpus:
         print(f"\nINACTIVE GPUs ({len(inactive_gpus)}):")
-        print(f"{'-'*70}")
-        print(f"{'GPU ID':<12} {'Machine':<20} {'Priority Projects':<30}")
-        print(f"{'-'*70}")
+        print(f"{'-'*60}")
+        print("  GPU ID      | Machine             | Priority Projects")
+        print(f"{'-'*60}")
         for gpu in inactive_gpus:
             gpu_id = (gpu.get('AssignedGPUs') or 'N/A')[:11]
             machine = (gpu.get('Machine') or 'N/A')[:19]
             priority_projects = (gpu.get('PrioritizedProjects') or 'None')[:29]
-            print(f"{gpu_id:<12} {machine:<20} {priority_projects:<30}")
+            print(f"  {gpu_id:<11} | {machine:<19} | {priority_projects}")
     else:
         print("\nNo inactive GPUs found.")
 
@@ -996,8 +996,8 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
         allocation_stats = results["allocation_stats"]
         
         for class_name, stats in allocation_stats.items():
-            print(f"{class_name:>10}: {stats['allocation_usage_percent']:6.1f}% "
-                  f"({stats['avg_claimed']:5.1f}/{stats['avg_total_available']:5.1f} GPUs)")
+            print(f"  {class_name}: {stats['allocation_usage_percent']:.1f}% "
+                  f"({stats['avg_claimed']:.1f}/{stats['avg_total_available']:.1f} GPUs)")
     
     elif "device_stats" in results:
         print("\nUsage by Device Type:")
@@ -1017,8 +1017,8 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
                 total_available = 0
                 
                 for device_type, stats in device_data.items():
-                    print(f"  {device_type[:35]:35}: {stats['allocation_usage_percent']:6.1f}% "
-                          f"(avg {stats['avg_claimed']:4.1f}/{stats['avg_total_available']:4.1f} GPUs)")
+                    print(f"    {device_type}: {stats['allocation_usage_percent']:.1f}% "
+                          f"(avg {stats['avg_claimed']:.1f}/{stats['avg_total_available']:.1f} GPUs)")
                     total_claimed += stats['avg_claimed']
                     total_available += stats['avg_total_available']
                 
@@ -1031,9 +1031,9 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
                         'percent': grand_total_percent
                     }
                     
-                    print(f"  {'-'*35:35}   {'-'*6}   {'-'*15}")
-                    print(f"  {'TOTAL ' + class_name:35}: {grand_total_percent:6.1f}% "
-                          f"(avg {total_claimed:4.1f}/{total_available:4.1f} GPUs)")
+                    print(f"    {'-'*30}")
+                    print(f"    TOTAL {class_name}: {grand_total_percent:.1f}% "
+                          f"(avg {total_claimed:.1f}/{total_available:.1f} GPUs)")
         
         # Display overall summary
         if grand_totals:
@@ -1045,12 +1045,12 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
             overall_percent = (overall_claimed / overall_total * 100) if overall_total > 0 else 0
             
             for class_name, stats in grand_totals.items():
-                print(f"{class_name:>10}: {stats['percent']:6.1f}% "
-                      f"({stats['claimed']:5.1f}/{stats['total']:5.1f} GPUs)")
+                print(f"  {class_name}: {stats['percent']:.1f}% "
+                      f"({stats['claimed']:.1f}/{stats['total']:.1f} GPUs)")
             
-            print(f"{'-'*35}")
-            print(f"{'TOTAL':>10}: {overall_percent:6.1f}% "
-                  f"({overall_claimed:5.1f}/{overall_total:5.1f} GPUs)")
+            print(f"  {'-'*30}")
+            print(f"  TOTAL: {overall_percent:.1f}% "
+                  f"({overall_claimed:.1f}/{overall_total:.1f} GPUs)")
     
     elif "timeseries_data" in results:
         print("\nTime Series Analysis:")
@@ -1067,20 +1067,20 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
                 avg_usage = ts_df[usage_col].mean()
                 avg_claimed = ts_df[claimed_col].mean()
                 avg_total = ts_df[total_col].mean()
-                print(f"{class_name.title():>10}: {avg_usage:6.1f}% "
-                      f"({avg_claimed:5.1f}/{avg_total:5.1f} GPUs)")
+                print(f"  {class_name.title()}: {avg_usage:.1f}% "
+                      f"({avg_claimed:.1f}/{avg_total:.1f} GPUs)")
         
         # Show recent trend
         print("\nRecent Trend:")
         print(f"{'-'*70}")
         recent_df = ts_df.tail(5)
         for _, row in recent_df.iterrows():
-            print(f"{row['timestamp'].strftime('%m-%d %H:%M')}: "
-                  f"Priority {row['priority_usage_percent']:5.1f}% "
+            print(f"  {row['timestamp'].strftime('%m-%d %H:%M')}: "
+                  f"Priority {row['priority_usage_percent']:.1f}% "
                   f"({int(row['priority_claimed'])}/{int(row['priority_total'])}), "
-                  f"Shared {row['shared_usage_percent']:5.1f}% "
+                  f"Shared {row['shared_usage_percent']:.1f}% "
                   f"({int(row['shared_claimed'])}/{int(row['shared_total'])}), "
-                  f"Backfill {row['backfill_usage_percent']:5.1f}% "
+                  f"Backfill {row['backfill_usage_percent']:.1f}% "
                   f"({int(row['backfill_claimed'])}/{int(row['backfill_total'])})")
     
     # Show host exclusion information at the bottom
@@ -1176,7 +1176,7 @@ def main(
             print(f"\nAvailable GPU models at {parsed_snapshot_time.strftime('%Y-%m-%d %H:%M:%S')}:")
             print("="*60)
             for i, model in enumerate(available_models, 1):
-                print(f"{i:2d}. {model}")
+                print(f"  {i}. {model}")
             
             print("\nTo analyze a specific model, use:")
             print(f"  --analysis-type gpu_model_snapshot --gpu-model \"<model_name>\" --snapshot-time \"{snapshot_time}\"")
