@@ -13,6 +13,9 @@ import typer
 import sqlite3
 import json
 import yaml
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from typing import Optional, Dict
 # Removed jinja2 and pathlib imports - no longer needed for simple HTML tables
 
@@ -746,6 +749,53 @@ def print_gpu_model_analysis(analysis: dict):
 # Removed number_format function - not needed for simple HTML tables
 
 
+def send_email_report(
+    html_content: str,
+    to_email: str,
+    from_email: str = "iaross@wisc.edu",
+    smtp_server: str = "smtp.wiscmail.wisc.edu",
+    smtp_port: int = 587,
+    subject_prefix: str = "CHTC GPU Utilization"
+) -> bool:
+    """
+    Send HTML report via email using SMTP.
+    
+    Args:
+        html_content: HTML content to send
+        to_email: Recipient email address
+        from_email: Sender email address
+        smtp_server: SMTP server hostname
+        smtp_port: SMTP server port
+        subject_prefix: Subject line prefix
+    
+    Returns:
+        True if email sent successfully, False otherwise
+    """
+    try:
+        # Create message
+        msg = MIMEMultipart('alternative')
+        today = datetime.datetime.now().strftime('%Y-%m-%d')
+        msg['Subject'] = f"{subject_prefix} {today}"
+        msg['From'] = from_email
+        msg['To'] = to_email
+        
+        # Attach HTML content
+        html_part = MIMEText(html_content, 'html')
+        msg.attach(html_part)
+        
+        # Send email
+        with smtplib.SMTP(smtp_server, smtp_port) as server:
+            server.starttls()  # Enable STARTTLS as used in the shell script
+            server.send_message(msg)
+        
+        print(f"Email sent successfully to {to_email}")
+        return True
+        
+    except Exception as e:
+        print(f"Error sending email: {e}")
+        return False
+
+
 def generate_html_report(results: dict, output_file: Optional[str] = None) -> str:
     """
     Generate a simple HTML report with tables from analysis results.
@@ -1065,7 +1115,11 @@ def main(
     exclude_hosts: Optional[str] = typer.Option(None, help="JSON string of hosts to exclude from analysis with reasons, e.g., '{\"host1\": \"misconfigured\", \"host2\": \"maintenance\"}'"),
     exclude_hosts_yaml: Optional[str] = typer.Option("masked_hosts.yaml", help="Path to YAML file containing host exclusions in format: hostname1: reason1"),
     output_format: str = typer.Option("text", help="Output format: 'text' or 'html'"),
-    output_file: Optional[str] = typer.Option(None, help="Output file path (optional)")
+    output_file: Optional[str] = typer.Option(None, help="Output file path (optional)"),
+    email_to: Optional[str] = typer.Option(None, help="Email address to send HTML report to"),
+    email_from: str = typer.Option("iaross@wisc.edu", help="Sender email address"),
+    smtp_server: str = typer.Option("smtp.wiscmail.wisc.edu", help="SMTP server hostname"),
+    smtp_port: int = typer.Option(587, help="SMTP server port")
 ):
     """
     Calculate GPU usage statistics for Priority, Shared, and Backfill classes.
@@ -1144,6 +1198,27 @@ def main(
     
     # Print results
     print_analysis_results(results, output_format, output_file)
+    
+    # Send email if requested
+    if email_to:
+        if output_format != "html":
+            print("Warning: Email functionality requires HTML format. Generating HTML for email...")
+        
+        # Generate HTML content for email
+        html_content = generate_html_report(results)
+        
+        # Send email
+        success = send_email_report(
+            html_content=html_content,
+            to_email=email_to,
+            from_email=email_from,
+            smtp_server=smtp_server,
+            smtp_port=smtp_port
+        )
+        
+        if not success:
+            print("Failed to send email")
+            return
 
 
 if __name__ == "__main__":
