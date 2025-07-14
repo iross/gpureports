@@ -13,11 +13,8 @@ import typer
 import sqlite3
 import json
 import yaml
-import base64
-import io
 from typing import Optional, Dict
-from jinja2 import Environment, FileSystemLoader
-from pathlib import Path
+# Removed jinja2 and pathlib imports - no longer needed for simple HTML tables
 
 # Define the filtering functions locally to avoid htcondor dependency
 
@@ -743,119 +740,15 @@ def print_gpu_model_analysis(analysis: dict):
         print("\nNo inactive GPUs found.")
 
 
-def create_utilization_chart(results: dict, output_path: Optional[str] = None) -> Optional[str]:
-    """
-    Create a utilization chart for the HTML report.
-    
-    Args:
-        results: Analysis results dictionary
-        output_path: Path to save the chart image (optional)
-    
-    Returns:
-        Path to the chart image or base64 encoded image data
-    """
-    try:
-        import matplotlib.pyplot as plt
-        
-        # Create figure
-        fig, ax = plt.subplots(figsize=(12, 8))
-        
-        # Determine data source
-        if "device_stats" in results:
-            # Create device-grouped chart
-            device_stats = results["device_stats"]
-            
-            # Calculate totals for each class
-            class_totals = {}
-            for class_name, device_data in device_stats.items():
-                if device_data:
-                    total_claimed = sum(stats['avg_claimed'] for stats in device_data.values())
-                    total_available = sum(stats['avg_total_available'] for stats in device_data.values())
-                    if total_available > 0:
-                        class_totals[class_name] = {
-                            'claimed': total_claimed,
-                            'total': total_available,
-                            'percent': (total_claimed / total_available) * 100
-                        }
-            
-            # Create bar chart
-            classes = list(class_totals.keys())
-            percentages = [class_totals[cls]['percent'] for cls in classes]
-            
-            colors = ['#667eea', '#48bb78', '#ed8936']
-            bars = ax.bar(classes, percentages, color=colors[:len(classes)])
-            
-            # Add value labels on bars
-            for bar, pct in zip(bars, percentages):
-                height = bar.get_height()
-                ax.text(bar.get_x() + bar.get_width()/2., height + 1,
-                       f'{pct:.1f}%', ha='center', va='bottom', fontweight='bold')
-            
-            ax.set_ylabel('Utilization Percentage')
-            ax.set_title('GPU Utilization by Class', fontsize=16, fontweight='bold')
-            ax.set_ylim(0, 100)
-            
-        elif "allocation_stats" in results:
-            # Create simple allocation chart
-            allocation_stats = results["allocation_stats"]
-            
-            classes = list(allocation_stats.keys())
-            percentages = [allocation_stats[cls]['allocation_usage_percent'] for cls in classes]
-            
-            colors = ['#667eea', '#48bb78', '#ed8936']
-            bars = ax.bar(classes, percentages, color=colors[:len(classes)])
-            
-            # Add value labels on bars
-            for bar, pct in zip(bars, percentages):
-                height = bar.get_height()
-                ax.text(bar.get_x() + bar.get_width()/2., height + 1,
-                       f'{pct:.1f}%', ha='center', va='bottom', fontweight='bold')
-            
-            ax.set_ylabel('Utilization Percentage')
-            ax.set_title('GPU Utilization by Class', fontsize=16, fontweight='bold')
-            ax.set_ylim(0, 100)
-        
-        # Style the chart
-        ax.grid(True, alpha=0.3)
-        ax.set_axisbelow(True)
-        
-        # Add background color
-        ax.set_facecolor('#f8f9fa')
-        fig.patch.set_facecolor('white')
-        
-        plt.tight_layout()
-        
-        if output_path:
-            plt.savefig(output_path, dpi=300, bbox_inches='tight')
-            plt.close()
-            return output_path
-        else:
-            # Return base64 encoded image
-            buffer = io.BytesIO()
-            plt.savefig(buffer, format='png', dpi=300, bbox_inches='tight')
-            buffer.seek(0)
-            image_base64 = base64.b64encode(buffer.getvalue()).decode()
-            plt.close()
-            return f"data:image/png;base64,{image_base64}"
-            
-    except ImportError:
-        print("Warning: matplotlib not available, charts will not be generated")
-        return None
-    except Exception as e:
-        print(f"Warning: Error generating chart: {e}")
-        return None
+# Removed chart generation function - not needed for simple HTML tables
 
 
-def number_format(value):
-    """Format numbers with commas for thousands separator."""
-    if isinstance(value, (int, float)):
-        return f"{value:,}"
-    return str(value)
+# Removed number_format function - not needed for simple HTML tables
 
 
 def generate_html_report(results: dict, output_file: Optional[str] = None) -> str:
     """
-    Generate an HTML report from analysis results.
+    Generate a simple HTML report with tables from analysis results.
     
     Args:
         results: Analysis results dictionary
@@ -869,83 +762,132 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
     
     metadata = results["metadata"]
     
-    # Prepare template data
-    template_data = {
-        'title': 'CHTC GPU UTILIZATION REPORT',
-        'subtitle': f"Analysis Period: {metadata['start_time'].strftime('%Y-%m-%d %H:%M')} to {metadata['end_time'].strftime('%Y-%m-%d %H:%M')}",
-        'period': f"{metadata['start_time'].strftime('%Y-%m-%d %H:%M')} to {metadata['end_time'].strftime('%Y-%m-%d %H:%M')} ({metadata['num_intervals']} intervals)",
-        'intervals': metadata['num_intervals'],
-        'generated_at': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        'notes': []
-    }
+    # Start building HTML
+    html_parts = []
+    html_parts.append("<!DOCTYPE html>")
+    html_parts.append("<html>")
+    html_parts.append("<head>")
+    html_parts.append("<title>CHTC GPU Utilization Report</title>")
+    html_parts.append("</head>")
+    html_parts.append("<body>")
     
-    # Add excluded hosts information
+    # Header
+    html_parts.append("<h1>CHTC GPU UTILIZATION REPORT</h1>")
+    html_parts.append(f"<p><strong>Period:</strong> {metadata['start_time'].strftime('%Y-%m-%d %H:%M')} to {metadata['end_time'].strftime('%Y-%m-%d %H:%M')} ({metadata['num_intervals']} intervals)</p>")
+    html_parts.append(f"<p><strong>Generated:</strong> {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>")
+    
+    # Simple summary table
+    if "allocation_stats" in results:
+        html_parts.append("<h2>Utilization Summary</h2>")
+        html_parts.append("<table border='1'>")
+        html_parts.append("<tr><th>Class</th><th>Utilization</th><th>Average GPUs</th></tr>")
+        
+        allocation_stats = results["allocation_stats"]
+        for class_name, stats in allocation_stats.items():
+            html_parts.append("<tr>")
+            html_parts.append(f"<td>{class_name}</td>")
+            html_parts.append(f"<td>{stats['allocation_usage_percent']:.1f}%</td>")
+            html_parts.append(f"<td>{stats['avg_claimed']:.1f}/{stats['avg_total_available']:.1f}</td>")
+            html_parts.append("</tr>")
+        
+        html_parts.append("</table>")
+    
+    # Device stats tables
+    elif "device_stats" in results:
+        html_parts.append("<h2>Usage by Device Type</h2>")
+        
+        device_stats = results["device_stats"]
+        class_totals = {}
+        
+        for class_name, device_data in device_stats.items():
+            if device_data:
+                html_parts.append(f"<h3>{class_name}</h3>")
+                html_parts.append("<table border='1'>")
+                html_parts.append("<tr><th>Device Type</th><th>Utilization</th><th>Average GPUs</th></tr>")
+                
+                total_claimed = 0
+                total_available = 0
+                
+                for device_type, stats in device_data.items():
+                    html_parts.append("<tr>")
+                    html_parts.append(f"<td>{device_type}</td>")
+                    html_parts.append(f"<td>{stats['allocation_usage_percent']:.1f}%</td>")
+                    html_parts.append(f"<td>{stats['avg_claimed']:.1f}/{stats['avg_total_available']:.1f}</td>")
+                    html_parts.append("</tr>")
+                    
+                    total_claimed += stats['avg_claimed']
+                    total_available += stats['avg_total_available']
+                
+                # Add total row
+                if total_available > 0:
+                    total_percent = (total_claimed / total_available) * 100
+                    html_parts.append("<tr style='font-weight: bold; background-color: #f0f0f0;'>")
+                    html_parts.append(f"<td>TOTAL {class_name}</td>")
+                    html_parts.append(f"<td>{total_percent:.1f}%</td>")
+                    html_parts.append(f"<td>{total_claimed:.1f}/{total_available:.1f}</td>")
+                    html_parts.append("</tr>")
+                    
+                    class_totals[class_name] = {
+                        'claimed': total_claimed,
+                        'total': total_available,
+                        'percent': total_percent
+                    }
+                
+                html_parts.append("</table>")
+        
+        # Cluster summary
+        if class_totals:
+            html_parts.append("<h2>Cluster Summary</h2>")
+            html_parts.append("<table border='1'>")
+            html_parts.append("<tr><th>Class</th><th>Utilization</th><th>Average GPUs</th></tr>")
+            
+            overall_claimed = sum(stats['claimed'] for stats in class_totals.values())
+            overall_total = sum(stats['total'] for stats in class_totals.values())
+            overall_percent = (overall_claimed / overall_total * 100) if overall_total > 0 else 0
+            
+            for class_name, stats in class_totals.items():
+                html_parts.append("<tr>")
+                html_parts.append(f"<td>{class_name}</td>")
+                html_parts.append(f"<td>{stats['percent']:.1f}%</td>")
+                html_parts.append(f"<td>{stats['claimed']:.1f}/{stats['total']:.1f}</td>")
+                html_parts.append("</tr>")
+            
+            html_parts.append("<tr style='font-weight: bold; background-color: #f0f0f0;'>")
+            html_parts.append("<td>TOTAL</td>")
+            html_parts.append(f"<td>{overall_percent:.1f}%</td>")
+            html_parts.append(f"<td>{overall_claimed:.1f}/{overall_total:.1f}</td>")
+            html_parts.append("</tr>")
+            
+            html_parts.append("</table>")
+    
+    # Excluded hosts
     excluded_hosts = metadata.get('excluded_hosts', {})
     if excluded_hosts:
-        template_data['excluded_hosts'] = excluded_hosts
+        html_parts.append("<h2>Excluded Hosts</h2>")
+        html_parts.append("<table border='1'>")
+        html_parts.append("<tr><th>Host</th><th>Reason</th></tr>")
+        for host, reason in excluded_hosts.items():
+            html_parts.append(f"<tr><td>{host}</td><td>{reason}</td></tr>")
+        html_parts.append("</table>")
     
-    # Add filtering impact
+    # Filtering impact
     filtered_info = metadata.get('filtered_hosts_info', [])
     if filtered_info:
         total_original = sum(info['original_count'] for info in filtered_info)
         total_filtered = sum(info['filtered_count'] for info in filtered_info)
         records_excluded = total_original - total_filtered
         if records_excluded > 0:
-            template_data['filtering_impact'] = {
-                'excluded': records_excluded,
-                'analyzed': total_filtered
-            }
+            html_parts.append("<h2>Filtering Impact</h2>")
+            html_parts.append("<table border='1'>")
+            html_parts.append("<tr><th>Metric</th><th>Count</th></tr>")
+            html_parts.append(f"<tr><td>Records excluded</td><td>{records_excluded:,}</td></tr>")
+            html_parts.append(f"<tr><td>Records analyzed</td><td>{total_filtered:,}</td></tr>")
+            html_parts.append("</table>")
     
-    # Generate chart
-    chart_path = create_utilization_chart(results)
-    if chart_path:
-        template_data['chart_path'] = chart_path
+    html_parts.append("</body>")
+    html_parts.append("</html>")
     
-    # Add utilization data
-    if "allocation_stats" in results:
-        template_data['simple_summary'] = results["allocation_stats"]
-    
-    elif "device_stats" in results:
-        template_data['device_stats'] = results["device_stats"]
-        
-        # Calculate class totals
-        class_totals = {}
-        device_stats = results["device_stats"]
-        
-        for class_name, device_data in device_stats.items():
-            if device_data:
-                total_claimed = sum(stats['avg_claimed'] for stats in device_data.values())
-                total_available = sum(stats['avg_total_available'] for stats in device_data.values())
-                if total_available > 0:
-                    class_totals[class_name] = {
-                        'claimed': total_claimed,
-                        'total': total_available,
-                        'percent': (total_claimed / total_available) * 100
-                    }
-        
-        template_data['class_totals'] = class_totals
-        
-        # Calculate cluster summary
-        if class_totals:
-            overall_claimed = sum(stats['claimed'] for stats in class_totals.values())
-            overall_total = sum(stats['total'] for stats in class_totals.values())
-            overall_percent = (overall_claimed / overall_total * 100) if overall_total > 0 else 0
-            
-            cluster_summary = dict(class_totals)
-            cluster_summary['TOTAL'] = {
-                'claimed': overall_claimed,
-                'total': overall_total,
-                'percent': overall_percent
-            }
-            template_data['cluster_summary'] = cluster_summary
-    
-    # Load and render template
-    template_dir = Path(__file__).parent / "templates"
-    env = Environment(loader=FileSystemLoader(template_dir))
-    env.filters['number_format'] = number_format
-    
-    template = env.get_template('gpu_report.html')
-    html_content = template.render(**template_data)
+    html_content = "\n".join(html_parts)
     
     # Save to file if specified
     if output_file:
