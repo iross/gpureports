@@ -1100,18 +1100,18 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
         html_parts.append("</table>")
     
     # Filtering impact
-    filtered_info = metadata.get('filtered_hosts_info', [])
-    if filtered_info:
-        total_original = sum(info['original_count'] for info in filtered_info)
-        total_filtered = sum(info['filtered_count'] for info in filtered_info)
-        records_excluded = total_original - total_filtered
-        if records_excluded > 0:
-            html_parts.append("<h2>Filtering Impact</h2>")
-            html_parts.append("<table border='1'>")
-            html_parts.append("<tr><th>Metric</th><th>Count</th></tr>")
-            html_parts.append(f"<tr><td>Records excluded</td><td>{records_excluded:,}</td></tr>")
-            html_parts.append(f"<tr><td>Records analyzed</td><td>{total_filtered:,}</td></tr>")
-            html_parts.append("</table>")
+    # filtered_info = metadata.get('filtered_hosts_info', [])
+    # if filtered_info:
+    #     total_original = sum(info['original_count'] for info in filtered_info)
+    #     total_filtered = sum(info['filtered_count'] for info in filtered_info)
+        #records_excluded = total_original - total_filtered
+        # if records_excluded > 0:
+        #     html_parts.append("<h2>Filtering Impact</h2>")
+        #     html_parts.append("<table border='1'>")
+        #     html_parts.append("<tr><th>Metric</th><th>Count</th></tr>")
+        #     html_parts.append(f"<tr><td>Records excluded</td><td>{records_excluded:,}</td></tr>")
+        #     html_parts.append(f"<tr><td>Records analyzed</td><td>{total_filtered:,}</td></tr>")
+        #     html_parts.append("</table>")
     
     # Add methodology section from external file
     methodology_html = load_methodology()
