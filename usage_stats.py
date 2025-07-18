@@ -17,6 +17,8 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import Optional, Dict
+import os
+from pathlib import Path
 # Removed jinja2 and pathlib imports - no longer needed for simple HTML tables
 
 # Define the filtering functions locally to avoid htcondor dependency
@@ -881,6 +883,74 @@ def send_email_report(
         return False
 
 
+def simple_markdown_to_html(markdown_text: str) -> str:
+    """Convert simple markdown to HTML. Supports headers, bold, lists, and paragraphs."""
+    lines = markdown_text.split('\n')
+    html_lines = []
+    in_list = False
+    
+    for line in lines:
+        line = line.strip()
+        if not line:
+            if in_list:
+                html_lines.append("</ul>")
+                in_list = False
+            html_lines.append("")
+            continue
+            
+        # Headers
+        if line.startswith('# '):
+            if in_list:
+                html_lines.append("</ul>")
+                in_list = False
+            html_lines.append(f"<h2>{line[2:]}</h2>")
+        # Bold text and convert **text:** to <strong>text:</strong>
+        elif '**' in line:
+            # Handle list items
+            if line.startswith('- '):
+                if not in_list:
+                    html_lines.append("<ul>")
+                    in_list = True
+                line = line[2:]  # Remove "- "
+                line = line.replace('**', '<strong>', 1).replace('**', '</strong>', 1)
+                html_lines.append(f"<li>{line}</li>")
+            else:
+                # Regular paragraph with bold
+                if in_list:
+                    html_lines.append("</ul>")
+                    in_list = False
+                line = line.replace('**', '<strong>', 1).replace('**', '</strong>', 1)
+                html_lines.append(f"<p>{line}</p>")
+        # Regular list items
+        elif line.startswith('- '):
+            if not in_list:
+                html_lines.append("<ul>")
+                in_list = True
+            html_lines.append(f"<li>{line[2:]}</li>")
+        # Regular paragraphs
+        else:
+            if in_list:
+                html_lines.append("</ul>")
+                in_list = False
+            html_lines.append(f"<p>{line}</p>")
+    
+    if in_list:
+        html_lines.append("</ul>")
+    
+    return '\n'.join(html_lines)
+
+def load_methodology() -> str:
+    """Load methodology from external markdown file and convert to HTML."""
+    methodology_path = Path(__file__).parent / "methodology.md"
+    try:
+        with open(methodology_path, 'r', encoding='utf-8') as f:
+            markdown_content = f.read()
+        return simple_markdown_to_html(markdown_content)
+    except FileNotFoundError:
+        return "<p><em>Methodology file not found.</em></p>"
+    except Exception as e:
+        return f"<p><em>Error loading methodology: {e}</em></p>"
+
 def get_display_name(class_name: str) -> str:
     """Convert internal class names to user-friendly display names."""
     display_mapping = {
@@ -957,7 +1027,7 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
                 # Calculate totals first
                 total_claimed = 0
                 total_available = 0
-                for device_type, stats in device_data.items():
+                for device_type, stats in sorted(device_data.items()):
                     total_claimed += stats['avg_claimed']
                     total_available += stats['avg_total_available']
                 
@@ -977,8 +1047,8 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
                         'percent': total_percent
                     }
                 
-                # Add individual device rows
-                for device_type, stats in device_data.items():
+                # Add individual device rows (sorted alphabetically)
+                for device_type, stats in sorted(device_data.items()):
                     html_parts.append("<tr>")
                     html_parts.append(f"<td>{device_type}</td>")
                     html_parts.append(f"<td style='text-align: right'>{stats['allocation_usage_percent']:.1f}%</td>")
@@ -1042,6 +1112,12 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
             html_parts.append(f"<tr><td>Records excluded</td><td>{records_excluded:,}</td></tr>")
             html_parts.append(f"<tr><td>Records analyzed</td><td>{total_filtered:,}</td></tr>")
             html_parts.append("</table>")
+    
+    # Add methodology section from external file
+    methodology_html = load_methodology()
+    html_parts.append("<div style='background-color: #f9f9f9; padding: 15px; border-radius: 5px; margin-top: 20px;'>")
+    html_parts.append(methodology_html)
+    html_parts.append("</div>")
     
     html_parts.append("</body>")
     html_parts.append("</html>")
@@ -1121,7 +1197,7 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
                 total_claimed = 0
                 total_available = 0
                 
-                for device_type, stats in device_data.items():
+                for device_type, stats in sorted(device_data.items()):
                     print(f"    {device_type}: {stats['allocation_usage_percent']:.1f}% "
                           f"(avg {stats['avg_claimed']:.1f}/{stats['avg_total_available']:.1f} GPUs)")
                     total_claimed += stats['avg_claimed']
