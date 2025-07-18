@@ -756,6 +756,8 @@ def send_email_report(
     smtp_server: str = "smtp.wiscmail.wisc.edu",
     smtp_port: int = 25,
     subject_prefix: str = "CHTC GPU Allocation",
+    usage_percentages: Optional[Dict[str, float]] = None,
+    lookback_hours: Optional[int] = None,
     use_auth: bool = False,
     timeout: int = 30,
     debug: bool = False
@@ -770,6 +772,8 @@ def send_email_report(
         smtp_server: SMTP server hostname
         smtp_port: SMTP server port
         subject_prefix: Subject line prefix
+        usage_percentages: Dict of class usage percentages (e.g., {"Shared": 65.2, "Priority": 85.5})
+        lookback_hours: Number of hours covered by the report (e.g., 24, 168)
         use_auth: Whether to use SMTP authentication
         timeout: Connection timeout in seconds
         debug: Enable debug output
@@ -788,7 +792,35 @@ def send_email_report(
         # Create message
         msg = MIMEMultipart('alternative')
         today = datetime.datetime.now().strftime('%Y-%m-%d')
-        msg['Subject'] = f"{subject_prefix} {today}"
+        
+        # Build subject with lookback period and usage percentages
+        subject = f"{subject_prefix} {today}"
+        
+        # Add lookback period
+        if lookback_hours:
+            if lookback_hours % (24 * 7) == 0 and lookback_hours >= (24 * 7):  # Exact weeks
+                weeks = lookback_hours // (24 * 7)
+                period_str = f"{weeks}w" if weeks > 1 else "1w"
+            elif lookback_hours > 24 and lookback_hours % 24 == 0:  # Days for > 24h
+                days = lookback_hours // 24
+                period_str = f"{days}d"
+            else:  # Hours for <= 24h or non-exact days
+                period_str = f"{lookback_hours}h"
+            subject += f" {period_str}"
+        
+        # Add usage percentages in order: Open Capacity, Prioritized Service, Backfill
+        if usage_percentages:
+            class_order = ["Shared", "Priority", "Backfill"]  # Internal names
+            usage_parts = []
+            for class_name in class_order:
+                if class_name in usage_percentages:
+                    percentage = usage_percentages[class_name]
+                    usage_parts.append(f"{percentage:.1f}%")
+            
+            if usage_parts:
+                subject += f" ({' | '.join(usage_parts)})"
+        
+        msg['Subject'] = subject
         msg['From'] = from_email
         msg['To'] = ', '.join(recipients)
         
@@ -1287,6 +1319,22 @@ def main(
         # Generate HTML content for email
         html_content = generate_html_report(results)
         
+        # Extract usage percentages for email subject
+        usage_percentages = {}
+        if "device_stats" in results:
+            device_stats = results["device_stats"]
+            for class_name, device_data in device_stats.items():
+                if device_data:
+                    # Calculate total percentage for this class
+                    total_claimed = sum(stats['avg_claimed'] for stats in device_data.values())
+                    total_available = sum(stats['avg_total_available'] for stats in device_data.values())
+                    if total_available > 0:
+                        usage_percentages[class_name] = (total_claimed / total_available) * 100
+        elif "allocation_stats" in results:
+            allocation_stats = results["allocation_stats"]
+            for class_name, stats in allocation_stats.items():
+                usage_percentages[class_name] = stats['allocation_usage_percent']
+        
         # Send email
         success = send_email_report(
             html_content=html_content,
@@ -1294,6 +1342,8 @@ def main(
             from_email=email_from,
             smtp_server=smtp_server,
             smtp_port=smtp_port,
+            usage_percentages=usage_percentages,
+            lookback_hours=hours_back,
             timeout=email_timeout,
             debug=email_debug
         )
