@@ -849,6 +849,15 @@ def send_email_report(
         return False
 
 
+def get_display_name(class_name: str) -> str:
+    """Convert internal class names to user-friendly display names."""
+    display_mapping = {
+        "Priority": "Prioritized Service",
+        "Shared": "Open Capacity",
+        "Backfill": "Backfill"
+    }
+    return display_mapping.get(class_name, class_name)
+
 def generate_html_report(results: dict, output_file: Optional[str] = None) -> str:
     """
     Generate a simple HTML report with tables from analysis results.
@@ -888,7 +897,7 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
         allocation_stats = results["allocation_stats"]
         for class_name, stats in allocation_stats.items():
             html_parts.append("<tr>")
-            html_parts.append(f"<td>{class_name}</td>")
+            html_parts.append(f"<td>{get_display_name(class_name)}</td>")
             html_parts.append(f"<td>{stats['allocation_usage_percent']:.1f}%</td>")
             html_parts.append(f"<td>{stats['avg_claimed']:.1f}/{stats['avg_total_available']:.1f}</td>")
             html_parts.append("</tr>")
@@ -904,7 +913,7 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
         
         for class_name, device_data in device_stats.items():
             if device_data:
-                html_parts.append(f"<h3>{class_name}</h3>")
+                html_parts.append(f"<h3>{get_display_name(class_name)}</h3>")
                 html_parts.append("<table border='1'>")
                 html_parts.append("<tr><th>Device Type</th><th>Allocated %</th><th>Average GPUs</th></tr>")
                 
@@ -919,7 +928,7 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
                 if total_available > 0:
                     total_percent = (total_claimed / total_available) * 100
                     html_parts.append("<tr style='font-weight: bold; background-color: #f0f0f0;'>")
-                    html_parts.append(f"<td>TOTAL {class_name}</td>")
+                    html_parts.append(f"<td>TOTAL</td>")
                     html_parts.append(f"<td>{total_percent:.1f}%</td>")
                     html_parts.append(f"<td>{total_claimed:.1f}/{total_available:.1f}</td>")
                     html_parts.append("</tr>")
@@ -960,7 +969,7 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
             # Add individual class rows
             for class_name, stats in class_totals.items():
                 html_parts.append("<tr>")
-                html_parts.append(f"<td>{class_name}</td>")
+                html_parts.append(f"<td>{get_display_name(class_name)}</td>")
                 html_parts.append(f"<td>{stats['percent']:.1f}%</td>")
                 html_parts.append(f"<td>{stats['claimed']:.1f}/{stats['total']:.1f}</td>")
                 html_parts.append("</tr>")
@@ -1045,7 +1054,7 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
         allocation_stats = results["allocation_stats"]
         
         for class_name, stats in allocation_stats.items():
-            print(f"  {class_name}: {stats['allocation_usage_percent']:.1f}% "
+            print(f"  {get_display_name(class_name)}: {stats['allocation_usage_percent']:.1f}% "
                   f"({stats['avg_claimed']:.1f}/{stats['avg_total_available']:.1f} GPUs)")
     
     elif "device_stats" in results:
@@ -1058,7 +1067,7 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
         
         for class_name, device_data in device_stats.items():
             if device_data:  # Only show classes that have data
-                print(f"\n{class_name}:")
+                print(f"\n{get_display_name(class_name)}:")
                 print(f"{'-'*50}")
                 
                 # Calculate totals for this class
@@ -1081,7 +1090,7 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
                     }
                     
                     print(f"    {'-'*30}")
-                    print(f"    TOTAL {class_name}: {grand_total_percent:.1f}% "
+                    print(f"    TOTAL {get_display_name(class_name)}: {grand_total_percent:.1f}% "
                           f"(avg {total_claimed:.1f}/{total_available:.1f} GPUs)")
         
         # Display overall summary
@@ -1094,7 +1103,7 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
             overall_percent = (overall_claimed / overall_total * 100) if overall_total > 0 else 0
             
             for class_name, stats in grand_totals.items():
-                print(f"  {class_name}: {stats['percent']:.1f}% "
+                print(f"  {get_display_name(class_name)}: {stats['percent']:.1f}% "
                       f"({stats['claimed']:.1f}/{stats['total']:.1f} GPUs)")
             
             print(f"  {'-'*30}")
