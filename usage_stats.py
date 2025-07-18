@@ -908,20 +908,14 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
                 html_parts.append("<table border='1'>")
                 html_parts.append("<tr><th>Device Type</th><th>Utilization</th><th>Average GPUs</th></tr>")
                 
+                # Calculate totals first
                 total_claimed = 0
                 total_available = 0
-                
                 for device_type, stats in device_data.items():
-                    html_parts.append("<tr>")
-                    html_parts.append(f"<td>{device_type}</td>")
-                    html_parts.append(f"<td>{stats['allocation_usage_percent']:.1f}%</td>")
-                    html_parts.append(f"<td>{stats['avg_claimed']:.1f}/{stats['avg_total_available']:.1f}</td>")
-                    html_parts.append("</tr>")
-                    
                     total_claimed += stats['avg_claimed']
                     total_available += stats['avg_total_available']
                 
-                # Add total row
+                # Add total row first
                 if total_available > 0:
                     total_percent = (total_claimed / total_available) * 100
                     html_parts.append("<tr style='font-weight: bold; background-color: #f0f0f0;'>")
@@ -936,6 +930,14 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
                         'percent': total_percent
                     }
                 
+                # Add individual device rows
+                for device_type, stats in device_data.items():
+                    html_parts.append("<tr>")
+                    html_parts.append(f"<td>{device_type}</td>")
+                    html_parts.append(f"<td>{stats['allocation_usage_percent']:.1f}%</td>")
+                    html_parts.append(f"<td>{stats['avg_claimed']:.1f}/{stats['avg_total_available']:.1f}</td>")
+                    html_parts.append("</tr>")
+                
                 html_parts.append("</table>")
         
         # Cluster summary
@@ -948,18 +950,20 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
             overall_total = sum(stats['total'] for stats in class_totals.values())
             overall_percent = (overall_claimed / overall_total * 100) if overall_total > 0 else 0
             
+            # Add TOTAL row first
+            html_parts.append("<tr style='font-weight: bold; background-color: #f0f0f0;'>")
+            html_parts.append("<td>TOTAL</td>")
+            html_parts.append(f"<td>{overall_percent:.1f}%</td>")
+            html_parts.append(f"<td>{overall_claimed:.1f}/{overall_total:.1f}</td>")
+            html_parts.append("</tr>")
+            
+            # Add individual class rows
             for class_name, stats in class_totals.items():
                 html_parts.append("<tr>")
                 html_parts.append(f"<td>{class_name}</td>")
                 html_parts.append(f"<td>{stats['percent']:.1f}%</td>")
                 html_parts.append(f"<td>{stats['claimed']:.1f}/{stats['total']:.1f}</td>")
                 html_parts.append("</tr>")
-            
-            html_parts.append("<tr style='font-weight: bold; background-color: #f0f0f0;'>")
-            html_parts.append("<td>TOTAL</td>")
-            html_parts.append(f"<td>{overall_percent:.1f}%</td>")
-            html_parts.append(f"<td>{overall_claimed:.1f}/{overall_total:.1f}</td>")
-            html_parts.append("</tr>")
             
             html_parts.append("</table>")
     
