@@ -304,40 +304,22 @@
     </div>
     {% endif %}
     
-    {% if excluded_hosts %}
-    <div class="excluded-hosts">
-        <h3>🚫 Excluded Hosts</h3>
-        <ul>
-        {% for host, reason in excluded_hosts.items() %}
-            <li><strong>{{ host }}:</strong> {{ reason }}</li>
-        {% endfor %}
-        </ul>
-    </div>
-    {% endif %}
-    
-    {% if filtering_impact %}
-    <div class="filtering-impact">
-        <h3>📊 Filtering Impact</h3>
-        <p><strong>Records excluded:</strong> {{ filtering_impact.excluded|number_format }}</p>
-        <p><strong>Records analyzed:</strong> {{ filtering_impact.analyzed|number_format }}</p>
-    </div>
-    {% endif %}
     
     {% if chart_path %}
     <div class="chart-container">
-        <h2>GPU Utilization Chart</h2>
-        <img src="{{ chart_path }}" alt="GPU Utilization Chart" />
+        <h2>GPU Allocation Chart</h2>
+        <img src="{{ chart_path }}" alt="GPU Allocation Chart" />
     </div>
     {% endif %}
     
     {% if simple_summary %}
     <div class="summary-section">
-        <h2>Utilization Summary</h2>
+        <h2>Allocation Summary</h2>
         <table class="utilization-table">
             <thead>
                 <tr>
                     <th>Class</th>
-                    <th>Utilization</th>
+                    <th>Allocation</th>
                     <th>Average GPUs</th>
                 </tr>
             </thead>
@@ -366,7 +348,7 @@
                     <thead>
                         <tr>
                             <th>Device Type</th>
-                            <th>Utilization</th>
+                            <th>Allocation</th>
                             <th>Average GPUs</th>
                         </tr>
                     </thead>
@@ -400,7 +382,7 @@
             <thead>
                 <tr>
                     <th>Class</th>
-                    <th>Utilization</th>
+                    <th>Allocation</th>
                     <th>Average GPUs</th>
                 </tr>
             </thead>
@@ -423,6 +405,25 @@
             {% endif %}
             </tbody>
         </table>
+    </div>
+    {% endif %}
+    
+    {% if excluded_hosts %}
+    <div class="excluded-hosts">
+        <h3>🚫 Excluded Hosts</h3>
+        <ul>
+        {% for host, reason in excluded_hosts.items() %}
+            <li><strong>{{ host }}:</strong> {{ reason }}</li>
+        {% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+    
+    {% if filtering_impact %}
+    <div class="filtering-impact">
+        <h3>📊 Filtering Impact</h3>
+        <p><strong>Records excluded:</strong> {{ filtering_impact.excluded|number_format }}</p>
+        <p><strong>Records analyzed:</strong> {{ filtering_impact.analyzed|number_format }}</p>
     </div>
     {% endif %}
     

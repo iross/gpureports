@@ -755,7 +755,7 @@ def send_email_report(
     from_email: str = "iaross@wisc.edu",
     smtp_server: str = "smtp.wiscmail.wisc.edu",
     smtp_port: int = 25,
-    subject_prefix: str = "CHTC GPU Utilization",
+    subject_prefix: str = "CHTC GPU Allocation",
     use_auth: bool = False,
     timeout: int = 30,
     debug: bool = False
@@ -870,20 +870,20 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
     html_parts.append("<!DOCTYPE html>")
     html_parts.append("<html>")
     html_parts.append("<head>")
-    html_parts.append("<title>CHTC GPU Utilization Report</title>")
+    html_parts.append("<title>CHTC GPU Allocation Report</title>")
     html_parts.append("</head>")
     html_parts.append("<body>")
     
     # Header
-    html_parts.append("<h1>CHTC GPU UTILIZATION REPORT</h1>")
+    html_parts.append("<h1>CHTC GPU ALLOCATION REPORT</h1>")
     html_parts.append(f"<p><strong>Period:</strong> {metadata['start_time'].strftime('%Y-%m-%d %H:%M')} to {metadata['end_time'].strftime('%Y-%m-%d %H:%M')} ({metadata['num_intervals']} intervals)</p>")
     html_parts.append(f"<p><strong>Generated:</strong> {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>")
     
     # Simple summary table
     if "allocation_stats" in results:
-        html_parts.append("<h2>Utilization Summary</h2>")
+        html_parts.append("<h2>Allocation Summary</h2>")
         html_parts.append("<table border='1'>")
-        html_parts.append("<tr><th>Class</th><th>Utilization</th><th>Average GPUs</th></tr>")
+        html_parts.append("<tr><th>Class</th><th>Allocation</th><th>Average GPUs</th></tr>")
         
         allocation_stats = results["allocation_stats"]
         for class_name, stats in allocation_stats.items():
@@ -906,7 +906,7 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
             if device_data:
                 html_parts.append(f"<h3>{class_name}</h3>")
                 html_parts.append("<table border='1'>")
-                html_parts.append("<tr><th>Device Type</th><th>Utilization</th><th>Average GPUs</th></tr>")
+                html_parts.append("<tr><th>Device Type</th><th>Allocation</th><th>Average GPUs</th></tr>")
                 
                 # Calculate totals first
                 total_claimed = 0
@@ -944,7 +944,7 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
         if class_totals:
             html_parts.append("<h2>Cluster Summary</h2>")
             html_parts.append("<table border='1'>")
-            html_parts.append("<tr><th>Class</th><th>Utilization</th><th>Average GPUs</th></tr>")
+            html_parts.append("<tr><th>Class</th><th>Allocation</th><th>Average GPUs</th></tr>")
             
             overall_claimed = sum(stats['claimed'] for stats in class_totals.values())
             overall_total = sum(stats['total'] for stats in class_totals.values())
@@ -1040,7 +1040,7 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
     print(f"{'='*70}")
     
     if "allocation_stats" in results:
-        print("\nUtilization Summary:")
+        print("\nAllocation Summary:")
         print(f"{'-'*70}")
         allocation_stats = results["allocation_stats"]
         
