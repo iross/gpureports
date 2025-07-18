@@ -368,6 +368,71 @@ def calculate_allocation_usage_by_device(df: pd.DataFrame, host: str = "", inclu
     return stats
 
 
+def calculate_unique_cluster_totals_from_raw_data(df: pd.DataFrame, host: str = "") -> dict:
+    """
+    Calculate cluster totals from raw data without double-counting GPUs across categories.
+    
+    The issue is that GPUs can appear in both Priority and Backfill categories
+    (e.g., when a prioritized GPU is idle, it's available for both prioritized and backfill jobs).
+    For the TOTAL row, we want to count each unique GPU only once.
+    
+    This function goes back to the raw data to count unique AssignedGPUs.
+    
+    Args:
+        df: Raw DataFrame with GPU state data
+        host: Optional host filter
+        
+    Returns:
+        Dictionary with unique 'claimed' and 'total' counts
+    """
+    # Create 15-minute time buckets like in the main calculation
+    df = df.copy()
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    df['15min_bucket'] = df['timestamp'].dt.floor('15min')
+    
+    total_claimed_across_intervals = 0
+    total_available_across_intervals = 0
+    num_intervals = 0
+    
+    # For each 15-minute interval, count unique GPUs across all categories
+    for bucket in sorted(df['15min_bucket'].unique()):
+        bucket_df = df[df['15min_bucket'] == bucket]
+        
+        if bucket_df.empty:
+            continue
+            
+        # Get all unique GPUs across the fundamental categories (Priority and Shared)
+        # Backfill is just idle Priority/Shared GPUs, so we don't count it separately
+        all_claimed_gpus = set()
+        all_available_gpus = set()
+        
+        # Only collect from Priority and Shared (the actual physical GPU pools)
+        for utilization_type in ["Priority", "Shared"]:
+            claimed_df = filter_df(bucket_df, utilization_type, "Claimed", host)
+            unclaimed_df = filter_df(bucket_df, utilization_type, "Unclaimed", host)
+            
+            # Add unique GPUs from this category
+            claimed_gpus = set(claimed_df['AssignedGPUs'].dropna().unique())
+            unclaimed_gpus = set(unclaimed_df['AssignedGPUs'].dropna().unique())
+            
+            all_claimed_gpus.update(claimed_gpus)
+            all_available_gpus.update(claimed_gpus)  # claimed GPUs are part of available
+            all_available_gpus.update(unclaimed_gpus)
+        
+        total_claimed_across_intervals += len(all_claimed_gpus)
+        total_available_across_intervals += len(all_available_gpus)
+        num_intervals += 1
+    
+    # Calculate averages
+    avg_claimed = total_claimed_across_intervals / num_intervals if num_intervals > 0 else 0
+    avg_available = total_available_across_intervals / num_intervals if num_intervals > 0 else 0
+    
+    return {
+        'claimed': avg_claimed,
+        'total': avg_available
+    }
+
+
 def load_host_exclusions(exclusions_config: Optional[str] = None, yaml_file: Optional[str] = None) -> Dict[str, str]:
     """
     Load host exclusions from JSON string or YAML file.
@@ -466,6 +531,8 @@ def run_analysis(
     if analysis_type == "allocation":
         if group_by_device:
             result["device_stats"] = calculate_allocation_usage_by_device(df, host, all_devices)
+            result["raw_data"] = df  # Pass raw data for unique cluster totals calculation
+            result["host_filter"] = host  # Pass host filter for consistency
         else:
             result["allocation_stats"] = calculate_allocation_usage(df, host)
     
@@ -1064,8 +1131,20 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
             html_parts.append("<table border='1'>")
             html_parts.append("<tr><th>Class</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>")
             
-            overall_claimed = sum(stats['claimed'] for stats in class_totals.values())
-            overall_total = sum(stats['total'] for stats in class_totals.values())
+            # Calculate unique totals to avoid double-counting GPUs across categories
+            if "raw_data" in results and "host_filter" in results:
+                # Use raw data to calculate unique totals
+                unique_totals = calculate_unique_cluster_totals_from_raw_data(
+                    results["raw_data"], 
+                    results["host_filter"]
+                )
+                overall_claimed = unique_totals['claimed']
+                overall_total = unique_totals['total']
+            else:
+                # Fallback to simple summation if raw data not available
+                overall_claimed = sum(stats['claimed'] for stats in class_totals.values())
+                overall_total = sum(stats['total'] for stats in class_totals.values())
+            
             overall_percent = (overall_claimed / overall_total * 100) if overall_total > 0 else 0
             
             # Add TOTAL row first
