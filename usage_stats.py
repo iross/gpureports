@@ -924,14 +924,15 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
     if "allocation_stats" in results:
         html_parts.append("<h2>Allocation Summary</h2>")
         html_parts.append("<table border='1'>")
-        html_parts.append("<tr><th>Class</th><th>Allocated %</th><th>Average GPUs</th></tr>")
+        html_parts.append("<tr><th>Class</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>")
         
         allocation_stats = results["allocation_stats"]
         for class_name, stats in allocation_stats.items():
             html_parts.append("<tr>")
             html_parts.append(f"<td>{get_display_name(class_name)}</td>")
             html_parts.append(f"<td style='text-align: right'>{stats['allocation_usage_percent']:.1f}%</td>")
-            html_parts.append(f"<td style='text-align: right'>{stats['avg_claimed']:.1f}/{stats['avg_total_available']:.1f}</td>")
+            html_parts.append(f"<td style='text-align: right'>{stats['avg_claimed']:.1f}</td>")
+            html_parts.append(f"<td style='text-align: right'>{stats['avg_total_available']:.1f}</td>")
             html_parts.append("</tr>")
         
         html_parts.append("</table>")
@@ -951,7 +952,7 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
             if device_data:
                 html_parts.append(f"<h3>{get_display_name(class_name)}</h3>")
                 html_parts.append("<table border='1'>")
-                html_parts.append("<tr><th>Device Type</th><th>Allocated %</th><th>Average GPUs</th></tr>")
+                html_parts.append("<tr><th>Device Type</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>")
                 
                 # Calculate totals first
                 total_claimed = 0
@@ -966,7 +967,8 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
                     html_parts.append("<tr style='font-weight: bold; background-color: #f0f0f0;'>")
                     html_parts.append("<td>TOTAL</td>")
                     html_parts.append(f"<td style='text-align: right'>{total_percent:.1f}%</td>")
-                    html_parts.append(f"<td style='text-align: right'>{total_claimed:.1f}/{total_available:.1f}</td>")
+                    html_parts.append(f"<td style='text-align: right'>{total_claimed:.1f}</td>")
+                    html_parts.append(f"<td style='text-align: right'>{total_available:.1f}</td>")
                     html_parts.append("</tr>")
                     
                     class_totals[class_name] = {
@@ -980,7 +982,8 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
                     html_parts.append("<tr>")
                     html_parts.append(f"<td>{device_type}</td>")
                     html_parts.append(f"<td style='text-align: right'>{stats['allocation_usage_percent']:.1f}%</td>")
-                    html_parts.append(f"<td style='text-align: right'>{stats['avg_claimed']:.1f}/{stats['avg_total_available']:.1f}</td>")
+                    html_parts.append(f"<td style='text-align: right'>{stats['avg_claimed']:.1f}</td>")
+                    html_parts.append(f"<td style='text-align: right'>{stats['avg_total_available']:.1f}</td>")
                     html_parts.append("</tr>")
                 
                 html_parts.append("</table>")
@@ -989,7 +992,7 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
         if class_totals:
             html_parts.append("<h2>Cluster Summary</h2>")
             html_parts.append("<table border='1'>")
-            html_parts.append("<tr><th>Class</th><th>Allocated %</th><th>Average GPUs</th></tr>")
+            html_parts.append("<tr><th>Class</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>")
             
             overall_claimed = sum(stats['claimed'] for stats in class_totals.values())
             overall_total = sum(stats['total'] for stats in class_totals.values())
@@ -999,7 +1002,8 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
             html_parts.append("<tr style='font-weight: bold; background-color: #f0f0f0;'>")
             html_parts.append("<td>TOTAL</td>")
             html_parts.append(f"<td style='text-align: right'>{overall_percent:.1f}%</td>")
-            html_parts.append(f"<td style='text-align: right'>{overall_claimed:.1f}/{overall_total:.1f}</td>")
+            html_parts.append(f"<td style='text-align: right'>{overall_claimed:.1f}</td>")
+            html_parts.append(f"<td style='text-align: right'>{overall_total:.1f}</td>")
             html_parts.append("</tr>")
             
             # Add individual class rows in the same order
@@ -1009,7 +1013,8 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
                     html_parts.append("<tr>")
                     html_parts.append(f"<td>{get_display_name(class_name)}</td>")
                     html_parts.append(f"<td style='text-align: right'>{stats['percent']:.1f}%</td>")
-                    html_parts.append(f"<td style='text-align: right'>{stats['claimed']:.1f}/{stats['total']:.1f}</td>")
+                    html_parts.append(f"<td style='text-align: right'>{stats['claimed']:.1f}</td>")
+                    html_parts.append(f"<td style='text-align: right'>{stats['total']:.1f}</td>")
                     html_parts.append("</tr>")
             
             html_parts.append("</table>")
