@@ -911,7 +911,11 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
         device_stats = results["device_stats"]
         class_totals = {}
         
-        for class_name, device_data in device_stats.items():
+        # Define the order: Open Capacity, Prioritized Service, Backfill
+        class_order = ["Shared", "Priority", "Backfill"]  # Internal names
+        
+        for class_name in class_order:
+            device_data = device_stats.get(class_name, {})
             if device_data:
                 html_parts.append(f"<h3>{get_display_name(class_name)}</h3>")
                 html_parts.append("<table border='1'>")
@@ -928,7 +932,7 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
                 if total_available > 0:
                     total_percent = (total_claimed / total_available) * 100
                     html_parts.append("<tr style='font-weight: bold; background-color: #f0f0f0;'>")
-                    html_parts.append(f"<td>TOTAL</td>")
+                    html_parts.append("<td>TOTAL</td>")
                     html_parts.append(f"<td>{total_percent:.1f}%</td>")
                     html_parts.append(f"<td>{total_claimed:.1f}/{total_available:.1f}</td>")
                     html_parts.append("</tr>")
@@ -966,13 +970,15 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
             html_parts.append(f"<td>{overall_claimed:.1f}/{overall_total:.1f}</td>")
             html_parts.append("</tr>")
             
-            # Add individual class rows
-            for class_name, stats in class_totals.items():
-                html_parts.append("<tr>")
-                html_parts.append(f"<td>{get_display_name(class_name)}</td>")
-                html_parts.append(f"<td>{stats['percent']:.1f}%</td>")
-                html_parts.append(f"<td>{stats['claimed']:.1f}/{stats['total']:.1f}</td>")
-                html_parts.append("</tr>")
+            # Add individual class rows in the same order
+            for class_name in class_order:
+                if class_name in class_totals:
+                    stats = class_totals[class_name]
+                    html_parts.append("<tr>")
+                    html_parts.append(f"<td>{get_display_name(class_name)}</td>")
+                    html_parts.append(f"<td>{stats['percent']:.1f}%</td>")
+                    html_parts.append(f"<td>{stats['claimed']:.1f}/{stats['total']:.1f}</td>")
+                    html_parts.append("</tr>")
             
             html_parts.append("</table>")
     
@@ -1065,7 +1071,11 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
         # Calculate and display grand totals
         grand_totals = {}
         
-        for class_name, device_data in device_stats.items():
+        # Define the order: Open Capacity, Prioritized Service, Backfill  
+        class_order = ["Shared", "Priority", "Backfill"]  # Internal names
+        
+        for class_name in class_order:
+            device_data = device_stats.get(class_name, {})
             if device_data:  # Only show classes that have data
                 print(f"\n{get_display_name(class_name)}:")
                 print(f"{'-'*50}")
@@ -1102,9 +1112,11 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
             overall_total = sum(stats['total'] for stats in grand_totals.values())
             overall_percent = (overall_claimed / overall_total * 100) if overall_total > 0 else 0
             
-            for class_name, stats in grand_totals.items():
-                print(f"  {get_display_name(class_name)}: {stats['percent']:.1f}% "
-                      f"({stats['claimed']:.1f}/{stats['total']:.1f} GPUs)")
+            for class_name in class_order:
+                if class_name in grand_totals:
+                    stats = grand_totals[class_name]
+                    print(f"  {get_display_name(class_name)}: {stats['percent']:.1f}% "
+                          f"({stats['claimed']:.1f}/{stats['total']:.1f} GPUs)")
             
             print(f"  {'-'*30}")
             print(f"  TOTAL: {overall_percent:.1f}% "
