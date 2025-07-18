@@ -1,7 +1,7 @@
 ---
 id: task-4
 title: Updates for Miron and BrianB
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2025-07-18'
 updated_date: '2025-07-18'

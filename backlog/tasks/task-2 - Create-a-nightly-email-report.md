@@ -1,10 +1,10 @@
 ---
 id: task-2
 title: Create a nightly email report
-status: To Do
+status: Done
 assignee: []
 created_date: '2025-07-08'
-updated_date: '2025-07-08'
+updated_date: '2025-07-18'
 labels: []
 dependencies: []
 ---

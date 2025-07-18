@@ -1,10 +1,10 @@
 ---
 id: task-2.2
 title: Rig up a nightly emailing solution
-status: To Do
+status: Done
 assignee: []
 created_date: '2025-07-08'
-updated_date: '2025-07-08'
+updated_date: '2025-07-18'
 labels: []
 dependencies:
   - task-2.3

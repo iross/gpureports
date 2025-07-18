@@ -1,9 +1,10 @@
 ---
 id: task-1.2
 title: Mask interactive nodes
-status: To Do
+status: Done
 assignee: []
 created_date: '2025-07-08'
+updated_date: '2025-07-18'
 labels: []
 dependencies: []
 parent_task_id: task-1

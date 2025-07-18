@@ -1,9 +1,10 @@
 ---
 id: task-1.1
 title: Mask voyles
-status: To Do
+status: Done
 assignee: []
 created_date: '2025-07-08'
+updated_date: '2025-07-18'
 labels: []
 dependencies: []
 parent_task_id: task-1
