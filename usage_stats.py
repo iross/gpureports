@@ -78,6 +78,8 @@ def filter_df(df, utilization="", state="", host=""):
             df = df[((df['PrioritizedProjects'] != "") & (df['State'] == state if state != "" else True) & (df['Name'].str.contains(host) if host != "" else True) & (~df['Name'].str.contains("backfill"))) |
                     ((df['PrioritizedProjects'] != "") & (df['State'] == "Claimed") & (df['Name'].str.contains(host) if host != "" else True) & (df['Name'].str.contains("backfill")))
             ]
+        else: # When state is empty, still need to filter for priority projects
+            df = df[(df['PrioritizedProjects'] != "") & (df['Name'].str.contains(host) if host != "" else True) & (~df['Name'].str.contains("backfill"))]
     return df
 
 def count_backfill(df, state="", host=""):
@@ -331,17 +333,22 @@ def calculate_allocation_usage_by_device(df: pd.DataFrame, host: str = "", inclu
                     continue
                 
                 # Count unique GPUs for this utilization type and device in this interval
+                # Fixed: Get all GPUs for this utilization type, then count claimed vs total to avoid double-counting
                 if utilization_type == "Priority":
-                    claimed_gpus = len(filter_df(device_df, "Priority", "Claimed", host)['AssignedGPUs'].dropna().unique())
-                    unclaimed_gpus = len(filter_df(device_df, "Priority", "Unclaimed", host)['AssignedGPUs'].dropna().unique())
+                    all_gpus_df = filter_df(device_df, "Priority", "", host)
                 elif utilization_type == "Shared":
-                    claimed_gpus = len(filter_df(device_df, "Shared", "Claimed", host)['AssignedGPUs'].dropna().unique())
-                    unclaimed_gpus = len(filter_df(device_df, "Shared", "Unclaimed", host)['AssignedGPUs'].dropna().unique())
+                    all_gpus_df = filter_df(device_df, "Shared", "", host)
                 elif utilization_type == "Backfill":
-                    claimed_gpus = len(filter_df(device_df, "Backfill", "Claimed", host)['AssignedGPUs'].dropna().unique())
-                    unclaimed_gpus = len(filter_df(device_df, "Backfill", "Unclaimed", host)['AssignedGPUs'].dropna().unique())
+                    all_gpus_df = filter_df(device_df, "Backfill", "", host)
                 
-                total_gpus_this_interval = claimed_gpus + unclaimed_gpus
+                # Count unique GPUs (total available for this utilization type)
+                unique_gpu_ids = set(all_gpus_df['AssignedGPUs'].dropna().unique())
+                total_gpus_this_interval = len(unique_gpu_ids)
+                
+                # Count how many of these unique GPUs are currently claimed
+                claimed_gpus_df = all_gpus_df[all_gpus_df['State'] == 'Claimed']
+                claimed_unique_gpu_ids = set(claimed_gpus_df['AssignedGPUs'].dropna().unique())
+                claimed_gpus = len(claimed_unique_gpu_ids)
                 
                 if total_gpus_this_interval > 0:
                     interval_usage = (claimed_gpus / total_gpus_this_interval) * 100
@@ -1300,8 +1307,20 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
             print("\nCluster Summary:")
             print(f"{'-'*70}")
             
-            overall_claimed = sum(stats['claimed'] for stats in grand_totals.values())
-            overall_total = sum(stats['total'] for stats in grand_totals.values())
+            # Calculate unique totals to avoid double-counting GPUs across categories
+            if "raw_data" in results and "host_filter" in results:
+                # Use raw data to calculate unique totals (same logic as HTML output)
+                unique_totals = calculate_unique_cluster_totals_from_raw_data(
+                    results["raw_data"], 
+                    results["host_filter"]
+                )
+                overall_claimed = unique_totals['claimed']
+                overall_total = unique_totals['total']
+            else:
+                # Fallback to simple summation if raw data not available
+                overall_claimed = sum(stats['claimed'] for stats in grand_totals.values())
+                overall_total = sum(stats['total'] for stats in grand_totals.values())
+            
             overall_percent = (overall_claimed / overall_total * 100) if overall_total > 0 else 0
             
             for class_name in class_order:
