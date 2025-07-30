@@ -105,30 +105,195 @@ def get_time_filtered_data(
 ) -> pd.DataFrame:
     """
     Get GPU state data filtered by time range.
+    Automatically handles month boundaries by loading data from multiple database files.
     
     Args:
-        db_path: Path to SQLite database
+        db_path: Path to SQLite database (used to determine base directory for multi-db queries)
         hours_back: Number of hours to look back from end_time
-        end_time: End time for the range (defaults to latest timestamp in DB)
+        end_time: End time for the range (defaults to latest timestamp in primary DB)
     
     Returns:
         DataFrame filtered to the specified time range
     """
-    # Get the data
-    conn = sqlite3.connect(db_path)
-    df = pd.read_sql_query("SELECT * FROM gpu_state", conn)
-    conn.close()
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    from pathlib import Path
     
-    # Determine the time range
+    # Get base directory from the provided db_path
+    db_path_obj = Path(db_path)
+    base_dir = str(db_path_obj.parent) if db_path_obj.parent != Path('.') else "."
+    
+    # If end_time is not provided, we need to get it from the primary database
     if end_time is None:
-        end_time = df['timestamp'].max()
+        try:
+            conn = sqlite3.connect(db_path)
+            df_temp = pd.read_sql_query("SELECT MAX(timestamp) as max_time FROM gpu_state", conn)
+            conn.close()
+            if len(df_temp) > 0 and df_temp['max_time'].iloc[0] is not None:
+                end_time = pd.to_datetime(df_temp['max_time'].iloc[0])
+            else:
+                end_time = datetime.datetime.now()
+        except Exception:
+            # Fallback to current time if there's any issue with the database
+            end_time = datetime.datetime.now()
+    
+    # Calculate start time
     start_time = end_time - datetime.timedelta(hours=hours_back)
     
-    # Filter by time range
-    filtered_df = df[(df['timestamp'] >= start_time) & (df['timestamp'] <= end_time)]
+    # Check if the time range spans multiple months
+    start_month = (start_time.year, start_time.month)
+    end_month = (end_time.year, end_time.month)
     
-    return filtered_df
+    if start_month == end_month:
+        # Single month - use traditional approach for backward compatibility and performance
+        try:
+            conn = sqlite3.connect(db_path)
+            df = pd.read_sql_query("SELECT * FROM gpu_state", conn)
+            conn.close()
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
+            
+            # Filter by time range
+            filtered_df = df[(df['timestamp'] >= start_time) & (df['timestamp'] <= end_time)]
+            return filtered_df
+        except Exception as e:
+            # If single-db approach fails, fall back to multi-db approach
+            print(f"Warning: Single database query failed, trying multi-database approach: {e}")
+    
+    # Multi-month query - use the new multi-database functionality
+    try:
+        return get_time_filtered_data_multi_db(start_time, end_time, base_dir)
+    except Exception as e:
+        # Final fallback: try just the specified database file
+        print(f"Warning: Multi-database query failed, falling back to single database: {e}")
+        try:
+            conn = sqlite3.connect(db_path)
+            query = """
+            SELECT * FROM gpu_state 
+            WHERE timestamp BETWEEN ? AND ?
+            ORDER BY timestamp
+            """
+            df = pd.read_sql_query(query, conn, params=[start_time, end_time])
+            conn.close()
+            if len(df) > 0:
+                df['timestamp'] = pd.to_datetime(df['timestamp'])
+            return df
+        except Exception as final_e:
+            print(f"Error: All database query methods failed: {final_e}")
+            return pd.DataFrame()
+
+
+def get_required_databases(start_time: datetime.datetime, end_time: datetime.datetime, base_dir: str = ".") -> list:
+    """
+    Determine which database files are needed for a time range.
+    
+    Args:
+        start_time: Start of the time range
+        end_time: End of the time range
+        base_dir: Directory containing database files
+    
+    Returns:
+        List of database file paths that contain data for the time range
+    """
+    from pathlib import Path
+    
+    required_files = []
+    current_time = start_time.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    
+    while current_time <= end_time:
+        # Generate database filename for this month
+        db_filename = f"gpu_state_{current_time.year:04d}-{current_time.month:02d}.db"
+        db_path = Path(base_dir) / db_filename
+        
+        # Check if file exists
+        if db_path.exists():
+            required_files.append(str(db_path))
+        
+        # Move to next month
+        if current_time.month == 12:
+            current_time = current_time.replace(year=current_time.year + 1, month=1)
+        else:
+            current_time = current_time.replace(month=current_time.month + 1)
+    
+    return required_files
+
+
+def get_multi_db_data(db_paths: list, start_time: datetime.datetime, end_time: datetime.datetime) -> pd.DataFrame:
+    """
+    Load and merge data from multiple database files.
+    
+    Args:
+        db_paths: List of database file paths
+        start_time: Start time for filtering
+        end_time: End time for filtering
+    
+    Returns:
+        Combined DataFrame with data from all databases, filtered by time range
+    """
+    if not db_paths:
+        return pd.DataFrame()
+    
+    all_dataframes = []
+    
+    for db_path in db_paths:
+        try:
+            conn = sqlite3.connect(db_path)
+            # Use parameterized query for time filtering at the database level for efficiency
+            query = """
+            SELECT * FROM gpu_state 
+            WHERE timestamp BETWEEN ? AND ?
+            ORDER BY timestamp
+            """
+            df = pd.read_sql_query(query, conn, params=[start_time, end_time])
+            conn.close()
+            
+            if len(df) > 0:
+                df['timestamp'] = pd.to_datetime(df['timestamp'])
+                all_dataframes.append(df)
+                
+        except Exception as e:
+            print(f"Warning: Could not load data from {db_path}: {e}")
+            continue
+    
+    if not all_dataframes:
+        return pd.DataFrame()
+    
+    # Combine all dataframes
+    combined_df = pd.concat(all_dataframes, ignore_index=True)
+    
+    # Sort by timestamp to ensure proper ordering
+    combined_df = combined_df.sort_values('timestamp').reset_index(drop=True)
+    
+    # Apply final time filtering to handle any edge cases
+    combined_df = combined_df[
+        (combined_df['timestamp'] >= start_time) & 
+        (combined_df['timestamp'] <= end_time)
+    ]
+    
+    return combined_df
+
+
+def get_time_filtered_data_multi_db(
+    start_time: datetime.datetime,
+    end_time: datetime.datetime,
+    base_dir: str = "."
+) -> pd.DataFrame:
+    """
+    Get GPU state data filtered by time range, automatically handling multiple database files.
+    
+    Args:
+        start_time: Start time for the range
+        end_time: End time for the range  
+        base_dir: Directory containing database files (defaults to current directory)
+    
+    Returns:
+        DataFrame filtered to the specified time range from all relevant databases
+    """
+    # Discover required database files
+    db_paths = get_required_databases(start_time, end_time, base_dir)
+    
+    if not db_paths:
+        raise FileNotFoundError(f"No database files found for time range {start_time} to {end_time}")
+    
+    # Load and combine data
+    return get_multi_db_data(db_paths, start_time, end_time)
 
 
 def calculate_allocation_usage(df: pd.DataFrame, host: str = "") -> dict:
@@ -408,13 +573,13 @@ def calculate_unique_cluster_totals_from_raw_data(df: pd.DataFrame, host: str = 
         if bucket_df.empty:
             continue
             
-        # Get all unique GPUs across the fundamental categories (Priority and Shared)
-        # Backfill is just idle Priority/Shared GPUs, so we don't count it separately
+        # Get all unique GPUs across all categories (Priority, Shared, and Backfill)
+        # Some GPUs may only appear in Backfill category (backfill-only GPUs)
         all_claimed_gpus = set()
         all_available_gpus = set()
         
-        # Only collect from Priority and Shared (the actual physical GPU pools)
-        for utilization_type in ["Priority", "Shared"]:
+        # Collect from all three categories to ensure we don't miss backfill-only GPUs
+        for utilization_type in ["Priority", "Shared", "Backfill"]:
             claimed_df = filter_df(bucket_df, utilization_type, "Claimed", host)
             unclaimed_df = filter_df(bucket_df, utilization_type, "Unclaimed", host)
             
