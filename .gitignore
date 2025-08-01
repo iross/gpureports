@@ -1,0 +1,7 @@
+*.png
+*.csv
+*.parquet
+*.db
+
+
+*__pycache__

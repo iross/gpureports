@@ -1,10 +1,10 @@
 ---
 id: task-4
 title: Updates for Miron and BrianB
-status: In Progress
+status: Done
 assignee: []
 created_date: '2025-07-18'
-updated_date: '2025-07-18'
+updated_date: '2025-07-28'
 labels: []
 dependencies: []
 ---

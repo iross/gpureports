@@ -21,81 +21,13 @@ import os
 from pathlib import Path
 # Removed jinja2 and pathlib imports - no longer needed for simple HTML tables
 
-# Define the filtering functions locally to avoid htcondor dependency
-
-# Global variable to store host exclusion configuration
-HOST_EXCLUSIONS = {}
-FILTERED_HOSTS_INFO = []
-
-def filter_df(df, utilization="", state="", host=""):
-    """Filter DataFrame based on utilization type, state, and host."""
-    # Always work with a copy to avoid SettingWithCopyWarning
-    df = df.copy()
-    
-    # Apply host exclusions if configured
-    if HOST_EXCLUSIONS:
-        original_count = len(df)
-        # Filter out excluded hosts
-        for excluded_host in HOST_EXCLUSIONS.keys():
-            df = df[~df['Machine'].str.contains(excluded_host, case=False, na=False)]
-        
-        filtered_count = len(df)
-        if filtered_count < original_count:
-            # Track that filtering occurred
-            filtered_info = {
-                'original_count': original_count,
-                'filtered_count': filtered_count,
-                'excluded_hosts': HOST_EXCLUSIONS
-            }
-            # Update global tracking (avoid duplicates)
-            if filtered_info not in FILTERED_HOSTS_INFO:
-                FILTERED_HOSTS_INFO.append(filtered_info)
-    
-    if utilization == "Backfill":
-        df = df[(df['State'] == state if state != "" else True) & (df['Name'].str.contains(host) if host != "" else True) & (df['Name'].str.contains("backfill"))]
-    elif utilization == "Shared":
-        df = df[(df['PrioritizedProjects'] == "") & (df['State'] == state if state != "" else True) & (df['Name'].str.contains(host) if host != "" else True) & (~df['Name'].str.contains("backfill"))]
-    elif utilization == "Priority":
-        # Do some cleanup -- primary slots still have in-use GPUs listed as Assigned, so remove them if they're in use
-        duplicated_gpus = df[~df['AssignedGPUs'].isna()]['AssignedGPUs'].duplicated(keep=False)
-        # For duplicated GPUs, we want to keep the Claimed state and drop Unclaimed
-        if duplicated_gpus.any():
-            # Create a temporary rank column to sort out duplicates. Prefer claimed to unclaimed and primary slots to backfill.
-            df['_rank'] = 0  # Default rank for Unclaimed
-            df.loc[(df['State'] == 'Claimed') & (~df['Name'].str.contains("backfill")), '_rank'] = 3
-            df.loc[(df['State'] == 'Claimed') & (df['Name'].str.contains("backfill")), '_rank'] = 2
-            df.loc[(df['State'] == 'Unclaimed') & (~df['Name'].str.contains("backfill")), '_rank'] = 1
-            
-            # Sort by AssignedGPUs and rank (keeping highest rank first)
-            df = df.sort_values(['AssignedGPUs', '_rank'], ascending=[True, False])
-            # Drop duplicates, keeping the first occurrence (which will be highest rank)
-            df = df.drop_duplicates(subset=['AssignedGPUs'], keep='first')
-            # Remove the temporary rank column
-            df = df.drop(columns=['_rank'])
-        if state == "Claimed": # Only care about claimed and prioritized
-            df = df[(df['PrioritizedProjects'] != "") & (df['State'] == state if state != "" else True) & (df['Name'].str.contains(host) if host != "" else True) & (~df['Name'].str.contains("backfill"))] 
-        elif state == "Unclaimed": # Care about unclaimed and prioritized, but some might be claimed as backfill so count those.
-            df = df[((df['PrioritizedProjects'] != "") & (df['State'] == state if state != "" else True) & (df['Name'].str.contains(host) if host != "" else True) & (~df['Name'].str.contains("backfill"))) |
-                    ((df['PrioritizedProjects'] != "") & (df['State'] == "Claimed") & (df['Name'].str.contains(host) if host != "" else True) & (df['Name'].str.contains("backfill")))
-            ]
-        else: # When state is empty, still need to filter for priority projects
-            df = df[(df['PrioritizedProjects'] != "") & (df['Name'].str.contains(host) if host != "" else True) & (~df['Name'].str.contains("backfill"))]
-    return df
-
-def count_backfill(df, state="", host=""):
-    """Count backfill GPUs."""
-    df = filter_df(df, "Backfill", state, host)
-    return df.shape[0]
-
-def count_shared(df, state="", host=""):
-    """Count shared GPUs."""
-    df = filter_df(df, "Shared", state, host)
-    return df.shape[0]
-
-def count_prioritized(df, state="", host=""):
-    """Count prioritized GPUs."""
-    df = filter_df(df, "Priority", state, host)
-    return df.shape[0]
+# Import shared utilities
+from gpu_utils import (
+    filter_df, count_backfill, count_shared, count_prioritized,
+    load_host_exclusions, get_display_name, get_required_databases,
+    HOST_EXCLUSIONS, FILTERED_HOSTS_INFO
+)
+import gpu_utils
 
 
 def get_time_filtered_data(
@@ -180,39 +112,6 @@ def get_time_filtered_data(
             return pd.DataFrame()
 
 
-def get_required_databases(start_time: datetime.datetime, end_time: datetime.datetime, base_dir: str = ".") -> list:
-    """
-    Determine which database files are needed for a time range.
-    
-    Args:
-        start_time: Start of the time range
-        end_time: End of the time range
-        base_dir: Directory containing database files
-    
-    Returns:
-        List of database file paths that contain data for the time range
-    """
-    from pathlib import Path
-    
-    required_files = []
-    current_time = start_time.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    
-    while current_time <= end_time:
-        # Generate database filename for this month
-        db_filename = f"gpu_state_{current_time.year:04d}-{current_time.month:02d}.db"
-        db_path = Path(base_dir) / db_filename
-        
-        # Check if file exists
-        if db_path.exists():
-            required_files.append(str(db_path))
-        
-        # Move to next month
-        if current_time.month == 12:
-            current_time = current_time.replace(year=current_time.year + 1, month=1)
-        else:
-            current_time = current_time.replace(month=current_time.month + 1)
-    
-    return required_files
 
 
 def get_multi_db_data(db_paths: list, start_time: datetime.datetime, end_time: datetime.datetime) -> pd.DataFrame:
@@ -605,49 +504,6 @@ def calculate_unique_cluster_totals_from_raw_data(df: pd.DataFrame, host: str = 
     }
 
 
-def load_host_exclusions(exclusions_config: Optional[str] = None, yaml_file: Optional[str] = None) -> Dict[str, str]:
-    """
-    Load host exclusions from JSON string or YAML file.
-    
-    Args:
-        exclusions_config: JSON string with host exclusions in format:
-                          {"hostname1": "reason1", "hostname2": "reason2"}
-        yaml_file: Path to YAML file with host exclusions
-    
-    Returns:
-        Dictionary mapping hostnames to exclusion reasons
-    """
-    if yaml_file:
-        try:
-            with open(yaml_file, 'r') as f:
-                exclusions = yaml.safe_load(f)
-            if exclusions is None:
-                return {}  # Empty file
-            if not isinstance(exclusions, dict):
-                raise ValueError("YAML file must contain a dictionary mapping hostnames to reasons")
-            return exclusions
-        except FileNotFoundError:
-            # If it's the default file, silently ignore if it doesn't exist
-            if yaml_file == "masked_hosts.yaml":
-                return {}
-            raise ValueError(f"YAML file not found: {yaml_file}")
-        except yaml.YAMLError as e:
-            raise ValueError(f"Invalid YAML format: {e}")
-        except Exception as e:
-            raise ValueError(f"Error reading YAML file: {e}")
-    
-    if not exclusions_config:
-        return {}
-    
-    try:
-        exclusions = json.loads(exclusions_config)
-        if not isinstance(exclusions, dict):
-            raise ValueError("Host exclusions must be a JSON object (dictionary)")
-        return exclusions
-    except json.JSONDecodeError as e:
-        raise ValueError(f"Invalid JSON format for host exclusions: {e}")
-    except Exception as e:
-        raise ValueError(f"Error processing host exclusions: {e}")
 
 
 def run_analysis(
@@ -673,9 +529,8 @@ def run_analysis(
         Dictionary containing analysis results and metadata
     """
     # Set up host exclusions
-    global HOST_EXCLUSIONS, FILTERED_HOSTS_INFO
-    HOST_EXCLUSIONS = load_host_exclusions(exclude_hosts, exclude_hosts_yaml)
-    FILTERED_HOSTS_INFO = []  # Reset tracking
+    gpu_utils.HOST_EXCLUSIONS = load_host_exclusions(exclude_hosts, exclude_hosts_yaml)
+    gpu_utils.FILTERED_HOSTS_INFO = []  # Reset tracking
     
     # Get filtered data
     df = get_time_filtered_data(db_path, hours_back, end_time)
@@ -695,8 +550,8 @@ def run_analysis(
             "end_time": df['timestamp'].max(),
             "num_intervals": num_intervals,
             "total_records": len(df),
-            "excluded_hosts": HOST_EXCLUSIONS,
-            "filtered_hosts_info": FILTERED_HOSTS_INFO
+            "excluded_hosts": gpu_utils.HOST_EXCLUSIONS,
+            "filtered_hosts_info": gpu_utils.FILTERED_HOSTS_INFO
         }
     }
     
@@ -1190,14 +1045,6 @@ def load_methodology() -> str:
     except Exception as e:
         return f"<p><em>Error loading methodology: {e}</em></p>"
 
-def get_display_name(class_name: str) -> str:
-    """Convert internal class names to user-friendly display names."""
-    display_mapping = {
-        "Priority": "Prioritized Service",
-        "Shared": "Open Capacity",
-        "Backfill": "Backfill"
-    }
-    return display_mapping.get(class_name, class_name)
 
 def generate_html_report(results: dict, output_file: Optional[str] = None) -> str:
     """
