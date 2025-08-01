@@ -25,6 +25,7 @@ from pathlib import Path
 from gpu_utils import (
     filter_df, count_backfill, count_shared, count_prioritized,
     load_host_exclusions, get_display_name, get_required_databases,
+    get_latest_timestamp_from_most_recent_db,
     HOST_EXCLUSIONS, FILTERED_HOSTS_INFO
 )
 import gpu_utils
@@ -53,19 +54,24 @@ def get_time_filtered_data(
     db_path_obj = Path(db_path)
     base_dir = str(db_path_obj.parent) if db_path_obj.parent != Path('.') else "."
     
-    # If end_time is not provided, we need to get it from the primary database
+    # If end_time is not provided, use the latest timestamp from the most recent database
     if end_time is None:
-        try:
-            conn = sqlite3.connect(db_path)
-            df_temp = pd.read_sql_query("SELECT MAX(timestamp) as max_time FROM gpu_state", conn)
-            conn.close()
-            if len(df_temp) > 0 and df_temp['max_time'].iloc[0] is not None:
-                end_time = pd.to_datetime(df_temp['max_time'].iloc[0])
-            else:
+        # First try to get the latest timestamp from the most recent database
+        end_time = get_latest_timestamp_from_most_recent_db(base_dir)
+        
+        # If that fails, fall back to the specified database
+        if end_time is None:
+            try:
+                conn = sqlite3.connect(db_path)
+                df_temp = pd.read_sql_query("SELECT MAX(timestamp) as max_time FROM gpu_state", conn)
+                conn.close()
+                if len(df_temp) > 0 and df_temp['max_time'].iloc[0] is not None:
+                    end_time = pd.to_datetime(df_temp['max_time'].iloc[0])
+                else:
+                    end_time = datetime.datetime.now()
+            except Exception:
+                # Final fallback to current time if there's any issue with the database
                 end_time = datetime.datetime.now()
-        except Exception:
-            # Fallback to current time if there's any issue with the database
-            end_time = datetime.datetime.now()
     
     # Calculate start time
     start_time = end_time - datetime.timedelta(hours=hours_back)
@@ -102,7 +108,7 @@ def get_time_filtered_data(
             WHERE timestamp BETWEEN ? AND ?
             ORDER BY timestamp
             """
-            df = pd.read_sql_query(query, conn, params=[start_time, end_time])
+            df = pd.read_sql_query(query, conn, params=[start_time.strftime('%Y-%m-%d %H:%M:%S.%f'), end_time.strftime('%Y-%m-%d %H:%M:%S.%f')])
             conn.close()
             if len(df) > 0:
                 df['timestamp'] = pd.to_datetime(df['timestamp'])
@@ -131,6 +137,10 @@ def get_multi_db_data(db_paths: list, start_time: datetime.datetime, end_time: d
     
     all_dataframes = []
     
+    # Add a small buffer to start_time to handle microsecond precision issues
+    # This ensures we don't miss data due to tiny timing differences
+    buffered_start = start_time - datetime.timedelta(seconds=1)
+    
     for db_path in db_paths:
         try:
             conn = sqlite3.connect(db_path)
@@ -140,12 +150,15 @@ def get_multi_db_data(db_paths: list, start_time: datetime.datetime, end_time: d
             WHERE timestamp BETWEEN ? AND ?
             ORDER BY timestamp
             """
-            df = pd.read_sql_query(query, conn, params=[start_time, end_time])
+            df = pd.read_sql_query(query, conn, params=[buffered_start.strftime('%Y-%m-%d %H:%M:%S.%f'), end_time.strftime('%Y-%m-%d %H:%M:%S.%f')])
             conn.close()
             
             if len(df) > 0:
                 df['timestamp'] = pd.to_datetime(df['timestamp'])
-                all_dataframes.append(df)
+                # Apply the precise time filtering after loading, since we used a buffered start
+                df = df[(df['timestamp'] >= start_time) & (df['timestamp'] <= end_time)]
+                if len(df) > 0:
+                    all_dataframes.append(df)
                 
         except Exception as e:
             print(f"Warning: Could not load data from {db_path}: {e}")

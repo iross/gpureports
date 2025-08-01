@@ -190,3 +190,57 @@ def get_required_databases(start_time: datetime.datetime, end_time: datetime.dat
             current = current.replace(month=current.month + 1)
     
     return db_files
+
+
+def get_most_recent_database(base_dir: str = ".") -> Optional[str]:
+    """
+    Find the most recent database file in the given directory.
+    
+    Args:
+        base_dir: Directory to search for database files
+        
+    Returns:
+        Path to the most recent database file, or None if none found
+    """
+    import glob
+    from pathlib import Path
+    
+    # Find all database files matching the pattern
+    pattern = str(Path(base_dir) / "gpu_state_*.db")
+    db_files = glob.glob(pattern)
+    
+    if not db_files:
+        return None
+    
+    # Sort by filename (which contains YYYY-MM date) to get the most recent
+    db_files.sort()
+    return db_files[-1]
+
+
+def get_latest_timestamp_from_most_recent_db(base_dir: str = ".") -> Optional[datetime.datetime]:
+    """
+    Get the latest timestamp from the most recent database file.
+    
+    Args:
+        base_dir: Directory containing database files
+        
+    Returns:
+        Latest timestamp from the most recent database, or None if not found
+    """
+    import sqlite3
+    import pandas as pd
+    
+    most_recent_db = get_most_recent_database(base_dir)
+    if not most_recent_db:
+        return None
+    
+    try:
+        conn = sqlite3.connect(most_recent_db)
+        df_temp = pd.read_sql_query("SELECT MAX(timestamp) as max_time FROM gpu_state", conn)
+        conn.close()
+        if len(df_temp) > 0 and df_temp['max_time'].iloc[0] is not None:
+            return pd.to_datetime(df_temp['max_time'].iloc[0])
+    except Exception:
+        pass
+    
+    return None
