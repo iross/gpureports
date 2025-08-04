@@ -612,7 +612,7 @@ def get_gpu_models_at_time(
     ORDER BY GPUs_DeviceName
     """
 
-    df = pd.read_sql_query(query, conn, params=[start_time.strftime('%Y-%m-%d %H:%M:%S.%f'), end_time.strftime('%Y-%m-%d %H:%M:%S.%f')])
+    df = pd.read_sql_query(query, conn, params=[start_time, end_time])
     conn.close()
 
     return df['GPUs_DeviceName'].tolist()
@@ -652,7 +652,7 @@ def get_gpu_model_activity_at_time(
     ORDER BY timestamp DESC, Machine, AssignedGPUs
     """
 
-    df = pd.read_sql_query(query, conn, params=[gpu_model, start_time.strftime('%Y-%m-%d %H:%M:%S.%f'), end_time.strftime('%Y-%m-%d %H:%M:%S.%f')])
+    df = pd.read_sql_query(query, conn, params=[gpu_model, start_time, end_time])
     conn.close()
 
     if len(df) > 0:
