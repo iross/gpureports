@@ -21,127 +21,65 @@ import os
 from pathlib import Path
 # Removed jinja2 and pathlib imports - no longer needed for simple HTML tables
 
-# Define the filtering functions locally to avoid htcondor dependency
-
-# Global variable to store host exclusion configuration
-HOST_EXCLUSIONS = {}
-FILTERED_HOSTS_INFO = []
-
-def filter_df(df, utilization="", state="", host=""):
-    """Filter DataFrame based on utilization type, state, and host."""
-    # Always work with a copy to avoid SettingWithCopyWarning
-    df = df.copy()
-    
-    # Apply host exclusions if configured
-    if HOST_EXCLUSIONS:
-        original_count = len(df)
-        # Filter out excluded hosts
-        for excluded_host in HOST_EXCLUSIONS.keys():
-            df = df[~df['Machine'].str.contains(excluded_host, case=False, na=False)]
-        
-        filtered_count = len(df)
-        if filtered_count < original_count:
-            # Track that filtering occurred
-            filtered_info = {
-                'original_count': original_count,
-                'filtered_count': filtered_count,
-                'excluded_hosts': HOST_EXCLUSIONS
-            }
-            # Update global tracking (avoid duplicates)
-            if filtered_info not in FILTERED_HOSTS_INFO:
-                FILTERED_HOSTS_INFO.append(filtered_info)
-    
-    if utilization == "Backfill":
-        df = df[(df['State'] == state if state != "" else True) & (df['Name'].str.contains(host) if host != "" else True) & (df['Name'].str.contains("backfill"))]
-    elif utilization == "Shared":
-        df = df[(df['PrioritizedProjects'] == "") & (df['State'] == state if state != "" else True) & (df['Name'].str.contains(host) if host != "" else True) & (~df['Name'].str.contains("backfill"))]
-    elif utilization == "Priority":
-        # Do some cleanup -- primary slots still have in-use GPUs listed as Assigned, so remove them if they're in use
-        duplicated_gpus = df[~df['AssignedGPUs'].isna()]['AssignedGPUs'].duplicated(keep=False)
-        # For duplicated GPUs, we want to keep the Claimed state and drop Unclaimed
-        if duplicated_gpus.any():
-            # Create a temporary rank column to sort out duplicates. Prefer claimed to unclaimed and primary slots to backfill.
-            df['_rank'] = 0  # Default rank for Unclaimed
-            df.loc[(df['State'] == 'Claimed') & (~df['Name'].str.contains("backfill")), '_rank'] = 3
-            df.loc[(df['State'] == 'Claimed') & (df['Name'].str.contains("backfill")), '_rank'] = 2
-            df.loc[(df['State'] == 'Unclaimed') & (~df['Name'].str.contains("backfill")), '_rank'] = 1
-            
-            # Sort by AssignedGPUs and rank (keeping highest rank first)
-            df = df.sort_values(['AssignedGPUs', '_rank'], ascending=[True, False])
-            # Drop duplicates, keeping the first occurrence (which will be highest rank)
-            df = df.drop_duplicates(subset=['AssignedGPUs'], keep='first')
-            # Remove the temporary rank column
-            df = df.drop(columns=['_rank'])
-        if state == "Claimed": # Only care about claimed and prioritized
-            df = df[(df['PrioritizedProjects'] != "") & (df['State'] == state if state != "" else True) & (df['Name'].str.contains(host) if host != "" else True) & (~df['Name'].str.contains("backfill"))] 
-        elif state == "Unclaimed": # Care about unclaimed and prioritized, but some might be claimed as backfill so count those.
-            df = df[((df['PrioritizedProjects'] != "") & (df['State'] == state if state != "" else True) & (df['Name'].str.contains(host) if host != "" else True) & (~df['Name'].str.contains("backfill"))) |
-                    ((df['PrioritizedProjects'] != "") & (df['State'] == "Claimed") & (df['Name'].str.contains(host) if host != "" else True) & (df['Name'].str.contains("backfill")))
-            ]
-        else: # When state is empty, still need to filter for priority projects
-            df = df[(df['PrioritizedProjects'] != "") & (df['Name'].str.contains(host) if host != "" else True) & (~df['Name'].str.contains("backfill"))]
-    return df
-
-def count_backfill(df, state="", host=""):
-    """Count backfill GPUs."""
-    df = filter_df(df, "Backfill", state, host)
-    return df.shape[0]
-
-def count_shared(df, state="", host=""):
-    """Count shared GPUs."""
-    df = filter_df(df, "Shared", state, host)
-    return df.shape[0]
-
-def count_prioritized(df, state="", host=""):
-    """Count prioritized GPUs."""
-    df = filter_df(df, "Priority", state, host)
-    return df.shape[0]
+# Import shared utilities
+from gpu_utils import (
+    filter_df, count_backfill, count_shared, count_prioritized,
+    load_host_exclusions, get_display_name, get_required_databases,
+    get_latest_timestamp_from_most_recent_db,
+    HOST_EXCLUSIONS, FILTERED_HOSTS_INFO
+)
+import gpu_utils
 
 
 def get_time_filtered_data(
-    db_path: str, 
+    db_path: str,
     hours_back: int = 24,
     end_time: Optional[datetime.datetime] = None
 ) -> pd.DataFrame:
     """
     Get GPU state data filtered by time range.
     Automatically handles month boundaries by loading data from multiple database files.
-    
+
     Args:
         db_path: Path to SQLite database (used to determine base directory for multi-db queries)
         hours_back: Number of hours to look back from end_time
         end_time: End time for the range (defaults to latest timestamp in primary DB)
-    
+
     Returns:
         DataFrame filtered to the specified time range
     """
     from pathlib import Path
-    
+
     # Get base directory from the provided db_path
     db_path_obj = Path(db_path)
     base_dir = str(db_path_obj.parent) if db_path_obj.parent != Path('.') else "."
-    
-    # If end_time is not provided, we need to get it from the primary database
+
+    # If end_time is not provided, use the latest timestamp from the most recent database
     if end_time is None:
-        try:
-            conn = sqlite3.connect(db_path)
-            df_temp = pd.read_sql_query("SELECT MAX(timestamp) as max_time FROM gpu_state", conn)
-            conn.close()
-            if len(df_temp) > 0 and df_temp['max_time'].iloc[0] is not None:
-                end_time = pd.to_datetime(df_temp['max_time'].iloc[0])
-            else:
+        # First try to get the latest timestamp from the most recent database
+        end_time = get_latest_timestamp_from_most_recent_db(base_dir)
+
+        # If that fails, fall back to the specified database
+        if end_time is None:
+            try:
+                conn = sqlite3.connect(db_path)
+                df_temp = pd.read_sql_query("SELECT MAX(timestamp) as max_time FROM gpu_state", conn)
+                conn.close()
+                if len(df_temp) > 0 and df_temp['max_time'].iloc[0] is not None:
+                    end_time = pd.to_datetime(df_temp['max_time'].iloc[0])
+                else:
+                    end_time = datetime.datetime.now()
+            except Exception:
+                # Final fallback to current time if there's any issue with the database
                 end_time = datetime.datetime.now()
-        except Exception:
-            # Fallback to current time if there's any issue with the database
-            end_time = datetime.datetime.now()
-    
+
     # Calculate start time
     start_time = end_time - datetime.timedelta(hours=hours_back)
-    
+
     # Check if the time range spans multiple months
     start_month = (start_time.year, start_time.month)
     end_month = (end_time.year, end_time.month)
-    
+
     if start_month == end_month:
         # Single month - use traditional approach for backward compatibility and performance
         try:
@@ -149,14 +87,14 @@ def get_time_filtered_data(
             df = pd.read_sql_query("SELECT * FROM gpu_state", conn)
             conn.close()
             df['timestamp'] = pd.to_datetime(df['timestamp'])
-            
+
             # Filter by time range
             filtered_df = df[(df['timestamp'] >= start_time) & (df['timestamp'] <= end_time)]
             return filtered_df
         except Exception as e:
             # If single-db approach fails, fall back to multi-db approach
             print(f"Warning: Single database query failed, trying multi-database approach: {e}")
-    
+
     # Multi-month query - use the new multi-database functionality
     try:
         return get_time_filtered_data_multi_db(start_time, end_time, base_dir)
@@ -166,11 +104,11 @@ def get_time_filtered_data(
         try:
             conn = sqlite3.connect(db_path)
             query = """
-            SELECT * FROM gpu_state 
+            SELECT * FROM gpu_state
             WHERE timestamp BETWEEN ? AND ?
             ORDER BY timestamp
             """
-            df = pd.read_sql_query(query, conn, params=[start_time, end_time])
+            df = pd.read_sql_query(query, conn, params=[start_time.strftime('%Y-%m-%d %H:%M:%S.%f'), end_time.strftime('%Y-%m-%d %H:%M:%S.%f')])
             conn.close()
             if len(df) > 0:
                 df['timestamp'] = pd.to_datetime(df['timestamp'])
@@ -180,93 +118,67 @@ def get_time_filtered_data(
             return pd.DataFrame()
 
 
-def get_required_databases(start_time: datetime.datetime, end_time: datetime.datetime, base_dir: str = ".") -> list:
-    """
-    Determine which database files are needed for a time range.
-    
-    Args:
-        start_time: Start of the time range
-        end_time: End of the time range
-        base_dir: Directory containing database files
-    
-    Returns:
-        List of database file paths that contain data for the time range
-    """
-    from pathlib import Path
-    
-    required_files = []
-    current_time = start_time.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    
-    while current_time <= end_time:
-        # Generate database filename for this month
-        db_filename = f"gpu_state_{current_time.year:04d}-{current_time.month:02d}.db"
-        db_path = Path(base_dir) / db_filename
-        
-        # Check if file exists
-        if db_path.exists():
-            required_files.append(str(db_path))
-        
-        # Move to next month
-        if current_time.month == 12:
-            current_time = current_time.replace(year=current_time.year + 1, month=1)
-        else:
-            current_time = current_time.replace(month=current_time.month + 1)
-    
-    return required_files
 
 
 def get_multi_db_data(db_paths: list, start_time: datetime.datetime, end_time: datetime.datetime) -> pd.DataFrame:
     """
     Load and merge data from multiple database files.
-    
+
     Args:
         db_paths: List of database file paths
         start_time: Start time for filtering
         end_time: End time for filtering
-    
+
     Returns:
         Combined DataFrame with data from all databases, filtered by time range
     """
     if not db_paths:
         return pd.DataFrame()
-    
+
     all_dataframes = []
-    
+
+    # Add a small buffer to start_time to handle microsecond precision issues
+    # This ensures we don't miss data due to tiny timing differences
+    buffered_start = start_time - datetime.timedelta(seconds=1)
+
     for db_path in db_paths:
         try:
             conn = sqlite3.connect(db_path)
             # Use parameterized query for time filtering at the database level for efficiency
             query = """
-            SELECT * FROM gpu_state 
+            SELECT * FROM gpu_state
             WHERE timestamp BETWEEN ? AND ?
             ORDER BY timestamp
             """
-            df = pd.read_sql_query(query, conn, params=[start_time, end_time])
+            df = pd.read_sql_query(query, conn, params=[buffered_start.strftime('%Y-%m-%d %H:%M:%S.%f'), end_time.strftime('%Y-%m-%d %H:%M:%S.%f')])
             conn.close()
-            
+
             if len(df) > 0:
                 df['timestamp'] = pd.to_datetime(df['timestamp'])
-                all_dataframes.append(df)
-                
+                # Apply the precise time filtering after loading, since we used a buffered start
+                df = df[(df['timestamp'] >= start_time) & (df['timestamp'] <= end_time)]
+                if len(df) > 0:
+                    all_dataframes.append(df)
+
         except Exception as e:
             print(f"Warning: Could not load data from {db_path}: {e}")
             continue
-    
+
     if not all_dataframes:
         return pd.DataFrame()
-    
+
     # Combine all dataframes
     combined_df = pd.concat(all_dataframes, ignore_index=True)
-    
+
     # Sort by timestamp to ensure proper ordering
     combined_df = combined_df.sort_values('timestamp').reset_index(drop=True)
-    
+
     # Apply final time filtering to handle any edge cases
     combined_df = combined_df[
-        (combined_df['timestamp'] >= start_time) & 
+        (combined_df['timestamp'] >= start_time) &
         (combined_df['timestamp'] <= end_time)
     ]
-    
+
     return combined_df
 
 
@@ -277,21 +189,21 @@ def get_time_filtered_data_multi_db(
 ) -> pd.DataFrame:
     """
     Get GPU state data filtered by time range, automatically handling multiple database files.
-    
+
     Args:
         start_time: Start time for the range
-        end_time: End time for the range  
+        end_time: End time for the range
         base_dir: Directory containing database files (defaults to current directory)
-    
+
     Returns:
         DataFrame filtered to the specified time range from all relevant databases
     """
     # Discover required database files
     db_paths = get_required_databases(start_time, end_time, base_dir)
-    
+
     if not db_paths:
         raise FileNotFoundError(f"No database files found for time range {start_time} to {end_time}")
-    
+
     # Load and combine data
     return get_multi_db_data(db_paths, start_time, end_time)
 
@@ -300,11 +212,11 @@ def calculate_allocation_usage(df: pd.DataFrame, host: str = "") -> dict:
     """
     Calculate allocation-based usage: percentage of available GPUs that are claimed,
     averaged across 15-minute intervals.
-    
+
     Args:
         df: DataFrame with GPU state data
         host: Optional host filter
-    
+
     Returns:
         Dictionary with usage statistics for each class
     """
@@ -312,18 +224,18 @@ def calculate_allocation_usage(df: pd.DataFrame, host: str = "") -> dict:
     df = df.copy()
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     df['15min_bucket'] = df['timestamp'].dt.floor('15min')
-    
+
     stats = {}
-    
+
     for utilization_type in ["Priority", "Shared", "Backfill"]:
         interval_usage_percentages = []
         total_claimed_gpus = 0
         total_available_gpus = 0
-        
+
         # For each 15-minute interval, count unique GPUs
         for bucket in sorted(df['15min_bucket'].unique()):
             bucket_df = df[df['15min_bucket'] == bucket]
-            
+
             # Count unique GPUs for this utilization type in this interval
             if utilization_type == "Priority":
                 claimed_gpus = len(filter_df(bucket_df, "Priority", "Claimed", host)['AssignedGPUs'].dropna().unique())
@@ -334,56 +246,56 @@ def calculate_allocation_usage(df: pd.DataFrame, host: str = "") -> dict:
             elif utilization_type == "Backfill":
                 claimed_gpus = len(filter_df(bucket_df, "Backfill", "Claimed", host)['AssignedGPUs'].dropna().unique())
                 unclaimed_gpus = len(filter_df(bucket_df, "Backfill", "Unclaimed", host)['AssignedGPUs'].dropna().unique())
-            
+
             total_gpus_this_interval = claimed_gpus + unclaimed_gpus
-            
+
             if total_gpus_this_interval > 0:
                 interval_usage = (claimed_gpus / total_gpus_this_interval) * 100
                 interval_usage_percentages.append(interval_usage)
                 total_claimed_gpus += claimed_gpus
                 total_available_gpus += total_gpus_this_interval
-        
+
         # Calculate average usage percentage across all intervals
         avg_usage_percentage = sum(interval_usage_percentages) / len(interval_usage_percentages) if interval_usage_percentages else 0
-        
+
         # Calculate average GPU counts across intervals
         num_intervals = len(df['15min_bucket'].unique())
         avg_claimed = total_claimed_gpus / num_intervals if num_intervals > 0 else 0
         avg_total = total_available_gpus / num_intervals if num_intervals > 0 else 0
-        
+
         stats[utilization_type] = {
             'avg_claimed': avg_claimed,
             'avg_total_available': avg_total,
             'allocation_usage_percent': avg_usage_percentage,
             'num_intervals': num_intervals
         }
-    
+
     return stats
 
 
 def calculate_performance_usage(df: pd.DataFrame, host: str = "") -> dict:
     """
     Calculate performance-based usage: actual GPU utilization metrics averaged over time.
-    
+
     Args:
         df: DataFrame with GPU state data
         host: Optional host filter
-    
+
     Returns:
         Dictionary with performance usage statistics for each class
     """
     stats = {}
-    
+
     for utilization_type in ["Priority", "Shared", "Backfill"]:
         # Filter to only claimed GPUs with utilization data
         filtered_df = filter_df(df, utilization_type, "Claimed", host)
-        
+
         # Only consider records with valid utilization data
         util_df = filtered_df[
-            (filtered_df['GPUsAverageUsage'].notna()) & 
+            (filtered_df['GPUsAverageUsage'].notna()) &
             (filtered_df['GPUsAverageUsage'] >= 0)
         ]
-        
+
         if len(util_df) > 0:
             avg_utilization = util_df['GPUsAverageUsage'].mean() * 100  # Convert to percentage
             total_records = len(util_df)
@@ -392,29 +304,29 @@ def calculate_performance_usage(df: pd.DataFrame, host: str = "") -> dict:
             avg_utilization = 0
             total_records = 0
             unique_gpus = 0
-        
+
         stats[utilization_type] = {
             'avg_gpu_utilization_percent': avg_utilization,
             'records_with_utilization': total_records,
             'unique_gpus_used': unique_gpus
         }
-    
+
     return stats
 
 
 def calculate_time_series_usage(
-    df: pd.DataFrame, 
+    df: pd.DataFrame,
     bucket_minutes: int = 15,
     host: str = ""
 ) -> pd.DataFrame:
     """
     Calculate usage over time in buckets, counting unique GPUs per interval.
-    
+
     Args:
         df: DataFrame with GPU state data
         bucket_minutes: Size of time buckets in minutes
         host: Optional host filter
-    
+
     Returns:
         DataFrame with time series usage statistics
     """
@@ -422,13 +334,13 @@ def calculate_time_series_usage(
     df = df.copy()
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     df[f'{bucket_minutes}min_bucket'] = df['timestamp'].dt.floor(f'{bucket_minutes}min')
-    
+
     time_series_data = []
-    
+
     for bucket in sorted(df[f'{bucket_minutes}min_bucket'].unique()):
         bucket_df = df[df[f'{bucket_minutes}min_bucket'] == bucket]
         bucket_stats = {'timestamp': bucket}
-        
+
         for utilization_type in ["Priority", "Shared", "Backfill"]:
             # Count unique GPUs for this utilization type in this interval
             if utilization_type == "Priority":
@@ -440,28 +352,28 @@ def calculate_time_series_usage(
             elif utilization_type == "Backfill":
                 claimed_gpus = len(filter_df(bucket_df, "Backfill", "Claimed", host)['AssignedGPUs'].dropna().unique())
                 unclaimed_gpus = len(filter_df(bucket_df, "Backfill", "Unclaimed", host)['AssignedGPUs'].dropna().unique())
-            
+
             total_gpus = claimed_gpus + unclaimed_gpus
             usage_percent = (claimed_gpus / total_gpus * 100) if total_gpus > 0 else 0
-            
+
             bucket_stats[f'{utilization_type.lower()}_claimed'] = claimed_gpus
             bucket_stats[f'{utilization_type.lower()}_total'] = total_gpus
             bucket_stats[f'{utilization_type.lower()}_usage_percent'] = usage_percent
-        
+
         time_series_data.append(bucket_stats)
-    
+
     return pd.DataFrame(time_series_data)
 
 
 def calculate_allocation_usage_by_device(df: pd.DataFrame, host: str = "", include_all_devices: bool = True) -> dict:
     """
     Calculate allocation-based usage grouped by device type, averaged across 15-minute intervals.
-    
+
     Args:
         df: DataFrame with GPU state data
         host: Optional host filter
         include_all_devices: Whether to include all device types or filter out older ones
-    
+
     Returns:
         Dictionary with usage statistics for each class and device type
     """
@@ -469,34 +381,34 @@ def calculate_allocation_usage_by_device(df: pd.DataFrame, host: str = "", inclu
     df = df.copy()
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     df['15min_bucket'] = df['timestamp'].dt.floor('15min')
-    
+
     # Get unique device types
     device_types = df['GPUs_DeviceName'].dropna().unique()
-    
+
     stats = {}
-    
+
     for utilization_type in ["Priority", "Shared", "Backfill"]:
         stats[utilization_type] = {}
-        
+
         for device_type in device_types:
             # Skip old/uncommon GPU types for cleaner output (unless requested to include all)
             if not include_all_devices and any(old_gpu in device_type for old_gpu in ["GTX 1080", "P100", "Quadro", "A30", "A40"]):
                 continue
-                
+
             interval_usage_percentages = []
             total_claimed_gpus = 0
             total_available_gpus = 0
-            
+
             # For each 15-minute interval, count unique GPUs of this device type
             for bucket in sorted(df['15min_bucket'].unique()):
                 bucket_df = df[df['15min_bucket'] == bucket]
-                
+
                 # Filter by device type
                 device_df = bucket_df[bucket_df['GPUs_DeviceName'] == device_type]
-                
+
                 if device_df.empty:
                     continue
-                
+
                 # Count unique GPUs for this utilization type and device in this interval
                 # Fixed: Get all GPUs for this utilization type, then count claimed vs total to avoid double-counting
                 if utilization_type == "Priority":
@@ -505,55 +417,55 @@ def calculate_allocation_usage_by_device(df: pd.DataFrame, host: str = "", inclu
                     all_gpus_df = filter_df(device_df, "Shared", "", host)
                 elif utilization_type == "Backfill":
                     all_gpus_df = filter_df(device_df, "Backfill", "", host)
-                
+
                 # Count unique GPUs (total available for this utilization type)
                 unique_gpu_ids = set(all_gpus_df['AssignedGPUs'].dropna().unique())
                 total_gpus_this_interval = len(unique_gpu_ids)
-                
+
                 # Count how many of these unique GPUs are currently claimed
                 claimed_gpus_df = all_gpus_df[all_gpus_df['State'] == 'Claimed']
                 claimed_unique_gpu_ids = set(claimed_gpus_df['AssignedGPUs'].dropna().unique())
                 claimed_gpus = len(claimed_unique_gpu_ids)
-                
+
                 if total_gpus_this_interval > 0:
                     interval_usage = (claimed_gpus / total_gpus_this_interval) * 100
                     interval_usage_percentages.append(interval_usage)
                     total_claimed_gpus += claimed_gpus
                     total_available_gpus += total_gpus_this_interval
-            
+
             if interval_usage_percentages:
                 # Calculate average usage percentage across all intervals
                 avg_usage_percentage = sum(interval_usage_percentages) / len(interval_usage_percentages)
-                
+
                 # Calculate average GPU counts across intervals
                 num_intervals_with_data = len(interval_usage_percentages)
                 avg_claimed = total_claimed_gpus / num_intervals_with_data if num_intervals_with_data > 0 else 0
                 avg_total = total_available_gpus / num_intervals_with_data if num_intervals_with_data > 0 else 0
-                
+
                 stats[utilization_type][device_type] = {
                     'avg_claimed': avg_claimed,
                     'avg_total_available': avg_total,
                     'allocation_usage_percent': avg_usage_percentage,
                     'num_intervals': num_intervals_with_data
                 }
-    
+
     return stats
 
 
 def calculate_unique_cluster_totals_from_raw_data(df: pd.DataFrame, host: str = "") -> dict:
     """
     Calculate cluster totals from raw data without double-counting GPUs across categories.
-    
+
     The issue is that GPUs can appear in both Priority and Backfill categories
     (e.g., when a prioritized GPU is idle, it's available for both prioritized and backfill jobs).
     For the TOTAL row, we want to count each unique GPU only once.
-    
+
     This function goes back to the raw data to count unique AssignedGPUs.
-    
+
     Args:
         df: Raw DataFrame with GPU state data
         host: Optional host filter
-        
+
     Returns:
         Dictionary with unique 'claimed' and 'total' counts
     """
@@ -561,93 +473,50 @@ def calculate_unique_cluster_totals_from_raw_data(df: pd.DataFrame, host: str = 
     df = df.copy()
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     df['15min_bucket'] = df['timestamp'].dt.floor('15min')
-    
+
     total_claimed_across_intervals = 0
     total_available_across_intervals = 0
     num_intervals = 0
-    
+
     # For each 15-minute interval, count unique GPUs across all categories
     for bucket in sorted(df['15min_bucket'].unique()):
         bucket_df = df[df['15min_bucket'] == bucket]
-        
+
         if bucket_df.empty:
             continue
-            
+
         # Get all unique GPUs across all categories (Priority, Shared, and Backfill)
         # Some GPUs may only appear in Backfill category (backfill-only GPUs)
         all_claimed_gpus = set()
         all_available_gpus = set()
-        
+
         # Collect from all three categories to ensure we don't miss backfill-only GPUs
         for utilization_type in ["Priority", "Shared", "Backfill"]:
             claimed_df = filter_df(bucket_df, utilization_type, "Claimed", host)
             unclaimed_df = filter_df(bucket_df, utilization_type, "Unclaimed", host)
-            
+
             # Add unique GPUs from this category
             claimed_gpus = set(claimed_df['AssignedGPUs'].dropna().unique())
             unclaimed_gpus = set(unclaimed_df['AssignedGPUs'].dropna().unique())
-            
+
             all_claimed_gpus.update(claimed_gpus)
             all_available_gpus.update(claimed_gpus)  # claimed GPUs are part of available
             all_available_gpus.update(unclaimed_gpus)
-        
+
         total_claimed_across_intervals += len(all_claimed_gpus)
         total_available_across_intervals += len(all_available_gpus)
         num_intervals += 1
-    
+
     # Calculate averages
     avg_claimed = total_claimed_across_intervals / num_intervals if num_intervals > 0 else 0
     avg_available = total_available_across_intervals / num_intervals if num_intervals > 0 else 0
-    
+
     return {
         'claimed': avg_claimed,
         'total': avg_available
     }
 
 
-def load_host_exclusions(exclusions_config: Optional[str] = None, yaml_file: Optional[str] = None) -> Dict[str, str]:
-    """
-    Load host exclusions from JSON string or YAML file.
-    
-    Args:
-        exclusions_config: JSON string with host exclusions in format:
-                          {"hostname1": "reason1", "hostname2": "reason2"}
-        yaml_file: Path to YAML file with host exclusions
-    
-    Returns:
-        Dictionary mapping hostnames to exclusion reasons
-    """
-    if yaml_file:
-        try:
-            with open(yaml_file, 'r') as f:
-                exclusions = yaml.safe_load(f)
-            if exclusions is None:
-                return {}  # Empty file
-            if not isinstance(exclusions, dict):
-                raise ValueError("YAML file must contain a dictionary mapping hostnames to reasons")
-            return exclusions
-        except FileNotFoundError:
-            # If it's the default file, silently ignore if it doesn't exist
-            if yaml_file == "masked_hosts.yaml":
-                return {}
-            raise ValueError(f"YAML file not found: {yaml_file}")
-        except yaml.YAMLError as e:
-            raise ValueError(f"Invalid YAML format: {e}")
-        except Exception as e:
-            raise ValueError(f"Error reading YAML file: {e}")
-    
-    if not exclusions_config:
-        return {}
-    
-    try:
-        exclusions = json.loads(exclusions_config)
-        if not isinstance(exclusions, dict):
-            raise ValueError("Host exclusions must be a JSON object (dictionary)")
-        return exclusions
-    except json.JSONDecodeError as e:
-        raise ValueError(f"Invalid JSON format for host exclusions: {e}")
-    except Exception as e:
-        raise ValueError(f"Error processing host exclusions: {e}")
 
 
 def run_analysis(
@@ -664,42 +533,41 @@ def run_analysis(
 ) -> dict:
     """
     Core analysis function that can be called programmatically.
-    
+
     Args:
         exclude_hosts: JSON string with host exclusions
         exclude_hosts_yaml: Path to YAML file with host exclusions
-    
+
     Returns:
         Dictionary containing analysis results and metadata
     """
     # Set up host exclusions
-    global HOST_EXCLUSIONS, FILTERED_HOSTS_INFO
-    HOST_EXCLUSIONS = load_host_exclusions(exclude_hosts, exclude_hosts_yaml)
-    FILTERED_HOSTS_INFO = []  # Reset tracking
-    
+    gpu_utils.HOST_EXCLUSIONS = load_host_exclusions(exclude_hosts, exclude_hosts_yaml)
+    gpu_utils.FILTERED_HOSTS_INFO = []  # Reset tracking
+
     # Get filtered data
     df = get_time_filtered_data(db_path, hours_back, end_time)
-    
+
     if len(df) == 0:
         return {"error": "No data found in the specified time range."}
-    
+
     # Calculate time buckets for interval counting
     df_temp = df.copy()
     df_temp['timestamp'] = pd.to_datetime(df_temp['timestamp'])
     df_temp['15min_bucket'] = df_temp['timestamp'].dt.floor('15min')
     num_intervals = df_temp['15min_bucket'].nunique()
-    
+
     result = {
         "metadata": {
             "start_time": df['timestamp'].min(),
             "end_time": df['timestamp'].max(),
             "num_intervals": num_intervals,
             "total_records": len(df),
-            "excluded_hosts": HOST_EXCLUSIONS,
-            "filtered_hosts_info": FILTERED_HOSTS_INFO
+            "excluded_hosts": gpu_utils.HOST_EXCLUSIONS,
+            "filtered_hosts_info": gpu_utils.FILTERED_HOSTS_INFO
         }
     }
-    
+
     if analysis_type == "allocation":
         if group_by_device:
             result["device_stats"] = calculate_allocation_usage_by_device(df, host, all_devices)
@@ -707,10 +575,10 @@ def run_analysis(
             result["host_filter"] = host  # Pass host filter for consistency
         else:
             result["allocation_stats"] = calculate_allocation_usage(df, host)
-    
+
     elif analysis_type == "timeseries":
         result["timeseries_data"] = calculate_time_series_usage(df, bucket_minutes, host)
-    
+
     return result
 
 
@@ -721,32 +589,32 @@ def get_gpu_models_at_time(
 ) -> list:
     """
     Get all GPU models available at a specific time.
-    
+
     Args:
         db_path: Path to SQLite database
         target_time: Time to query for GPU models
         window_minutes: Time window around target_time to search (default: 5 minutes)
-    
+
     Returns:
         List of GPU model names available at the specified time
     """
     conn = sqlite3.connect(db_path)
-    
+
     # Define time window
     start_time = target_time - datetime.timedelta(minutes=window_minutes)
     end_time = target_time + datetime.timedelta(minutes=window_minutes)
-    
+
     query = """
     SELECT DISTINCT GPUs_DeviceName
-    FROM gpu_state 
+    FROM gpu_state
     WHERE GPUs_DeviceName IS NOT NULL
     AND timestamp BETWEEN ? AND ?
     ORDER BY GPUs_DeviceName
     """
-    
+
     df = pd.read_sql_query(query, conn, params=[start_time, end_time])
     conn.close()
-    
+
     return df['GPUs_DeviceName'].tolist()
 
 
@@ -758,38 +626,38 @@ def get_gpu_model_activity_at_time(
 ) -> pd.DataFrame:
     """
     Get detailed activity for a specific GPU model at a specific time.
-    
+
     Args:
         db_path: Path to SQLite database
         gpu_model: GPU model name (e.g., 'NVIDIA A100-SXM4-80GB')
         target_time: Time to query for activity
         window_minutes: Time window around target_time to search (default: 5 minutes)
-    
+
     Returns:
         DataFrame with detailed GPU activity information
     """
     conn = sqlite3.connect(db_path)
-    
+
     # Define time window
     start_time = target_time - datetime.timedelta(minutes=window_minutes)
     end_time = target_time + datetime.timedelta(minutes=window_minutes)
-    
+
     query = """
-    SELECT timestamp, Name, AssignedGPUs, State, GPUs_DeviceName, 
+    SELECT timestamp, Name, AssignedGPUs, State, GPUs_DeviceName,
            GPUsAverageUsage, Machine, RemoteOwner, GlobalJobId,
            PrioritizedProjects
-    FROM gpu_state 
-    WHERE GPUs_DeviceName = ? 
+    FROM gpu_state
+    WHERE GPUs_DeviceName = ?
     AND timestamp BETWEEN ? AND ?
     ORDER BY timestamp DESC, Machine, AssignedGPUs
     """
-    
+
     df = pd.read_sql_query(query, conn, params=[gpu_model, start_time, end_time])
     conn.close()
-    
+
     if len(df) > 0:
         df['timestamp'] = pd.to_datetime(df['timestamp'])
-    
+
     return df
 
 
@@ -801,85 +669,85 @@ def analyze_gpu_model_at_time(
 ) -> dict:
     """
     Analyze what's happening with a specific GPU model at a specific time.
-    
+
     Args:
         db_path: Path to SQLite database
         gpu_model: GPU model name
         target_time: Time to analyze
         window_minutes: Time window to search
-    
+
     Returns:
         Dictionary with analysis results
     """
     df = get_gpu_model_activity_at_time(db_path, gpu_model, target_time, window_minutes)
-    
+
     if len(df) == 0:
         return {
             "error": f"No data found for {gpu_model} around {target_time.strftime('%Y-%m-%d %H:%M:%S')}"
         }
-    
+
     # Get the closest timestamp to target
     df['time_diff'] = abs(df['timestamp'] - target_time)
     closest_time = df.loc[df['time_diff'].idxmin(), 'timestamp']
-    
+
     # Filter to records from the closest timestamp
     snapshot_df = df[df['timestamp'] == closest_time]
-    
+
     # Analyze the snapshot - count unique GPUs only
     unique_gpus = snapshot_df['AssignedGPUs'].dropna().nunique()
-    
+
     # Count active GPUs (those actually running jobs with RemoteOwner)
     active_gpus_count = snapshot_df[
-        (snapshot_df['State'] == 'Claimed') & 
+        (snapshot_df['State'] == 'Claimed') &
         (snapshot_df['RemoteOwner'].notna())
     ]['AssignedGPUs'].dropna().nunique()
-    
+
     # Count idle GPUs (those not running jobs)
     idle_gpus_count = unique_gpus - active_gpus_count
-    
+
     total_gpus = unique_gpus
     claimed_gpus = active_gpus_count  # Rename for compatibility with existing code
     unclaimed_gpus = idle_gpus_count  # Rename for compatibility with existing code
-    
+
     # Categorize by utilization class
     priority_gpus = filter_df(snapshot_df, "Priority", "", "")
     shared_gpus = filter_df(snapshot_df, "Shared", "", "")
     backfill_gpus = filter_df(snapshot_df, "Backfill", "", "")
-    
+
     # Get unique machines
     machines = snapshot_df['Machine'].unique()
-    
+
     # Calculate utilization stats
     claimed_with_usage = snapshot_df[
-        (snapshot_df['State'] == 'Claimed') & 
+        (snapshot_df['State'] == 'Claimed') &
         (snapshot_df['GPUsAverageUsage'].notna())
     ]
-    
+
     avg_utilization = claimed_with_usage['GPUsAverageUsage'].mean() if len(claimed_with_usage) > 0 else 0
-    
+
     # Get job information - ensure unique GPU IDs
     active_jobs_df = snapshot_df[
-        (snapshot_df['State'] == 'Claimed') & 
+        (snapshot_df['State'] == 'Claimed') &
         (snapshot_df['RemoteOwner'].notna())
     ][['RemoteOwner', 'GlobalJobId', 'AssignedGPUs', 'Machine']].copy()
-    
+
     # Remove duplicates based on AssignedGPUs, keeping first occurrence
     active_jobs = active_jobs_df.drop_duplicates(subset=['AssignedGPUs'], keep='first')
-    
+
     # Get inactive GPUs - ensure unique GPU IDs and exclude ones that appear in active jobs
     inactive_gpus_df = snapshot_df[
         snapshot_df['State'] == 'Unclaimed'
     ][['AssignedGPUs', 'Machine', 'PrioritizedProjects']].copy()
-    
+
     # Remove duplicates based on AssignedGPUs, keeping first occurrence
     inactive_gpus_unique = inactive_gpus_df.drop_duplicates(subset=['AssignedGPUs'], keep='first')
-    
+
     # Get list of GPU IDs that are active (have jobs running)
     active_gpu_ids = set(active_jobs['AssignedGPUs'].dropna().tolist())
-    
+
     # Filter out GPUs that appear in active jobs list
     inactive_gpus = inactive_gpus_unique[~inactive_gpus_unique['AssignedGPUs'].isin(active_gpu_ids)]
-    
+
     return {
         "gpu_model": gpu_model,
         "snapshot_time": closest_time,
@@ -919,7 +787,7 @@ def print_gpu_model_analysis(analysis: dict):
     if "error" in analysis:
         print(analysis["error"])
         return
-    
+
     gpu_model = analysis["gpu_model"]
     snapshot_time = analysis["snapshot_time"]
     target_time = analysis["target_time"]
@@ -928,14 +796,14 @@ def print_gpu_model_analysis(analysis: dict):
     machines = analysis["machines"]
     active_jobs = analysis["active_jobs"]
     inactive_gpus = analysis["inactive_gpus"]
-    
+
     print(f"\n{'='*80}")
     print(f"GPU MODEL ACTIVITY REPORT: {gpu_model}")
     print(f"{'='*80}")
     print(f"Target Time: {target_time.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"Snapshot Time: {snapshot_time.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"Time Difference: {abs((snapshot_time - target_time).total_seconds())} seconds")
-    
+
     print("\nSUMMARY:")
     print(f"{'-'*40}")
     print(f"Total GPUs: {summary['total_gpus']}")
@@ -943,19 +811,19 @@ def print_gpu_model_analysis(analysis: dict):
     print(f"Idle (no jobs): {summary['unclaimed_gpus']}")
     print(f"Avg GPU Usage: {summary['avg_gpu_usage_percent']:.1f}%")
     print(f"Machines: {summary['num_machines']}")
-    
+
     print("\nBY UTILIZATION CLASS:")
     print(f"{'-'*40}")
     for class_name, stats in by_class.items():
         if stats['total'] > 0:
             usage_pct = (stats['claimed'] / stats['total'] * 100) if stats['total'] > 0 else 0
             print(f"  {class_name}: {stats['claimed']}/{stats['total']} ({usage_pct:.1f}%)")
-    
+
     print(f"\nMACHINES ({len(machines)}):")
     print(f"{'-'*40}")
     for machine in sorted(machines):
         print(f"  {machine}")
-    
+
     if active_jobs:
         print(f"\nACTIVE JOBS ({len(active_jobs)}):")
         print(f"{'-'*60}")
@@ -969,7 +837,7 @@ def print_gpu_model_analysis(analysis: dict):
             print(f"  {user:<18} | {job_id:<15} | {gpu_id:<11} | {machine}")
     else:
         print("\nNo active jobs found.")
-    
+
     if inactive_gpus:
         print(f"\nINACTIVE GPUs ({len(inactive_gpus)}):")
         print(f"{'-'*60}")
@@ -1005,7 +873,7 @@ def send_email_report(
 ) -> bool:
     """
     Send HTML report via email using SMTP, matching mailx behavior.
-    
+
     Args:
         html_content: HTML content to send
         to_email: Recipient email address(es) - can be comma-separated
@@ -1018,25 +886,25 @@ def send_email_report(
         use_auth: Whether to use SMTP authentication
         timeout: Connection timeout in seconds
         debug: Enable debug output
-    
+
     Returns:
         True if email sent successfully, False otherwise
     """
     try:
         # Parse comma-separated email addresses
         recipients = [email.strip() for email in to_email.split(',') if email.strip()]
-        
+
         if not recipients:
             print("Error: No valid email addresses provided")
             return False
-        
+
         # Create message
         msg = MIMEMultipart('alternative')
         today = datetime.datetime.now().strftime('%Y-%m-%d')
-        
+
         # Build subject with lookback period and usage percentages
         subject = f"{subject_prefix} {today}"
-        
+
         # Add lookback period
         if lookback_hours:
             if lookback_hours % (24 * 7) == 0 and lookback_hours >= (24 * 7):  # Exact weeks
@@ -1048,7 +916,7 @@ def send_email_report(
             else:  # Hours for <= 24h or non-exact days
                 period_str = f"{lookback_hours}h"
             subject += f" {period_str}"
-        
+
         # Add usage percentages in order: Open Capacity, Prioritized Service, Backfill
         if usage_percentages:
             class_order = ["Shared", "Priority", "Backfill"]  # Internal names
@@ -1057,37 +925,37 @@ def send_email_report(
                 if class_name in usage_percentages:
                     percentage = usage_percentages[class_name]
                     usage_parts.append(f"{percentage:.1f}%")
-            
+
             if usage_parts:
                 subject += f" ({' | '.join(usage_parts)})"
-        
+
         msg['Subject'] = subject
         msg['From'] = from_email
         msg['To'] = ', '.join(recipients)
-        
+
         # Attach HTML content
         html_part = MIMEText(html_content, 'html')
         msg.attach(html_part)
-        
+
         # Try multiple ports if connection fails (common university SMTP setup)
         ports_to_try = [smtp_port]
         if smtp_port != 25:
             ports_to_try.append(25)
         if smtp_port != 587:
             ports_to_try.append(587)
-        
+
         last_error = None
-        
+
         for port in ports_to_try:
             try:
                 print(f"Connecting to SMTP server {smtp_server}:{port}...")
-                
+
                 # Send email - match mailx behavior more closely
                 with smtplib.SMTP(smtp_server, port, timeout=timeout) as server:
                     # Enable debug output for troubleshooting if requested
                     if debug:
                         server.set_debuglevel(1)
-                    
+
                     # Try STARTTLS, but don't fail if not available (like mailx)
                     try:
                         server.starttls()
@@ -1096,24 +964,24 @@ def send_email_report(
                         print("STARTTLS not supported, proceeding without encryption")
                     except Exception as e:
                         print(f"STARTTLS failed: {e}, proceeding without encryption")
-                    
+
                     # University SMTP servers often don't require auth from internal networks
                     # Only use auth if explicitly requested
                     if use_auth:
                         print("Note: Authentication not attempted (matching mailx behavior)")
-                    
+
                     server.send_message(msg, to_addrs=recipients)
                     print(f"Email sent successfully to {len(recipients)} recipient(s): {', '.join(recipients)}")
                     return True
-                    
+
             except (smtplib.SMTPException, OSError) as e:
                 last_error = e
                 print(f"Failed to connect on port {port}: {e}")
                 continue
-        
+
         # If we get here, all ports failed
         raise last_error or Exception("All SMTP ports failed")
-        
+
     except smtplib.SMTPException as e:
         print(f"SMTP error sending email: {e}")
         return False
@@ -1127,7 +995,7 @@ def simple_markdown_to_html(markdown_text: str) -> str:
     lines = markdown_text.split('\n')
     html_lines = []
     in_list = False
-    
+
     for line in lines:
         line = line.strip()
         if not line:
@@ -1136,7 +1004,7 @@ def simple_markdown_to_html(markdown_text: str) -> str:
                 in_list = False
             html_lines.append("")
             continue
-            
+
         # Headers
         if line.startswith('# '):
             if in_list:
@@ -1172,10 +1040,10 @@ def simple_markdown_to_html(markdown_text: str) -> str:
                 html_lines.append("</ul>")
                 in_list = False
             html_lines.append(f"<p>{line}</p>")
-    
+
     if in_list:
         html_lines.append("</ul>")
-    
+
     return '\n'.join(html_lines)
 
 def load_methodology() -> str:
@@ -1190,31 +1058,23 @@ def load_methodology() -> str:
     except Exception as e:
         return f"<p><em>Error loading methodology: {e}</em></p>"
 
-def get_display_name(class_name: str) -> str:
-    """Convert internal class names to user-friendly display names."""
-    display_mapping = {
-        "Priority": "Prioritized Service",
-        "Shared": "Open Capacity",
-        "Backfill": "Backfill"
-    }
-    return display_mapping.get(class_name, class_name)
 
 def generate_html_report(results: dict, output_file: Optional[str] = None) -> str:
     """
     Generate a simple HTML report with tables from analysis results.
-    
+
     Args:
         results: Analysis results dictionary
         output_file: Optional path to save HTML file
-    
+
     Returns:
         HTML content as string
     """
     if "error" in results:
         return f"<html><body><h1>Error</h1><p>{results['error']}</p></body></html>"
-    
+
     metadata = results["metadata"]
-    
+
     # Start building HTML
     html_parts = []
     html_parts.append("<!DOCTYPE html>")
@@ -1223,18 +1083,18 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
     html_parts.append("<title>CHTC GPU Allocation Report</title>")
     html_parts.append("</head>")
     html_parts.append("<body>")
-    
+
     # Header
     html_parts.append("<h1>CHTC GPU ALLOCATION REPORT</h1>")
     html_parts.append(f"<p><strong>Period:</strong> {metadata['start_time'].strftime('%Y-%m-%d %H:%M')} to {metadata['end_time'].strftime('%Y-%m-%d %H:%M')} ({metadata['num_intervals']} intervals)</p>")
     html_parts.append(f"<p><strong>Generated:</strong> {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>")
-    
+
     # Simple summary table
     if "allocation_stats" in results:
         html_parts.append("<h2>Allocation Summary</h2>")
         html_parts.append("<table border='1'>")
         html_parts.append("<tr><th>Class</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>")
-        
+
         allocation_stats = results["allocation_stats"]
         for class_name, stats in allocation_stats.items():
             html_parts.append("<tr>")
@@ -1243,33 +1103,33 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
             html_parts.append(f"<td style='text-align: right'>{stats['avg_claimed']:.1f}</td>")
             html_parts.append(f"<td style='text-align: right'>{stats['avg_total_available']:.1f}</td>")
             html_parts.append("</tr>")
-        
+
         html_parts.append("</table>")
-    
+
     # Device stats tables
     elif "device_stats" in results:
         html_parts.append("<h2>Usage by Device Type</h2>")
-        
+
         device_stats = results["device_stats"]
         class_totals = {}
-        
+
         # Define the order: Open Capacity, Prioritized Service, Backfill
         class_order = ["Shared", "Priority", "Backfill"]  # Internal names
-        
+
         for class_name in class_order:
             device_data = device_stats.get(class_name, {})
             if device_data:
                 html_parts.append(f"<h3>{get_display_name(class_name)}</h3>")
                 html_parts.append("<table border='1'>")
                 html_parts.append("<tr><th>Device Type</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>")
-                
+
                 # Calculate totals first
                 total_claimed = 0
                 total_available = 0
                 for device_type, stats in sorted(device_data.items()):
                     total_claimed += stats['avg_claimed']
                     total_available += stats['avg_total_available']
-                
+
                 # Add total row first
                 if total_available > 0:
                     total_percent = (total_claimed / total_available) * 100
@@ -1279,13 +1139,13 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
                     html_parts.append(f"<td style='text-align: right'>{total_claimed:.1f}</td>")
                     html_parts.append(f"<td style='text-align: right'>{total_available:.1f}</td>")
                     html_parts.append("</tr>")
-                    
+
                     class_totals[class_name] = {
                         'claimed': total_claimed,
                         'total': total_available,
                         'percent': total_percent
                     }
-                
+
                 # Add individual device rows (sorted alphabetically)
                 for device_type, stats in sorted(device_data.items()):
                     html_parts.append("<tr>")
@@ -1294,20 +1154,20 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
                     html_parts.append(f"<td style='text-align: right'>{stats['avg_claimed']:.1f}</td>")
                     html_parts.append(f"<td style='text-align: right'>{stats['avg_total_available']:.1f}</td>")
                     html_parts.append("</tr>")
-                
+
                 html_parts.append("</table>")
-        
+
         # Cluster summary
         if class_totals:
             html_parts.append("<h2>Cluster Summary</h2>")
             html_parts.append("<table border='1'>")
             html_parts.append("<tr><th>Class</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>")
-            
+
             # Calculate unique totals to avoid double-counting GPUs across categories
             if "raw_data" in results and "host_filter" in results:
                 # Use raw data to calculate unique totals
                 unique_totals = calculate_unique_cluster_totals_from_raw_data(
-                    results["raw_data"], 
+                    results["raw_data"],
                     results["host_filter"]
                 )
                 overall_claimed = unique_totals['claimed']
@@ -1316,9 +1176,9 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
                 # Fallback to simple summation if raw data not available
                 overall_claimed = sum(stats['claimed'] for stats in class_totals.values())
                 overall_total = sum(stats['total'] for stats in class_totals.values())
-            
+
             overall_percent = (overall_claimed / overall_total * 100) if overall_total > 0 else 0
-            
+
             # Add TOTAL row first
             html_parts.append("<tr style='font-weight: bold; background-color: #f0f0f0;'>")
             html_parts.append("<td>TOTAL</td>")
@@ -1326,7 +1186,7 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
             html_parts.append(f"<td style='text-align: right'>{overall_claimed:.1f}</td>")
             html_parts.append(f"<td style='text-align: right'>{overall_total:.1f}</td>")
             html_parts.append("</tr>")
-            
+
             # Add individual class rows in the same order
             for class_name in class_order:
                 if class_name in class_totals:
@@ -1337,9 +1197,9 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
                     html_parts.append(f"<td style='text-align: right'>{stats['claimed']:.1f}</td>")
                     html_parts.append(f"<td style='text-align: right'>{stats['total']:.1f}</td>")
                     html_parts.append("</tr>")
-            
+
             html_parts.append("</table>")
-    
+
     # Excluded hosts
     excluded_hosts = metadata.get('excluded_hosts', {})
     if excluded_hosts:
@@ -1349,7 +1209,7 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
         for host, reason in excluded_hosts.items():
             html_parts.append(f"<tr><td>{host}</td><td>{reason}</td></tr>")
         html_parts.append("</table>")
-    
+
     # Filtering impact
     # filtered_info = metadata.get('filtered_hosts_info', [])
     # if filtered_info:
@@ -1363,18 +1223,18 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
         #     html_parts.append(f"<tr><td>Records excluded</td><td>{records_excluded:,}</td></tr>")
         #     html_parts.append(f"<tr><td>Records analyzed</td><td>{total_filtered:,}</td></tr>")
         #     html_parts.append("</table>")
-    
+
     # Add methodology section from external file
     methodology_html = load_methodology()
     html_parts.append("<div style='background-color: #f9f9f9; padding: 15px; border-radius: 5px; margin-top: 20px;'>")
     html_parts.append(methodology_html)
     html_parts.append("</div>")
-    
+
     html_parts.append("</body>")
     html_parts.append("</html>")
-    
+
     html_content = "\n".join(html_parts)
-    
+
     # Save to file if specified
     if output_file:
         try:
@@ -1387,13 +1247,13 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
             # Fall back to stdout
             print(html_content)
             return html_content
-    
+
     return html_content
 
 
 def print_analysis_results(results: dict, output_format: str = "text", output_file: Optional[str] = None):
     """Print analysis results in a formatted way.
-    
+
     Args:
         results: Analysis results dictionary
         output_format: Output format ('text' or 'html')
@@ -1404,56 +1264,56 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
         if not output_file:
             print(html_content)
         return
-    
+
     # Original text output
     if "error" in results:
         print(results["error"])
         return
-    
+
     metadata = results["metadata"]
-    
+
     print(f"\n{'='*70}")
     print(f"{'CHTC GPU UTILIZATION REPORT':^70}")
     print(f"{'='*70}")
     print(f"Period: {metadata['start_time'].strftime('%Y-%m-%d %H:%M')} to {metadata['end_time'].strftime('%Y-%m-%d %H:%M')} ({metadata['num_intervals']} intervals)")
     print(f"{'='*70}")
-    
+
     if "allocation_stats" in results:
         print("\nAllocation Summary:")
         print(f"{'-'*70}")
         allocation_stats = results["allocation_stats"]
-        
+
         for class_name, stats in allocation_stats.items():
             print(f"  {get_display_name(class_name)}: {stats['allocation_usage_percent']:.1f}% "
                   f"({stats['avg_claimed']:.1f}/{stats['avg_total_available']:.1f} GPUs)")
-    
+
     elif "device_stats" in results:
         print("\nUsage by Device Type:")
         print(f"{'-'*70}")
         device_stats = results["device_stats"]
-        
+
         # Calculate and display grand totals
         grand_totals = {}
-        
-        # Define the order: Open Capacity, Prioritized Service, Backfill  
+
+        # Define the order: Open Capacity, Prioritized Service, Backfill
         class_order = ["Shared", "Priority", "Backfill"]  # Internal names
-        
+
         for class_name in class_order:
             device_data = device_stats.get(class_name, {})
             if device_data:  # Only show classes that have data
                 print(f"\n{get_display_name(class_name)}:")
                 print(f"{'-'*50}")
-                
+
                 # Calculate totals for this class
                 total_claimed = 0
                 total_available = 0
-                
+
                 for device_type, stats in sorted(device_data.items()):
                     print(f"    {device_type}: {stats['allocation_usage_percent']:.1f}% "
                           f"(avg {stats['avg_claimed']:.1f}/{stats['avg_total_available']:.1f} GPUs)")
                     total_claimed += stats['avg_claimed']
                     total_available += stats['avg_total_available']
-                
+
                 # Calculate and store grand total for this class
                 if total_available > 0:
                     grand_total_percent = (total_claimed / total_available) * 100
@@ -1462,21 +1322,21 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
                         'total': total_available,
                         'percent': grand_total_percent
                     }
-                    
+
                     print(f"    {'-'*30}")
                     print(f"    TOTAL {get_display_name(class_name)}: {grand_total_percent:.1f}% "
                           f"(avg {total_claimed:.1f}/{total_available:.1f} GPUs)")
-        
+
         # Display overall summary
         if grand_totals:
             print("\nCluster Summary:")
             print(f"{'-'*70}")
-            
+
             # Calculate unique totals to avoid double-counting GPUs across categories
             if "raw_data" in results and "host_filter" in results:
                 # Use raw data to calculate unique totals (same logic as HTML output)
                 unique_totals = calculate_unique_cluster_totals_from_raw_data(
-                    results["raw_data"], 
+                    results["raw_data"],
                     results["host_filter"]
                 )
                 overall_claimed = unique_totals['claimed']
@@ -1485,37 +1345,37 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
                 # Fallback to simple summation if raw data not available
                 overall_claimed = sum(stats['claimed'] for stats in grand_totals.values())
                 overall_total = sum(stats['total'] for stats in grand_totals.values())
-            
+
             overall_percent = (overall_claimed / overall_total * 100) if overall_total > 0 else 0
-            
+
             for class_name in class_order:
                 if class_name in grand_totals:
                     stats = grand_totals[class_name]
                     print(f"  {get_display_name(class_name)}: {stats['percent']:.1f}% "
                           f"({stats['claimed']:.1f}/{stats['total']:.1f} GPUs)")
-            
+
             print(f"  {'-'*30}")
             print(f"  TOTAL: {overall_percent:.1f}% "
                   f"({overall_claimed:.1f}/{overall_total:.1f} GPUs)")
-    
+
     elif "timeseries_data" in results:
         print("\nTime Series Analysis:")
         print(f"{'-'*70}")
         ts_df = results["timeseries_data"]
-        
+
         # Calculate and display averages
         for class_name in ["priority", "shared", "backfill"]:
             usage_col = f"{class_name}_usage_percent"
             claimed_col = f"{class_name}_claimed"
             total_col = f"{class_name}_total"
-            
+
             if all(col in ts_df.columns for col in [usage_col, claimed_col, total_col]):
                 avg_usage = ts_df[usage_col].mean()
                 avg_claimed = ts_df[claimed_col].mean()
                 avg_total = ts_df[total_col].mean()
                 print(f"  {class_name.title()}: {avg_usage:.1f}% "
                       f"({avg_claimed:.1f}/{avg_total:.1f} GPUs)")
-        
+
         # Show recent trend
         print("\nRecent Trend:")
         print(f"{'-'*70}")
@@ -1528,7 +1388,7 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
                   f"({int(row['shared_claimed'])}/{int(row['shared_total'])}), "
                   f"Backfill {row['backfill_usage_percent']:.1f}% "
                   f"({int(row['backfill_claimed'])}/{int(row['backfill_total'])})")
-    
+
     # Show host exclusion information at the bottom
     excluded_hosts = metadata.get('excluded_hosts', {})
     if excluded_hosts:
@@ -1536,7 +1396,7 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
         print("EXCLUDED HOSTS:")
         for host, reason in excluded_hosts.items():
             print(f"  {host}: {reason}")
-    
+
     # Show filtering impact at the bottom
     filtered_info = metadata.get('filtered_hosts_info', [])
     if filtered_info:
@@ -1554,9 +1414,9 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
 def main(
     hours_back: int = typer.Option(24, help="Number of hours to analyze (default: 24)"),
     host: str = typer.Option("", help="Host name to filter results"),
-    db_path: str = typer.Option("gpu_state_2025-07.db", help="Path to SQLite database"),
+    db_path: str = typer.Option("gpu_state_2025-08.db", help="Path to SQLite database"),
     analysis_type: str = typer.Option(
-        "allocation", 
+        "allocation",
         help="Type of analysis: allocation (% GPUs claimed), timeseries, or gpu_model_snapshot"
     ),
     bucket_minutes: int = typer.Option(15, help="Time bucket size in minutes for timeseries analysis"),
@@ -1579,19 +1439,19 @@ def main(
 ):
     """
     Calculate GPU usage statistics for Priority, Shared, and Backfill classes.
-    
+
     This tool provides flexible analysis of GPU usage patterns over time.
     """
     # Validate host exclusion options
     if exclude_hosts and exclude_hosts_yaml and exclude_hosts_yaml != "masked_hosts.yaml":
         print("Error: Cannot use both --exclude-hosts and --exclude-hosts-yaml. Choose one.")
         return
-    
+
     # If both exclude_hosts is provided and we're using the default yaml file,
     # prioritize the explicit exclude_hosts option
     if exclude_hosts and exclude_hosts_yaml == "masked_hosts.yaml":
         exclude_hosts_yaml = None
-    
+
     # Parse end_time if provided
     parsed_end_time = None
     if end_time:
@@ -1600,20 +1460,20 @@ def main(
         except ValueError:
             print("Error: Invalid end_time format. Use YYYY-MM-DD HH:MM:SS")
             return
-    
+
     # Handle GPU model snapshot analysis
     if analysis_type == "gpu_model_snapshot":
         if not snapshot_time:
             print("Error: --snapshot-time is required for gpu_model_snapshot analysis")
             return
-        
+
         # Parse snapshot_time
         try:
             parsed_snapshot_time = datetime.datetime.strptime(snapshot_time, "%Y-%m-%d %H:%M:%S")
         except ValueError:
             print("Error: Invalid snapshot_time format. Use YYYY-MM-DD HH:MM:SS")
             return
-        
+
         if gpu_model:
             # Analyze specific GPU model
             analysis = analyze_gpu_model_at_time(db_path, gpu_model, parsed_snapshot_time, window_minutes)
@@ -1624,16 +1484,16 @@ def main(
             if not available_models:
                 print(f"No GPU models found around {parsed_snapshot_time.strftime('%Y-%m-%d %H:%M:%S')}")
                 return
-            
+
             print(f"\nAvailable GPU models at {parsed_snapshot_time.strftime('%Y-%m-%d %H:%M:%S')}:")
             print("="*60)
             for i, model in enumerate(available_models, 1):
                 print(f"  {i}. {model}")
-            
+
             print("\nTo analyze a specific model, use:")
             print(f"  --analysis-type gpu_model_snapshot --gpu-model \"<model_name>\" --snapshot-time \"{snapshot_time}\"")
         return
-    
+
     # Run the standard analysis
     try:
         results = run_analysis(
@@ -1651,18 +1511,18 @@ def main(
     except ValueError as e:
         print(f"Error: {e}")
         return
-    
+
     # Print results
     print_analysis_results(results, output_format, output_file)
-    
+
     # Send email if requested
     if email_to:
         if output_format != "html":
             print("Warning: Email functionality requires HTML format. Generating HTML for email...")
-        
+
         # Generate HTML content for email
         html_content = generate_html_report(results)
-        
+
         # Extract usage percentages for email subject
         usage_percentages = {}
         if "device_stats" in results:
@@ -1678,7 +1538,7 @@ def main(
             allocation_stats = results["allocation_stats"]
             for class_name, stats in allocation_stats.items():
                 usage_percentages[class_name] = stats['allocation_usage_percent']
-        
+
         # Send email
         success = send_email_report(
             html_content=html_content,
@@ -1691,7 +1551,7 @@ def main(
             timeout=email_timeout,
             debug=email_debug
         )
-        
+
         if not success:
             print("Failed to send email")
             return

@@ -5,55 +5,7 @@ import matplotlib.pyplot as plt
 import datetime
 import typer
 from get_gpu_state import get_gpus
-
-def filter_df(df, utilization="", state="", host=""):
-    if utilization == "Backfill":
-        df = df[(df['State'] == state if state != "" else True) & (df['Name'].str.contains(host) if host != "" else True) & (df['Name'].str.contains("backfill"))]
-    elif utilization == "Shared":
-        df = df[(df['PrioritizedProjects'] == "") & (df['State'] == state if state != "" else True) & (df['Name'].str.contains(host) if host != "" else True) & (~df['Name'].str.contains("backfill"))]
-    elif utilization == "Priority":
-        # Do some cleanup -- primary slots still have in-use GPUs listed as Assigned, so remove them if they're in use
-        duplicated_gpus = df[~df['AssignedGPUs'].isna()]['AssignedGPUs'].duplicated(keep=False)
-        # For duplicated GPUs, we want to keep the Claimed state and drop Unclaimed
-        if duplicated_gpus.any():
-            # Create a temporary rank column to sort out duplicates. Prefer claimed to unclaimed and primary slots to backfill.
-            df.loc[:, '_rank'] = 0  # Default rank for Unclaimed
-            df.loc[(df['State'] == 'Claimed') & (~df['Name'].str.contains("backfill")), '_rank'] = 3
-            df.loc[(df['State'] == 'Claimed') & (df['Name'].str.contains("backfill")), '_rank'] = 2
-            df.loc[(df['State'] == 'Unclaimed') & (~df['Name'].str.contains("backfill")), '_rank'] = 1
-            
-            # Sort by AssignedGPUs and rank (keeping highest rank first)
-            df = df.sort_values(['AssignedGPUs', '_rank'], ascending=[True, False])
-            # Drop duplicates, keeping the first occurrence (which will be highest rank)
-            df = df.drop_duplicates(subset=['AssignedGPUs'], keep='first')
-            # Remove the temporary rank column
-            df = df.drop(columns=['_rank'])
-        if state == "Claimed": # Only care about claimed and prioritized
-            df = df[(df['PrioritizedProjects'] != "") & (df['State'] == state if state != "" else True) & (df['Name'].str.contains(host) if host != "" else True) & (~df['Name'].str.contains("backfill"))] 
-        elif state == "Unclaimed": # Care about unclaimed and prioritized, but some might be claimed as backfill so count those.
-            df = df[((df['PrioritizedProjects'] != "") & (df['State'] == state if state != "" else True) & (df['Name'].str.contains(host) if host != "" else True) & (~df['Name'].str.contains("backfill"))) |
-                    ((df['PrioritizedProjects'] != "") & (df['State'] == "Claimed") & (df['Name'].str.contains(host) if host != "" else True) & (df['Name'].str.contains("backfill")))
-            ]
-        # For "unclaimed", count primary+unclaimed PLUS backfill+claimed
-        # df = df[(df['PrioritizedProjects'] != "") & (df['State'] == state if state != "" else True) & (df['Name'].str.contains(host) if host != "" else True) & (~df['Name'].str.contains("backfill"))]
-    return df
-
-def count_backfill(df, state="", host=""):
-    df = filter_df(df, "Backfill", state, host)
-    return df.shape[0]
-
-def count_shared(df, state="", host=""):
-    df = filter_df(df, "Shared", state, host)
-    return df.shape[0]
-    # if state != "":
-    #     # Print the DeviceName with count of running jobs
-    #     # print(df[(df['PrioritizedProjects'] == "") & (df['State'] == state) & (df['Name'].str.contains(host) if host != "" else True)]['GPUs_DeviceName'].value_counts())
-    # else:
-    #     return df[(df['PrioritizedProjects'] == "") & (df['Name'].str.contains(host) if host != "" else True)].shape[0]
-
-def count_prioritized(df, state="", host=""):
-    df = filter_df(df, "Priority", state, host)
-    return df.shape[0]
+from gpu_utils import filter_df, count_backfill, count_shared, count_prioritized
 
 def report_by_device_type(df, utilization, state="", host=""):
     print(f"--- {state} {utilization} ---")

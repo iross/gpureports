@@ -105,9 +105,9 @@ def main(ep, refresh, lookback):
         df = pd.read_csv("gpu_jobs.csv")
     else:
         nodedf = pd.DataFrame([dict(i) for i in get_nodes()])
-        df = pd.DataFrame(columns=['JobStartDate', 'FirstjobmatchDate', 'ScheddName', 'StartdName',
+        df = pd.DataFrame(columns=['JobStartDate', 'FirstjobmatchDate', 'QDate', 'ScheddName', 'StartdName',
                                     'ProjectName', 'Owner', 'RequestGpus', 'AssignedGPUs', 
-                                    'JobCurrentStartDate', 'CompletionDate', 
+                                    'JobCurrentStartDate', 'CompletionDate', 'InitialWaitDuration'
                                     'WantGpulab', 'gpujoblength'])
         for doc in scan(client=client, query=query, index="chtc-schedd", scroll="60s"):
             jkeys = jkeys.union(set(doc["_source"].keys()))

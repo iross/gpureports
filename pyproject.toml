@@ -10,4 +10,6 @@ dependencies = [
     "jinja2>=3.0.0",
     "matplotlib>=3.7.0",
     "PyYAML>=6.0.0",
+    "elasticsearch>=9.0.2",
+    "seaborn>=0.13.2",
 ]
