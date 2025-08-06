@@ -4,6 +4,7 @@
 *.db
 *.egg-info/
 website_generator/gpu_website/
+es_credentials.json
 
 
 full_test_website/
