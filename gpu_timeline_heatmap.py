@@ -453,6 +453,278 @@ def create_heatmap(
     print(f"Heatmap saved to: {output_path}")
 
 
+def create_html_heatmap(
+    timeline_df: pd.DataFrame,
+    output_path: str,
+    title: str = "GPU Timeline Heatmap"
+) -> None:
+    """
+    Create an interactive HTML heatmap visualization.
+    
+    Args:
+        timeline_df: Prepared timeline data
+        output_path: Path to save the HTML file
+        title: Title for the heatmap
+    """
+    if timeline_df.empty:
+        print("No data to visualize")
+        return
+    
+    # Pivot data for heatmap
+    pivot_df = timeline_df.pivot(
+        index='gpu_identifier',
+        columns='time_bucket',
+        values='state'
+    )
+    
+    # Create HTML content
+    html_content = f"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{title}</title>
+    <style>
+        body {{
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 20px;
+            background-color: #f5f5f5;
+        }}
+        .container {{
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }}
+        h1 {{
+            color: #333;
+            text-align: center;
+            margin-bottom: 30px;
+        }}
+        .heatmap {{
+            overflow-x: auto;
+            margin: 20px 0;
+        }}
+        .heatmap table {{
+            border-collapse: collapse;
+            font-size: 12px;
+            min-width: 100%;
+        }}
+        .heatmap th, .heatmap td {{
+            border: 1px solid #ddd;
+            text-align: center;
+            position: relative;
+        }}
+        .heatmap th {{
+            background-color: #f8f9fa;
+            padding: 8px 4px;
+            font-weight: bold;
+            white-space: nowrap;
+        }}
+        .heatmap td {{
+            width: 20px;
+            height: 25px;
+            cursor: pointer;
+        }}
+        .heatmap .gpu-label {{
+            text-align: left;
+            padding: 8px;
+            font-weight: bold;
+            min-width: 120px;
+            background-color: #f8f9fa;
+        }}
+        .legend {{
+            display: flex;
+            flex-wrap: wrap;
+            gap: 15px;
+            margin: 20px 0;
+            justify-content: center;
+        }}
+        .legend-item {{
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }}
+        .legend-color {{
+            width: 20px;
+            height: 15px;
+            border: 1px solid #333;
+        }}
+        .tooltip {{
+            position: absolute;
+            background-color: #333;
+            color: white;
+            padding: 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            z-index: 1000;
+            pointer-events: none;
+            white-space: nowrap;
+            opacity: 0;
+            transition: opacity 0.2s;
+        }}
+        .metadata {{
+            margin-top: 20px;
+            padding: 15px;
+            background-color: #f8f9fa;
+            border-radius: 4px;
+            font-size: 14px;
+        }}
+        @media (max-width: 768px) {{
+            body {{
+                margin: 10px;
+            }}
+            .container {{
+                padding: 10px;
+            }}
+            .heatmap table {{
+                font-size: 10px;
+            }}
+            .heatmap td {{
+                width: 15px;
+                height: 20px;
+            }}
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>{title}</h1>
+        
+        <div class="legend">
+            <div class="legend-item">
+                <div class="legend-color" style="background-color: {STATE_COLORS['idle_prioritized']};"></div>
+                <span>{STATE_LABELS['idle_prioritized']}</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background-color: {STATE_COLORS['idle_shared']};"></div>
+                <span>{STATE_LABELS['idle_shared']}</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background-color: {STATE_COLORS['busy_prioritized']};"></div>
+                <span>{STATE_LABELS['busy_prioritized']}</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background-color: {STATE_COLORS['busy_shared']};"></div>
+                <span>{STATE_LABELS['busy_shared']}</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background-color: {STATE_COLORS['busy_backfill']};"></div>
+                <span>{STATE_LABELS['busy_backfill']}</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background-color: {STATE_COLORS['na']};"></div>
+                <span>{STATE_LABELS['na']}</span>
+            </div>
+        </div>
+        
+        <div class="heatmap">
+            <table>
+                <thead>
+                    <tr>
+                        <th class="gpu-label">GPU</th>"""
+    
+    # Add time headers (every 30 minutes)
+    time_columns = sorted(pivot_df.columns)
+    for i, ts in enumerate(time_columns):
+        if ts.minute in [0, 30]:  # Show labels every 30 minutes
+            html_content += f'<th>{ts.strftime("%m-%d %H:%M")}</th>'
+        else:
+            html_content += f'<th></th>'
+    
+    html_content += """
+                    </tr>
+                </thead>
+                <tbody>"""
+    
+    # Add GPU rows
+    for gpu_identifier in sorted(pivot_df.index):
+        # Extract just the GPU ID for display
+        gpu_display = gpu_identifier.split('_', 1)[1] if '_' in gpu_identifier else gpu_identifier
+        
+        html_content += f"""
+                    <tr>
+                        <td class="gpu-label">{gpu_display}</td>"""
+        
+        for ts in time_columns:
+            state = pivot_df.loc[gpu_identifier, ts] if pd.notna(pivot_df.loc[gpu_identifier, ts]) else 'na'
+            color = STATE_COLORS.get(state, STATE_COLORS['na'])
+            label = STATE_LABELS.get(state, 'Unknown')
+            
+            # Get hostname from original data for tooltip
+            hostname = timeline_df[timeline_df['gpu_identifier'] == gpu_identifier]['hostname'].iloc[0] if not timeline_df[timeline_df['gpu_identifier'] == gpu_identifier].empty else 'Unknown'
+            
+            html_content += f"""<td style="background-color: {color};" 
+                            data-gpu="{gpu_display}" 
+                            data-hostname="{hostname}"
+                            data-time="{ts.strftime('%Y-%m-%d %H:%M')}" 
+                            data-state="{label}"></td>"""
+        
+        html_content += """
+                    </tr>"""
+    
+    # Add JavaScript for interactivity and metadata
+    unique_gpus = len(pivot_df.index)
+    time_range = f"{time_columns[0].strftime('%Y-%m-%d %H:%M')} to {time_columns[-1].strftime('%Y-%m-%d %H:%M')}"
+    
+    html_content += f"""
+                </tbody>
+            </table>
+        </div>
+        
+        <div class="metadata">
+            <strong>Dataset Information:</strong><br>
+            • Unique GPUs: {unique_gpus}<br>
+            • Time Range: {time_range}<br>
+            • Time Buckets: {len(time_columns)}<br>
+            • Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+        </div>
+        
+        <div class="tooltip" id="tooltip"></div>
+    </div>
+    
+    <script>
+        // Add hover functionality
+        const cells = document.querySelectorAll('.heatmap td:not(.gpu-label)');
+        const tooltip = document.getElementById('tooltip');
+        
+        cells.forEach(cell => {{
+            cell.addEventListener('mouseenter', function(e) {{
+                const gpu = e.target.dataset.gpu;
+                const hostname = e.target.dataset.hostname;
+                const time = e.target.dataset.time;
+                const state = e.target.dataset.state;
+                
+                tooltip.innerHTML = `
+                    <strong>${{gpu}}</strong><br>
+                    Host: ${{hostname}}<br>
+                    Time: ${{time}}<br>
+                    State: ${{state}}
+                `;
+                tooltip.style.opacity = '1';
+            }});
+            
+            cell.addEventListener('mousemove', function(e) {{
+                tooltip.style.left = e.pageX + 10 + 'px';
+                tooltip.style.top = e.pageY + 10 + 'px';
+            }});
+            
+            cell.addEventListener('mouseleave', function() {{
+                tooltip.style.opacity = '0';
+            }});
+        }});
+    </script>
+</body>
+</html>"""
+    
+    # Write HTML file
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write(html_content)
+    
+    print(f"HTML heatmap saved to: {output_path}")
+
+
 def get_time_filtered_data(
     db_path: str,
     hours_back: int = 24,
@@ -551,6 +823,7 @@ def main(
     title: Optional[str] = typer.Option(None, help="Custom title for the heatmap"),
     width: int = typer.Option(16, help="Figure width in inches"),
     height: int = typer.Option(6, help="Figure height in inches"),
+    output_format: str = typer.Option("png", help="Output format: 'png' or 'html'"),
     list_gpus: bool = typer.Option(False, help="List available GPU IDs and exit (useful for finding GPU IDs to filter)")
 ):
     """
@@ -625,9 +898,15 @@ def main(
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     
-    # Generate filename based on parameters
+    # Validate output format
+    if output_format.lower() not in ['png', 'html']:
+        print(f"Error: Invalid output format '{output_format}'. Use 'png' or 'html'")
+        return
+    
+    # Generate filename based on parameters and format
     time_suffix = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"gpu_timeline_heatmap_{time_suffix}.png"
+    file_extension = output_format.lower()
+    filename = f"gpu_timeline_heatmap_{time_suffix}.{file_extension}"
     full_output_path = output_path / filename
     
     # Generate title
@@ -646,13 +925,20 @@ def main(
         end_time = filtered_df['time_bucket'].max()
         title += f"\n{start_time.strftime('%Y-%m-%d %H:%M')} to {end_time.strftime('%Y-%m-%d %H:%M')}"
     
-    # Create heatmap
-    create_heatmap(
-        filtered_df,
-        str(full_output_path),
-        title=title,
-        figsize=(width, height)
-    )
+    # Create heatmap based on output format
+    if output_format.lower() == 'png':
+        create_heatmap(
+            filtered_df,
+            str(full_output_path),
+            title=title,
+            figsize=(width, height)
+        )
+    else:  # html
+        create_html_heatmap(
+            filtered_df,
+            str(full_output_path),
+            title=title
+        )
     
     # Print summary
     unique_gpus = len(filtered_df['gpu_identifier'].unique())
