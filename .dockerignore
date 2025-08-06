@@ -1,0 +1,13 @@
+.venv
+*cache
+*db
+*csv
+*png
+*jpg
+*html
+*pyc
+*pyo
+*pyd
+*egg-info
+*.egg-info
+website_generator/gpu_website/

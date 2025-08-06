@@ -2,6 +2,11 @@
 *.csv
 *.parquet
 *.db
+*.egg-info/
+website_generator/gpu_website/
 
+
+full_test_website/
+gpu-backfill-evictions/
 
 *__pycache__
