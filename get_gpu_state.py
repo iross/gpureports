@@ -1,11 +1,12 @@
 import datetime
-import htcondor 
+import htcondor
 import pandas as pd
 from sqlalchemy import create_engine
+import typer
 
-coll = htcondor.Collector()
+coll = htcondor.Collector("cm.chtc.wisc.edu")
 def get_gpus() -> pd.DataFrame:
-    PROJ = ["Name", 
+    PROJ = ["Name",
                     "AssignedGPUs",
                     "AvailableGPUs",
                     "State",
@@ -18,7 +19,7 @@ def get_gpus() -> pd.DataFrame:
                     "RemoteOwner",
                     "GlobalJobId"
                     ]
-    res = coll.query(htcondor.AdTypes.Startd, constraint="GPUs >= 1", 
+    res = coll.query(htcondor.AdTypes.Startd, constraint="GPUs >= 1",
                     projection=PROJ)
     df = pd.DataFrame(columns=PROJ)
     for ad in res:
@@ -42,8 +43,11 @@ def get_gpus() -> pd.DataFrame:
     df['timestamp'] = pd.Timestamp.now()
     return df
 
-if __name__ == "__main__":
+def main(db_path: str = typer.Argument("/home/iaross/gpureports")):
     df = get_gpus()
     month = datetime.datetime.now().strftime("%Y-%m")
-    disk_engine = create_engine(f'sqlite:////home/iaross/gpureports/gpu_state_{month}.db')
+    disk_engine = create_engine(f'sqlite:///{db_path}/gpu_state_{month}.db')
     df.to_sql('gpu_state', disk_engine, if_exists='append', index=False)
+
+if __name__ == "__main__":
+    typer.run(main)
