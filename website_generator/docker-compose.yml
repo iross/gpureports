@@ -1,0 +1,62 @@
+version: '3.8'
+
+services:
+  gpu-website-generator:
+    build: .
+    container_name: gpu-monitoring-web
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount database directory (read-only)
+      - "../:/app/data:ro"
+      # Mount websites output directory
+      - "./websites:/app/websites"
+      # Mount parent directory files needed by gpu_website_generator
+      - "../gpu_timeline_heatmap.py:/app/gpu_timeline_heatmap.py:ro"
+      - "../gpu_utils.py:/app/gpu_utils.py:ro"
+      - "../pyproject.toml:/app/pyproject.toml:ro"
+    environment:
+      - WEB_PORT=8000
+      - WEB_HOST=0.0.0.0
+      - PYTHONPATH=/app
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Optional: Service to periodically regenerate websites
+  gpu-website-updater:
+    build: .
+    container_name: gpu-monitoring-updater
+    volumes:
+      - "../:/app/data:ro"
+      - "./websites:/app/websites"
+      - "../gpu_timeline_heatmap.py:/app/gpu_timeline_heatmap.py:ro"
+      - "../gpu_utils.py:/app/gpu_utils.py:ro"
+      - "../pyproject.toml:/app/pyproject.toml:ro"
+    environment:
+      - PYTHONPATH=/app
+    # Override command to run website generator periodically
+    command: >
+      sh -c "
+        while true; do
+          echo 'Generating GPU monitoring website...'
+          python gpu_website_generator.py \
+            --db-path /app/data/gpu_state_2025-08.db \
+            --output-dir /app/websites \
+            --hours-back 24 \
+            --title 'CHTC GPU Cluster Dashboard' || echo 'Website generation failed'
+          echo 'Website updated. Sleeping for 1 hour...'
+          sleep 3600
+        done
+      "
+    restart: unless-stopped
+    depends_on:
+      - gpu-website-generator
+
+networks:
+  default:
+    name: gpu-monitoring-network
