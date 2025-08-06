@@ -1,10 +1,10 @@
 ---
 id: task-2.3
 title: Move the cronjob for GPU statistics gathering
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2025-07-08'
-updated_date: '2025-07-08'
+updated_date: '2025-08-05'
 labels: []
 dependencies: []
 parent_task_id: task-2
@@ -18,8 +18,8 @@ Coordinate the migration of existing GPU data collection cron job and establish 
 
 ## Acceptance Criteria
 
-- [ ] Existing get_gpu_state.py cron job moved to appropriate server
-- [ ] New cron job created for nightly report generation
+- [x ] Existing get_gpu_state.py cron job moved to appropriate server
+- [ x] New cron job created for nightly report generation
 - [ ] Report timing configured to avoid peak usage periods
 - [ ] Logging and monitoring configured for both jobs
 - [ ] Backup and recovery procedures documented
