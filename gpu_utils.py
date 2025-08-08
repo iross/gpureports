@@ -311,7 +311,7 @@ def filter_df_enhanced(df: pd.DataFrame, utilization: str = "", state: str = "",
     
     Args:
         df: Input DataFrame with GPU state data
-        utilization: Filter by type ("Priority", "Shared", "Backfill-ResearcherOwned", "Backfill-HostedCapacity", "Backfill-OpenCapacity")
+        utilization: Filter by type ("Priority-ResearcherOwned", "Priority-HostedCapacity", "Shared", "Backfill-ResearcherOwned", "Backfill-HostedCapacity", "Backfill-OpenCapacity")
         state: Filter by GPU state ("Claimed", "Unclaimed")
         host: Filter by host name pattern
         
@@ -342,7 +342,87 @@ def filter_df_enhanced(df: pd.DataFrame, utilization: str = "", state: str = "",
     
     hosted_capacity_hosts = load_hosted_capacity_hosts()
     
-    if utilization == "Backfill-ResearcherOwned":
+    if utilization == "Priority-ResearcherOwned":
+        # Priority slots on researcher owned machines (non-empty PrioritizedProjects AND not in hosted capacity)
+        # Do some cleanup -- primary slots still have in-use GPUs listed as Assigned, so remove them if they're in use
+        duplicated_gpus = df[~df['AssignedGPUs'].isna()]['AssignedGPUs'].duplicated(keep=False)
+        # For duplicated GPUs, we want to keep the Claimed state and drop Unclaimed
+        if duplicated_gpus.any():
+            # Create a temporary rank column to sort out duplicates. Prefer claimed to unclaimed and primary slots to backfill.
+            df['_rank'] = 0  # Default rank for Unclaimed
+            df.loc[(df['State'] == 'Claimed') & (~df['Name'].str.contains("backfill")), '_rank'] = 3
+            df.loc[(df['State'] == 'Claimed') & (df['Name'].str.contains("backfill")), '_rank'] = 2
+            df.loc[(df['State'] == 'Unclaimed') & (~df['Name'].str.contains("backfill")), '_rank'] = 1
+            
+            # Sort by AssignedGPUs and rank (keeping highest rank first)
+            df = df.sort_values(['AssignedGPUs', '_rank'], ascending=[True, False])
+            # Drop duplicates, keeping the first occurrence (which will be highest rank)
+            df = df.drop_duplicates(subset=['AssignedGPUs'], keep='first')
+            # Remove the temporary rank column
+            df = df.drop(columns=['_rank'])
+        if state == "Claimed":  # Only care about claimed and prioritized
+            df = df[(df['PrioritizedProjects'] != "") & 
+                    (~df['Machine'].isin(hosted_capacity_hosts)) &
+                    (df['State'] == state if state != "" else True) & 
+                    (df['Name'].str.contains(host) if host != "" else True) & 
+                    (~df['Name'].str.contains("backfill"))] 
+        elif state == "Unclaimed":  # Care about unclaimed and prioritized, but some might be claimed as backfill so count those.
+            df = df[((df['PrioritizedProjects'] != "") & 
+                     (~df['Machine'].isin(hosted_capacity_hosts)) &
+                     (df['State'] == state if state != "" else True) & 
+                     (df['Name'].str.contains(host) if host != "" else True) & 
+                     (~df['Name'].str.contains("backfill"))) |
+                    ((df['PrioritizedProjects'] != "") & 
+                     (~df['Machine'].isin(hosted_capacity_hosts)) &
+                     (df['State'] == "Claimed") & 
+                     (df['Name'].str.contains(host) if host != "" else True) & 
+                     (df['Name'].str.contains("backfill")))]
+        else:  # When state is empty, still need to filter for priority projects
+            df = df[(df['PrioritizedProjects'] != "") & 
+                    (~df['Machine'].isin(hosted_capacity_hosts)) &
+                    (df['Name'].str.contains(host) if host != "" else True) & 
+                    (~df['Name'].str.contains("backfill"))]
+    elif utilization == "Priority-HostedCapacity":
+        # Priority slots on hosted capacity machines (non-empty PrioritizedProjects AND in hosted capacity)
+        # Do some cleanup -- primary slots still have in-use GPUs listed as Assigned, so remove them if they're in use
+        duplicated_gpus = df[~df['AssignedGPUs'].isna()]['AssignedGPUs'].duplicated(keep=False)
+        # For duplicated GPUs, we want to keep the Claimed state and drop Unclaimed
+        if duplicated_gpus.any():
+            # Create a temporary rank column to sort out duplicates. Prefer claimed to unclaimed and primary slots to backfill.
+            df['_rank'] = 0  # Default rank for Unclaimed
+            df.loc[(df['State'] == 'Claimed') & (~df['Name'].str.contains("backfill")), '_rank'] = 3
+            df.loc[(df['State'] == 'Claimed') & (df['Name'].str.contains("backfill")), '_rank'] = 2
+            df.loc[(df['State'] == 'Unclaimed') & (~df['Name'].str.contains("backfill")), '_rank'] = 1
+            
+            # Sort by AssignedGPUs and rank (keeping highest rank first)
+            df = df.sort_values(['AssignedGPUs', '_rank'], ascending=[True, False])
+            # Drop duplicates, keeping the first occurrence (which will be highest rank)
+            df = df.drop_duplicates(subset=['AssignedGPUs'], keep='first')
+            # Remove the temporary rank column
+            df = df.drop(columns=['_rank'])
+        if state == "Claimed":  # Only care about claimed and prioritized
+            df = df[(df['PrioritizedProjects'] != "") & 
+                    (df['Machine'].isin(hosted_capacity_hosts)) &
+                    (df['State'] == state if state != "" else True) & 
+                    (df['Name'].str.contains(host) if host != "" else True) & 
+                    (~df['Name'].str.contains("backfill"))] 
+        elif state == "Unclaimed":  # Care about unclaimed and prioritized, but some might be claimed as backfill so count those.
+            df = df[((df['PrioritizedProjects'] != "") & 
+                     (df['Machine'].isin(hosted_capacity_hosts)) &
+                     (df['State'] == state if state != "" else True) & 
+                     (df['Name'].str.contains(host) if host != "" else True) & 
+                     (~df['Name'].str.contains("backfill"))) |
+                    ((df['PrioritizedProjects'] != "") & 
+                     (df['Machine'].isin(hosted_capacity_hosts)) &
+                     (df['State'] == "Claimed") & 
+                     (df['Name'].str.contains(host) if host != "" else True) & 
+                     (df['Name'].str.contains("backfill")))]
+        else:  # When state is empty, still need to filter for priority projects
+            df = df[(df['PrioritizedProjects'] != "") & 
+                    (df['Machine'].isin(hosted_capacity_hosts)) &
+                    (df['Name'].str.contains(host) if host != "" else True) & 
+                    (~df['Name'].str.contains("backfill"))]
+    elif utilization == "Backfill-ResearcherOwned":
         # Backfill slots on researcher owned machines
         df = df[
             (df['State'] == state if state != "" else True) & 
@@ -463,7 +543,9 @@ def count_glidein(df: pd.DataFrame, state: str = "", host: str = "") -> int:
 def get_display_name(class_name: str) -> str:
     """Convert internal class names to user-friendly display names."""
     display_names = {
-        "Priority": "Prioritized service",
+        "Priority": "Prioritized service",  # Legacy support
+        "Priority-ResearcherOwned": "Prioritized (Researcher Owned)",
+        "Priority-HostedCapacity": "Prioritized (Hosted Capacity)",
         "Shared": "Open Capacity",
         "Backfill": "Backfill",  # Legacy support
         "Backfill-ResearcherOwned": "Backfill (Researcher Owned)",

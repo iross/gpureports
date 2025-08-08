@@ -6,7 +6,8 @@
 **Allocation Categories:**
 
 - **Open Capacity:** Slots on machines with empty PrioritizedProjects, excluding hosted capacity machines.
-- **Prioritized Service:** Slots on machines with non-empty PrioritizedProjects.
+- **Prioritized (Researcher Owned):** Priority slots on researcher owned machines with non-empty PrioritizedProjects.
+- **Prioritized (Hosted Capacity):** Priority slots on hosted capacity machines with non-empty PrioritizedProjects.
 - **Backfill (Hosted Capacity):** Backfill slots specifically on hosted capacity machines 
 - **Backfill (Researcher Owned):** Backfill slots on researcher owned machines hosted within CHTC
 - **Backfill (Open Capacity):** Backfill slots on open capacity machines (empty PrioritizedProjects, not in hosted capacity list).
