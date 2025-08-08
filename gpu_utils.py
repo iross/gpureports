@@ -16,6 +16,43 @@ from pathlib import Path
 HOST_EXCLUSIONS = {}
 FILTERED_HOSTS_INFO = []
 
+# Global variable to cache hosted capacity list
+_HOSTED_CAPACITY_HOSTS = None
+
+
+def load_hosted_capacity_hosts(hosted_capacity_file: str = "hosted_capacity") -> set:
+    """
+    Load hosted capacity hosts from file.
+    
+    Args:
+        hosted_capacity_file: Path to file containing hosted capacity host names
+        
+    Returns:
+        Set of hosted capacity host names
+    """
+    global _HOSTED_CAPACITY_HOSTS
+    
+    if _HOSTED_CAPACITY_HOSTS is not None:
+        return _HOSTED_CAPACITY_HOSTS
+    
+    hosted_capacity_hosts = set()
+    hosted_capacity_path = Path(hosted_capacity_file)
+    
+    if hosted_capacity_path.exists():
+        try:
+            with open(hosted_capacity_path, 'r') as f:
+                for line in f:
+                    host = line.strip()
+                    if host:  # Skip empty lines
+                        hosted_capacity_hosts.add(host)
+        except Exception as e:
+            print(f"Warning: Could not load hosted capacity hosts from {hosted_capacity_file}: {e}")
+    else:
+        print(f"Warning: Hosted capacity file {hosted_capacity_file} not found")
+    
+    _HOSTED_CAPACITY_HOSTS = hosted_capacity_hosts
+    return hosted_capacity_hosts
+
 
 def load_host_exclusions(exclusions_config: Optional[str] = None, yaml_file: Optional[str] = None) -> Dict[str, str]:
     """
@@ -180,12 +217,104 @@ def count_prioritized(df: pd.DataFrame, state: str = "", host: str = "") -> int:
     return df.shape[0]
 
 
+def classify_machine_category(machine: str, prioritized_projects: str) -> str:
+    """
+    Classify a machine into one of the new categories.
+    
+    Args:
+        machine: Machine name/hostname
+        prioritized_projects: PrioritizedProjects field value
+        
+    Returns:
+        Category: "Hosted Capacity", "Researcher Owned", or "Open Capacity"
+    """
+    hosted_capacity_hosts = load_hosted_capacity_hosts()
+    
+    # Check if machine is in hosted capacity list
+    if machine in hosted_capacity_hosts:
+        return "Hosted Capacity"
+    
+    # Check if machine has non-empty PrioritizedProjects
+    if prioritized_projects and prioritized_projects.strip():
+        return "Researcher Owned"
+    
+    # Default to Open Capacity
+    return "Open Capacity"
+
+
+def filter_df_by_machine_category(df: pd.DataFrame, category: str) -> pd.DataFrame:
+    """
+    Filter DataFrame by machine category.
+    
+    Args:
+        df: Input DataFrame with GPU state data
+        category: Machine category ("Hosted Capacity", "Researcher Owned", "Open Capacity")
+        
+    Returns:
+        Filtered DataFrame
+    """
+    df = df.copy()
+    hosted_capacity_hosts = load_hosted_capacity_hosts()
+    
+    if category == "Hosted Capacity":
+        df = df[df['Machine'].isin(hosted_capacity_hosts)]
+    elif category == "Researcher Owned":
+        # Researcher owned: has PrioritizedProjects AND not in hosted capacity list
+        df = df[
+            (df['PrioritizedProjects'] != "") & 
+            (df['PrioritizedProjects'].notna()) & 
+            (~df['Machine'].isin(hosted_capacity_hosts))
+        ]
+    elif category == "Open Capacity":
+        # Open capacity: no PrioritizedProjects AND not in hosted capacity list
+        df = df[
+            ((df['PrioritizedProjects'] == "") | (df['PrioritizedProjects'].isna())) & 
+            (~df['Machine'].isin(hosted_capacity_hosts))
+        ]
+    
+    return df
+
+
+def get_machines_by_category(df: pd.DataFrame) -> dict:
+    """
+    Get list of machines in each category.
+    
+    Args:
+        df: DataFrame with Machine and PrioritizedProjects columns
+        
+    Returns:
+        Dictionary mapping category names to lists of machine names
+    """
+    # Get unique machines with their PrioritizedProjects
+    unique_machines = df.groupby('Machine')['PrioritizedProjects'].first().reset_index()
+    
+    categories = {
+        "Hosted Capacity": [],
+        "Researcher Owned": [],
+        "Open Capacity": []
+    }
+    
+    for _, row in unique_machines.iterrows():
+        category = classify_machine_category(row['Machine'], row['PrioritizedProjects'])
+        categories[category].append(row['Machine'])
+    
+    # Sort lists for consistent output
+    for category in categories:
+        categories[category].sort()
+    
+    return categories
+
+
 def get_display_name(class_name: str) -> str:
     """Convert internal class names to user-friendly display names."""
     display_names = {
         "Priority": "Prioritized service",
         "Shared": "Open Capacity",
-        "Backfill": "Backfill"
+        "Backfill": "Backfill",
+        "Hosted Capacity": "Hosted Capacity",
+        "Researcher Owned": "Researcher Owned",
+        "Open Capacity": "Open Capacity",
+        "GlideIn": "GlideIn"
     }
     return display_names.get(class_name, class_name)
 
