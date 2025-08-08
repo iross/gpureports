@@ -20,3 +20,5 @@ Update methodology.md and related documentation to define the new classification
 - [ ] Examples of each category are provided
 - [ ] Documentation explains external list integration
 - [ ] All classification rules are documented
+- [ ] List of researcher-owned machines documented in methodology
+- [ ] List of hosted capacity machines documented in methodology

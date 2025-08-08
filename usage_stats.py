@@ -23,9 +23,10 @@ from pathlib import Path
 
 # Import shared utilities
 from gpu_utils import (
-    filter_df, count_backfill, count_shared, count_prioritized,
+    filter_df, filter_df_enhanced, count_backfill, count_shared, count_prioritized,
+    count_backfill_researcher_owned, count_backfill_hosted_capacity, count_glidein,
     load_host_exclusions, get_display_name, get_required_databases,
-    get_latest_timestamp_from_most_recent_db,
+    get_latest_timestamp_from_most_recent_db, get_machines_by_category,
     HOST_EXCLUSIONS, FILTERED_HOSTS_INFO
 )
 import gpu_utils
@@ -269,6 +270,184 @@ def calculate_allocation_usage(df: pd.DataFrame, host: str = "") -> dict:
             'allocation_usage_percent': avg_usage_percentage,
             'num_intervals': num_intervals
         }
+
+    return stats
+
+
+def calculate_allocation_usage_enhanced(df: pd.DataFrame, host: str = "") -> dict:
+    """
+    Calculate allocation-based usage with enhanced backfill categories.
+
+    Args:
+        df: DataFrame with GPU state data
+        host: Optional host filter
+
+    Returns:
+        Dictionary with usage statistics for each enhanced class
+    """
+    # Create 15-minute time buckets
+    df = df.copy()
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    df['15min_bucket'] = df['timestamp'].dt.floor('15min')
+
+    stats = {}
+
+    # Enhanced utilization types with emphasis on hosted capacity
+    utilization_types = [
+        "Priority", 
+        "Shared", 
+        "Backfill-HostedCapacity", 
+        "Backfill-ResearcherOwned", 
+        "GlideIn"
+    ]
+
+    for utilization_type in utilization_types:
+        interval_usage_percentages = []
+        total_claimed_gpus = 0
+        total_available_gpus = 0
+
+        # For each 15-minute interval, count unique GPUs
+        for bucket in sorted(df['15min_bucket'].unique()):
+            bucket_df = df[df['15min_bucket'] == bucket]
+
+            # Count unique GPUs for this utilization type in this interval
+            if utilization_type == "Priority":
+                claimed_gpus = len(filter_df_enhanced(bucket_df, "Priority", "Claimed", host)['AssignedGPUs'].dropna().unique())
+                unclaimed_gpus = len(filter_df_enhanced(bucket_df, "Priority", "Unclaimed", host)['AssignedGPUs'].dropna().unique())
+            elif utilization_type == "Shared":
+                claimed_gpus = len(filter_df_enhanced(bucket_df, "Shared", "Claimed", host)['AssignedGPUs'].dropna().unique())
+                unclaimed_gpus = len(filter_df_enhanced(bucket_df, "Shared", "Unclaimed", host)['AssignedGPUs'].dropna().unique())
+            elif utilization_type == "Backfill-HostedCapacity":
+                claimed_gpus = len(filter_df_enhanced(bucket_df, "Backfill-HostedCapacity", "Claimed", host)['AssignedGPUs'].dropna().unique())
+                unclaimed_gpus = len(filter_df_enhanced(bucket_df, "Backfill-HostedCapacity", "Unclaimed", host)['AssignedGPUs'].dropna().unique())
+            elif utilization_type == "Backfill-ResearcherOwned":
+                claimed_gpus = len(filter_df_enhanced(bucket_df, "Backfill-ResearcherOwned", "Claimed", host)['AssignedGPUs'].dropna().unique())
+                unclaimed_gpus = len(filter_df_enhanced(bucket_df, "Backfill-ResearcherOwned", "Unclaimed", host)['AssignedGPUs'].dropna().unique())
+            elif utilization_type == "GlideIn":
+                claimed_gpus = len(filter_df_enhanced(bucket_df, "GlideIn", "Claimed", host)['AssignedGPUs'].dropna().unique())
+                unclaimed_gpus = len(filter_df_enhanced(bucket_df, "GlideIn", "Unclaimed", host)['AssignedGPUs'].dropna().unique())
+
+            total_gpus_this_interval = claimed_gpus + unclaimed_gpus
+
+            if total_gpus_this_interval > 0:
+                interval_usage = (claimed_gpus / total_gpus_this_interval) * 100
+                interval_usage_percentages.append(interval_usage)
+                total_claimed_gpus += claimed_gpus
+                total_available_gpus += total_gpus_this_interval
+
+        # Calculate average usage percentage across all intervals
+        avg_usage_percentage = sum(interval_usage_percentages) / len(interval_usage_percentages) if interval_usage_percentages else 0
+
+        # Calculate average GPU counts across intervals
+        num_intervals = len(df['15min_bucket'].unique())
+        avg_claimed = total_claimed_gpus / num_intervals if num_intervals > 0 else 0
+        avg_total = total_available_gpus / num_intervals if num_intervals > 0 else 0
+
+        stats[utilization_type] = {
+            'avg_claimed': avg_claimed,
+            'avg_total_available': avg_total,
+            'allocation_usage_percent': avg_usage_percentage,
+            'num_intervals': num_intervals
+        }
+
+    return stats
+
+
+def calculate_allocation_usage_by_device_enhanced(df: pd.DataFrame, host: str = "", include_all_devices: bool = True) -> dict:
+    """
+    Calculate allocation-based usage grouped by device type with enhanced backfill categories.
+
+    Args:
+        df: DataFrame with GPU state data
+        host: Optional host filter
+        include_all_devices: Whether to include all device types or filter out older ones
+
+    Returns:
+        Dictionary with usage statistics for each enhanced class and device type
+    """
+    # Create 15-minute time buckets
+    df = df.copy()
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    df['15min_bucket'] = df['timestamp'].dt.floor('15min')
+
+    # Get unique device types
+    device_types = df['GPUs_DeviceName'].dropna().unique()
+
+    stats = {}
+
+    # Enhanced utilization types with emphasis on hosted capacity
+    utilization_types = [
+        "Priority", 
+        "Shared", 
+        "Backfill-HostedCapacity", 
+        "Backfill-ResearcherOwned", 
+        "GlideIn"
+    ]
+
+    for utilization_type in utilization_types:
+        stats[utilization_type] = {}
+
+        for device_type in device_types:
+            # Skip old/uncommon GPU types for cleaner output (unless requested to include all)
+            if not include_all_devices and any(old_gpu in device_type for old_gpu in ["GTX 1080", "P100", "Quadro", "A30", "A40"]):
+                continue
+
+            interval_usage_percentages = []
+            total_claimed_gpus = 0
+            total_available_gpus = 0
+
+            # For each 15-minute interval, count unique GPUs of this device type
+            for bucket in sorted(df['15min_bucket'].unique()):
+                bucket_df = df[df['15min_bucket'] == bucket]
+
+                # Filter by device type
+                device_df = bucket_df[bucket_df['GPUs_DeviceName'] == device_type]
+
+                if device_df.empty:
+                    continue
+
+                # Count unique GPUs for this utilization type and device in this interval
+                if utilization_type == "Priority":
+                    all_gpus_df = filter_df_enhanced(device_df, "Priority", "", host)
+                elif utilization_type == "Shared":
+                    all_gpus_df = filter_df_enhanced(device_df, "Shared", "", host)
+                elif utilization_type == "Backfill-HostedCapacity":
+                    all_gpus_df = filter_df_enhanced(device_df, "Backfill-HostedCapacity", "", host)
+                elif utilization_type == "Backfill-ResearcherOwned":
+                    all_gpus_df = filter_df_enhanced(device_df, "Backfill-ResearcherOwned", "", host)
+                elif utilization_type == "GlideIn":
+                    all_gpus_df = filter_df_enhanced(device_df, "GlideIn", "", host)
+
+                # Count unique GPUs (total available for this utilization type)
+                unique_gpu_ids = set(all_gpus_df['AssignedGPUs'].dropna().unique())
+                total_gpus_this_interval = len(unique_gpu_ids)
+
+                # Count how many of these unique GPUs are currently claimed
+                claimed_gpus_df = all_gpus_df[all_gpus_df['State'] == 'Claimed']
+                claimed_unique_gpu_ids = set(claimed_gpus_df['AssignedGPUs'].dropna().unique())
+                claimed_gpus = len(claimed_unique_gpu_ids)
+
+                if total_gpus_this_interval > 0:
+                    interval_usage = (claimed_gpus / total_gpus_this_interval) * 100
+                    interval_usage_percentages.append(interval_usage)
+                    total_claimed_gpus += claimed_gpus
+                    total_available_gpus += total_gpus_this_interval
+
+            if interval_usage_percentages:
+                # Calculate average usage percentage across all intervals
+                avg_usage_percentage = sum(interval_usage_percentages) / len(interval_usage_percentages)
+
+                # Calculate average GPU counts across intervals
+                num_intervals_with_data = len(interval_usage_percentages)
+                avg_claimed = total_claimed_gpus / num_intervals_with_data if num_intervals_with_data > 0 else 0
+                avg_total = total_available_gpus / num_intervals_with_data if num_intervals_with_data > 0 else 0
+
+                stats[utilization_type][device_type] = {
+                    'avg_claimed': avg_claimed,
+                    'avg_total_available': avg_total,
+                    'allocation_usage_percent': avg_usage_percentage,
+                    'num_intervals': num_intervals_with_data
+                }
 
     return stats
 
@@ -529,7 +708,8 @@ def run_analysis(
     group_by_device: bool = False,
     all_devices: bool = False,
     exclude_hosts: Optional[str] = None,
-    exclude_hosts_yaml: Optional[str] = None
+    exclude_hosts_yaml: Optional[str] = None,
+    use_enhanced_classification: bool = False
 ) -> dict:
     """
     Core analysis function that can be called programmatically.
@@ -537,6 +717,7 @@ def run_analysis(
     Args:
         exclude_hosts: JSON string with host exclusions
         exclude_hosts_yaml: Path to YAML file with host exclusions
+        use_enhanced_classification: Use enhanced backfill classification (default: False)
 
     Returns:
         Dictionary containing analysis results and metadata
@@ -570,11 +751,19 @@ def run_analysis(
 
     if analysis_type == "allocation":
         if group_by_device:
-            result["device_stats"] = calculate_allocation_usage_by_device(df, host, all_devices)
+            if use_enhanced_classification:
+                result["device_stats_enhanced"] = calculate_allocation_usage_by_device_enhanced(df, host, all_devices)
+                result["machine_categories"] = get_machines_by_category(df)
+            else:
+                result["device_stats"] = calculate_allocation_usage_by_device(df, host, all_devices)
             result["raw_data"] = df  # Pass raw data for unique cluster totals calculation
             result["host_filter"] = host  # Pass host filter for consistency
         else:
-            result["allocation_stats"] = calculate_allocation_usage(df, host)
+            if use_enhanced_classification:
+                result["allocation_stats_enhanced"] = calculate_allocation_usage_enhanced(df, host)
+                result["machine_categories"] = get_machines_by_category(df)
+            else:
+                result["allocation_stats"] = calculate_allocation_usage(df, host)
 
     elif analysis_type == "timeseries":
         result["timeseries_data"] = calculate_time_series_usage(df, bucket_minutes, host)
@@ -1105,6 +1294,116 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
             html_parts.append("</tr>")
 
         html_parts.append("</table>")
+    
+    # Enhanced allocation summary table
+    elif "allocation_stats_enhanced" in results:
+        html_parts.append("<h2>Enhanced Allocation Summary</h2>")
+        html_parts.append("<table border='1'>")
+        html_parts.append("<tr><th>Class</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>")
+
+        allocation_stats = results["allocation_stats_enhanced"]
+        # Order with hosted capacity emphasis
+        class_order = ["Priority", "Shared", "Backfill-HostedCapacity", "Backfill-ResearcherOwned", "GlideIn"]
+        
+        for class_name in class_order:
+            if class_name in allocation_stats:
+                stats = allocation_stats[class_name]
+                html_parts.append("<tr>")
+                html_parts.append(f"<td>{get_display_name(class_name)}</td>")
+                html_parts.append(f"<td style='text-align: right'>{stats['allocation_usage_percent']:.1f}%</td>")
+                html_parts.append(f"<td style='text-align: right'>{stats['avg_claimed']:.1f}</td>")
+                html_parts.append(f"<td style='text-align: right'>{stats['avg_total_available']:.1f}</td>")
+                html_parts.append("</tr>")
+
+        html_parts.append("</table>")
+        
+
+    # Enhanced device stats tables
+    elif "device_stats_enhanced" in results:
+        html_parts.append("<h2>Enhanced Usage by Device Type</h2>")
+
+        device_stats = results["device_stats_enhanced"]
+        class_totals = {}
+
+        # Define the enhanced order with hosted capacity emphasis
+        class_order = ["Shared", "Priority", "Backfill-HostedCapacity", "Backfill-ResearcherOwned", "GlideIn"]
+
+        for class_name in class_order:
+            device_data = device_stats.get(class_name, {})
+            if device_data:
+                html_parts.append(f"<h3>{get_display_name(class_name)}</h3>")
+                html_parts.append("<table border='1'>")
+                html_parts.append("<tr><th>Device Type</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>")
+
+                # Calculate totals first
+                total_claimed = 0
+                total_available = 0
+                for device_type, stats in sorted(device_data.items()):
+                    total_claimed += stats['avg_claimed']
+                    total_available += stats['avg_total_available']
+
+                # Add total row first
+                if total_available > 0:
+                    total_percent = (total_claimed / total_available) * 100
+                    html_parts.append("<tr style='font-weight: bold; background-color: #f0f0f0;'>")
+                    html_parts.append("<td>TOTAL</td>")
+                    html_parts.append(f"<td style='text-align: right'>{total_percent:.1f}%</td>")
+                    html_parts.append(f"<td style='text-align: right'>{total_claimed:.1f}</td>")
+                    html_parts.append(f"<td style='text-align: right'>{total_available:.1f}</td>")
+                    html_parts.append("</tr>")
+
+                    class_totals[class_name] = {
+                        'claimed': total_claimed,
+                        'total': total_available,
+                        'percent': total_percent
+                    }
+
+                # Add individual device rows (sorted alphabetically)
+                for device_type, stats in sorted(device_data.items()):
+                    html_parts.append("<tr>")
+                    html_parts.append(f"<td>{device_type}</td>")
+                    html_parts.append(f"<td style='text-align: right'>{stats['allocation_usage_percent']:.1f}%</td>")
+                    html_parts.append(f"<td style='text-align: right'>{stats['avg_claimed']:.1f}</td>")
+                    html_parts.append(f"<td style='text-align: right'>{stats['avg_total_available']:.1f}</td>")
+                    html_parts.append("</tr>")
+
+                html_parts.append("</table>")
+
+        # Machine categories table for enhanced view
+        if "machine_categories" in results:
+            html_parts.append("<h2>Machine Categories</h2>")
+            machine_categories = results["machine_categories"]
+            
+            for category, machines in machine_categories.items():
+                if machines:  # Only show categories that have machines
+                    html_parts.append(f"<h3>{category} ({len(machines)} machines)</h3>")
+                    html_parts.append("<table border='1'>")
+                    html_parts.append("<tr><th>Machine</th></tr>")
+                    
+                    for machine in machines:
+                        html_parts.append("<tr>")
+                        html_parts.append(f"<td>{machine}</td>")
+                        html_parts.append("</tr>")
+                    
+                    html_parts.append("</table>")
+
+        # Cluster summary for enhanced view (same logic as original but different totals)
+        if class_totals:
+            html_parts.append("<h2>Enhanced Cluster Summary</h2>")
+            html_parts.append("<table border='1' style='margin-top: 20px;'>")
+            html_parts.append("<tr style='background-color: #e0e0e0;'><th>Class</th><th>Total Allocated %</th><th>Total Allocated (avg.)</th><th>Total Available (avg.)</th></tr>")
+
+            for class_name in class_order:
+                if class_name in class_totals:
+                    totals = class_totals[class_name]
+                    html_parts.append("<tr>")
+                    html_parts.append(f"<td style='font-weight: bold;'>{get_display_name(class_name)}</td>")
+                    html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{totals['percent']:.1f}%</td>")
+                    html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{totals['claimed']:.1f}</td>")
+                    html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{totals['total']:.1f}</td>")
+                    html_parts.append("</tr>")
+
+            html_parts.append("</table>")
 
     # Device stats tables
     elif "device_stats" in results:
@@ -1287,6 +1586,73 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
             print(f"  {get_display_name(class_name)}: {stats['allocation_usage_percent']:.1f}% "
                   f"({stats['avg_claimed']:.1f}/{stats['avg_total_available']:.1f} GPUs)")
 
+    elif "allocation_stats_enhanced" in results:
+        print("\nEnhanced Allocation Summary:")
+        print(f"{'-'*70}")
+        allocation_stats = results["allocation_stats_enhanced"]
+        
+        # Order with hosted capacity emphasis
+        class_order = ["Priority", "Shared", "Backfill-HostedCapacity", "Backfill-ResearcherOwned", "GlideIn"]
+        
+        for class_name in class_order:
+            if class_name in allocation_stats:
+                stats = allocation_stats[class_name]
+                print(f"  {get_display_name(class_name)}: {stats['allocation_usage_percent']:.1f}% "
+                      f"({stats['avg_claimed']:.1f}/{stats['avg_total_available']:.1f} GPUs)")
+        
+
+    elif "device_stats_enhanced" in results:
+        print("\nEnhanced Usage by Device Type:")
+        print(f"{'-'*70}")
+        device_stats = results["device_stats_enhanced"]
+
+        # Calculate and display grand totals
+        grand_totals = {}
+
+        # Define the enhanced order with hosted capacity emphasis
+        class_order = ["Shared", "Priority", "Backfill-HostedCapacity", "Backfill-ResearcherOwned", "GlideIn"]
+
+        for class_name in class_order:
+            device_data = device_stats.get(class_name, {})
+            if device_data:  # Only show classes that have data
+                print(f"\n{get_display_name(class_name)}:")
+                print(f"{'-'*50}")
+
+                # Calculate totals for this class
+                total_claimed = 0
+                total_available = 0
+
+                for device_type, stats in sorted(device_data.items()):
+                    print(f"    {device_type}: {stats['allocation_usage_percent']:.1f}% "
+                          f"(avg {stats['avg_claimed']:.1f}/{stats['avg_total_available']:.1f} GPUs)")
+                    total_claimed += stats['avg_claimed']
+                    total_available += stats['avg_total_available']
+
+                # Calculate and store grand total for this class
+                if total_available > 0:
+                    grand_total_percent = (total_claimed / total_available) * 100
+                    grand_totals[class_name] = {
+                        'claimed': total_claimed,
+                        'total': total_available,
+                        'percent': grand_total_percent
+                    }
+
+                    print(f"    {'-'*30}")
+                    print(f"    TOTAL {get_display_name(class_name)}: {grand_total_percent:.1f}% "
+                          f"(avg {total_claimed:.1f}/{total_available:.1f} GPUs)")
+
+        # Cluster summary
+        if grand_totals:
+            print(f"\n{'='*70}")
+            print("Enhanced Cluster Summary:")
+            print(f"{'-'*70}")
+            for class_name in class_order:
+                if class_name in grand_totals:
+                    totals = grand_totals[class_name]
+                    print(f"  {get_display_name(class_name)}: {totals['percent']:.1f}% "
+                          f"({totals['claimed']:.1f}/{totals['total']:.1f} GPUs)")
+        
+
     elif "device_stats" in results:
         print("\nUsage by Device Type:")
         print(f"{'-'*70}")
@@ -1435,7 +1801,8 @@ def main(
     smtp_server: str = typer.Option("smtp.wiscmail.wisc.edu", help="SMTP server hostname"),
     smtp_port: int = typer.Option(25, help="SMTP server port (25 for standard SMTP, 587 for submission)"),
     email_timeout: int = typer.Option(30, help="SMTP connection timeout in seconds"),
-    email_debug: bool = typer.Option(False, help="Enable SMTP debug output")
+    email_debug: bool = typer.Option(False, help="Enable SMTP debug output"),
+    enhanced_classification: bool = typer.Option(False, help="Use enhanced backfill classification (separates researcher owned/hosted capacity)")
 ):
     """
     Calculate GPU usage statistics for Priority, Shared, and Backfill classes.
@@ -1506,7 +1873,8 @@ def main(
             group_by_device=group_by_device,
             all_devices=all_devices,
             exclude_hosts=exclude_hosts,
-            exclude_hosts_yaml=exclude_hosts_yaml
+            exclude_hosts_yaml=exclude_hosts_yaml,
+            use_enhanced_classification=enhanced_classification
         )
     except ValueError as e:
         print(f"Error: {e}")
