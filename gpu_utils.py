@@ -307,7 +307,7 @@ def get_machines_by_category(df: pd.DataFrame) -> dict:
 
 def filter_df_enhanced(df: pd.DataFrame, utilization: str = "", state: str = "", host: str = "") -> pd.DataFrame:
     """
-    Enhanced filter DataFrame with new classification categories.
+    Filter DataFrame with new classification categories.
     
     Args:
         df: Input DataFrame with GPU state data

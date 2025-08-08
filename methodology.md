@@ -5,21 +5,15 @@
 
 **Allocation Categories:**
 
-*Standard Classification:*
-- **Open Capacity:** Slots where PrioritizedProjects is empty and the slot name does not contain 'backfill'. These represent general-access GPU resources.
-- **Prioritized Service:** Slots where PrioritizedProjects is not empty and the slot name does not contain 'backfill'. 
-- **Backfill:** Slots where the slot name contains 'backfill'. These utilize idle priority resources for lower-priority jobs.
-
-*Enhanced Classification (available with --enhanced-classification):*
-- **Open Capacity:** Same as standard classification - slots on machines with empty PrioritizedProjects, excluding hosted capacity machines.
-- **Prioritized Service:** Same as standard classification - slots on machines with non-empty PrioritizedProjects.
+- **Open Capacity:** Slots on machines with empty PrioritizedProjects, excluding hosted capacity machines.
+- **Prioritized Service:** Slots on machines with non-empty PrioritizedProjects.
 - **Backfill (Hosted Capacity):** Backfill slots specifically on hosted capacity machines 
 - **Backfill (Researcher Owned):** Backfill slots on researcher owned machines hosted within CHTC
 - **GlideIn:** Backfill slots on open capacity machines (empty PrioritizedProjects, not in hosted capacity list).
 
 **Machine Classification Logic:**
 
-*Enhanced classification categorizes machines based on:*
+*Machine classification is based on:*
 1. **External List Integration:** The `hosted_capacity` file contains a definitive list of hosted capacity machines.
 2. **PrioritizedProjects Field:** Used to identify researcher owned vs open capacity machines.
 
