@@ -9,7 +9,7 @@
 - **Prioritized Service:** Slots on machines with non-empty PrioritizedProjects.
 - **Backfill (Hosted Capacity):** Backfill slots specifically on hosted capacity machines 
 - **Backfill (Researcher Owned):** Backfill slots on researcher owned machines hosted within CHTC
-- **GlideIn:** Backfill slots on open capacity machines (empty PrioritizedProjects, not in hosted capacity list).
+- **Backfill (Open Capacity):** Backfill slots on open capacity machines (empty PrioritizedProjects, not in hosted capacity list).
 
 **Machine Classification Logic:**
 
@@ -26,7 +26,7 @@
 - Backfill slots are classified based on the machine they run on:
   - Slots on hosted capacity machines → "Backfill (Hosted Capacity)"
   - Slots on researcher owned machines → "Backfill (Researcher Owned)" 
-  - Slots on open capacity machines → "GlideIn" (reclassified from backfill)
+  - Slots on open capacity machines → "Backfill (Open Capacity)" (reclassified from backfill)
 
 **Metrics:**
 

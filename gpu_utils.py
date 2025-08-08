@@ -311,7 +311,7 @@ def filter_df_enhanced(df: pd.DataFrame, utilization: str = "", state: str = "",
     
     Args:
         df: Input DataFrame with GPU state data
-        utilization: Filter by type ("Priority", "Shared", "Backfill-ResearcherOwned", "Backfill-HostedCapacity", "GlideIn")
+        utilization: Filter by type ("Priority", "Shared", "Backfill-ResearcherOwned", "Backfill-HostedCapacity", "Backfill-OpenCapacity")
         state: Filter by GPU state ("Claimed", "Unclaimed")
         host: Filter by host name pattern
         
@@ -360,8 +360,8 @@ def filter_df_enhanced(df: pd.DataFrame, utilization: str = "", state: str = "",
             (df['Name'].str.contains("backfill")) &
             (df['Machine'].isin(hosted_capacity_hosts))
         ]
-    elif utilization == "GlideIn":
-        # Backfill slots on open capacity machines (reclassified as GlideIn)
+    elif utilization == "Backfill-OpenCapacity":
+        # Backfill slots on open capacity machines (reclassified as Backfill-OpenCapacity)
         df = df[
             (df['State'] == state if state != "" else True) & 
             (df['Name'].str.contains(host) if host != "" else True) & 
@@ -455,8 +455,8 @@ def count_backfill_hosted_capacity(df: pd.DataFrame, state: str = "", host: str 
 
 
 def count_glidein(df: pd.DataFrame, state: str = "", host: str = "") -> int:
-    """Count GlideIn GPUs (formerly backfill on open capacity)."""
-    df = filter_df_enhanced(df, "GlideIn", state, host)
+    """Count Backfill-OpenCapacity GPUs (formerly backfill on open capacity)."""
+    df = filter_df_enhanced(df, "Backfill-OpenCapacity", state, host)
     return df.shape[0]
 
 
@@ -468,7 +468,7 @@ def get_display_name(class_name: str) -> str:
         "Backfill": "Backfill",  # Legacy support
         "Backfill-ResearcherOwned": "Backfill (Researcher Owned)",
         "Backfill-HostedCapacity": "Backfill (Hosted Capacity)",
-        "GlideIn": "GlideIn",
+        "Backfill-OpenCapacity": "Backfill (Open Capacity)",
         "Hosted Capacity": "Hosted Capacity",
         "Researcher Owned": "Researcher Owned",
         "Open Capacity": "Open Capacity"

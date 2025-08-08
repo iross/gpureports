@@ -298,7 +298,7 @@ def calculate_allocation_usage_enhanced(df: pd.DataFrame, host: str = "") -> dic
         "Shared", 
         "Backfill-HostedCapacity", 
         "Backfill-ResearcherOwned", 
-        "GlideIn"
+        "Backfill-OpenCapacity"
     ]
 
     for utilization_type in utilization_types:
@@ -323,9 +323,9 @@ def calculate_allocation_usage_enhanced(df: pd.DataFrame, host: str = "") -> dic
             elif utilization_type == "Backfill-ResearcherOwned":
                 claimed_gpus = len(filter_df_enhanced(bucket_df, "Backfill-ResearcherOwned", "Claimed", host)['AssignedGPUs'].dropna().unique())
                 unclaimed_gpus = len(filter_df_enhanced(bucket_df, "Backfill-ResearcherOwned", "Unclaimed", host)['AssignedGPUs'].dropna().unique())
-            elif utilization_type == "GlideIn":
-                claimed_gpus = len(filter_df_enhanced(bucket_df, "GlideIn", "Claimed", host)['AssignedGPUs'].dropna().unique())
-                unclaimed_gpus = len(filter_df_enhanced(bucket_df, "GlideIn", "Unclaimed", host)['AssignedGPUs'].dropna().unique())
+            elif utilization_type == "Backfill-OpenCapacity":
+                claimed_gpus = len(filter_df_enhanced(bucket_df, "Backfill-OpenCapacity", "Claimed", host)['AssignedGPUs'].dropna().unique())
+                unclaimed_gpus = len(filter_df_enhanced(bucket_df, "Backfill-OpenCapacity", "Unclaimed", host)['AssignedGPUs'].dropna().unique())
 
             total_gpus_this_interval = claimed_gpus + unclaimed_gpus
 
@@ -381,7 +381,7 @@ def calculate_allocation_usage_by_device_enhanced(df: pd.DataFrame, host: str = 
         "Shared", 
         "Backfill-HostedCapacity", 
         "Backfill-ResearcherOwned", 
-        "GlideIn"
+        "Backfill-OpenCapacity"
     ]
 
     for utilization_type in utilization_types:
@@ -415,8 +415,8 @@ def calculate_allocation_usage_by_device_enhanced(df: pd.DataFrame, host: str = 
                     all_gpus_df = filter_df_enhanced(device_df, "Backfill-HostedCapacity", "", host)
                 elif utilization_type == "Backfill-ResearcherOwned":
                     all_gpus_df = filter_df_enhanced(device_df, "Backfill-ResearcherOwned", "", host)
-                elif utilization_type == "GlideIn":
-                    all_gpus_df = filter_df_enhanced(device_df, "GlideIn", "", host)
+                elif utilization_type == "Backfill-OpenCapacity":
+                    all_gpus_df = filter_df_enhanced(device_df, "Backfill-OpenCapacity", "", host)
 
                 # Count unique GPUs (total available for this utilization type)
                 unique_gpu_ids = set(all_gpus_df['AssignedGPUs'].dropna().unique())
@@ -1295,7 +1295,7 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
 
         allocation_stats = results["allocation_stats_enhanced"]
         # Order with hosted capacity emphasis
-        class_order = ["Priority", "Shared", "Backfill-HostedCapacity", "Backfill-ResearcherOwned", "GlideIn"]
+        class_order = ["Priority", "Shared", "Backfill-HostedCapacity", "Backfill-ResearcherOwned", "Backfill-OpenCapacity"]
         
         for class_name in class_order:
             if class_name in allocation_stats:
@@ -1318,7 +1318,7 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
         class_totals = {}
 
         # Define the order with hosted capacity emphasis
-        class_order = ["Shared", "Priority", "Backfill-HostedCapacity", "Backfill-ResearcherOwned", "GlideIn"]
+        class_order = ["Shared", "Priority", "Backfill-HostedCapacity", "Backfill-ResearcherOwned", "Backfill-OpenCapacity"]
 
         for class_name in class_order:
             device_data = device_stats.get(class_name, {})
@@ -1575,7 +1575,7 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
         allocation_stats = results["allocation_stats"]
         
         # Order with hosted capacity emphasis (enhanced format is now default)
-        class_order = ["Priority", "Shared", "Backfill-HostedCapacity", "Backfill-ResearcherOwned", "GlideIn"]
+        class_order = ["Priority", "Shared", "Backfill-HostedCapacity", "Backfill-ResearcherOwned", "Backfill-OpenCapacity"]
         
         for class_name in class_order:
             if class_name in allocation_stats:
@@ -1592,7 +1592,7 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
         grand_totals = {}
 
         # Define the order with hosted capacity emphasis
-        class_order = ["Shared", "Priority", "Backfill-HostedCapacity", "Backfill-ResearcherOwned", "GlideIn"]
+        class_order = ["Shared", "Priority", "Backfill-HostedCapacity", "Backfill-ResearcherOwned", "Backfill-OpenCapacity"]
 
         for class_name in class_order:
             device_data = device_stats.get(class_name, {})
