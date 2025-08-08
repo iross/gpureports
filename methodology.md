@@ -5,9 +5,34 @@
 
 **Allocation Categories:**
 
+*Standard Classification:*
 - **Open Capacity:** Slots where PrioritizedProjects is empty and the slot name does not contain 'backfill'. These represent general-access GPU resources.
 - **Prioritized Service:** Slots where PrioritizedProjects is not empty and the slot name does not contain 'backfill'. 
 - **Backfill:** Slots where the slot name contains 'backfill'. These utilize idle priority resources for lower-priority jobs.
+
+*Enhanced Classification (available with --enhanced-classification):*
+- **Open Capacity:** Same as standard classification - slots on machines with empty PrioritizedProjects, excluding hosted capacity machines.
+- **Prioritized Service:** Same as standard classification - slots on machines with non-empty PrioritizedProjects.
+- **Backfill (Hosted Capacity):** Backfill slots specifically on hosted capacity machines 
+- **Backfill (Researcher Owned):** Backfill slots on researcher owned machines hosted within CHTC
+- **GlideIn:** Backfill slots on open capacity machines (empty PrioritizedProjects, not in hosted capacity list).
+
+**Machine Classification Logic:**
+
+*Enhanced classification categorizes machines based on:*
+1. **External List Integration:** The `hosted_capacity` file contains a definitive list of hosted capacity machines.
+2. **PrioritizedProjects Field:** Used to identify researcher owned vs open capacity machines.
+
+*Classification Rules:*
+- **Hosted Capacity Machines:** Any machine listed in the `hosted_capacity` file, regardless of PrioritizedProjects value.
+- **Researcher Owned Machines:** Machines with non-empty PrioritizedProjects field that are NOT in the hosted capacity list.
+- **Open Capacity Machines:** Machines with empty PrioritizedProjects field that are NOT in the hosted capacity list.
+
+*Backfill Slot Classification:*
+- Backfill slots are classified based on the machine they run on:
+  - Slots on hosted capacity machines → "Backfill (Hosted Capacity)"
+  - Slots on researcher owned machines → "Backfill (Researcher Owned)" 
+  - Slots on open capacity machines → "GlideIn" (reclassified from backfill)
 
 **Metrics:**
 
@@ -15,4 +40,15 @@
 - **Allocated (avg.):** Average number of GPUs in 'Claimed' state across all 15-minute snapshots in the time period
 - **Available (avg.):** Average total number of GPUs available for allocation across all snapshots in the time period. If a GPU is being utilized in a Prioritized slot, it is removed from Available in the Backfill slot for the entire time slice.
 
-**Calculation Method:** Averages are calculated by sampling GPU states every 15 minutes and computing the mean across all intervals in the specified lookback period. 
+**Calculation Method:** Averages are calculated by sampling GPU states every 15 minutes and computing the mean across all intervals in the specified lookback period.
+
+**Machine Classifications:**
+
+*Hosted Capacity Machines (as of 2025-08-08):*
+- blengerichgpu4000.chtc.wisc.edu
+- ssilwalgpu4000.chtc.wisc.edu
+- amuraligpu4000.chtc.wisc.edu
+- btellman-jsullivangpu4000.chtc.wisc.edu
+- mkhodakgpu4000.chtc.wisc.edu
+- txie-dsigpu4000.chtc.wisc.edu
+- cxiaogpu4000.chtc.wisc.edu
