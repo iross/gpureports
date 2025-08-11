@@ -21,6 +21,8 @@ import os
 from pathlib import Path
 # Removed jinja2 and pathlib imports - no longer needed for simple HTML tables
 
+CLASS_ORDER = ["Priority-ResearcherOwned", "Priority-HostedCapacity", "Shared", "Backfill-ResearcherOwned", "Backfill-HostedCapacity", "Backfill-OpenCapacity"]
+
 # Import shared utilities
 from gpu_utils import (
     filter_df, filter_df_enhanced, count_backfill, count_shared, count_prioritized,
@@ -1283,9 +1285,8 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
         html_parts.append("<tr><th>Class</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>")
 
         allocation_stats = results["allocation_stats"]
-        class_order = ["Priority-ResearcherOwned", "Priority-HostedCapacity", "Shared", "Backfill-ResearcherOwned", "Backfill-HostedCapacity", "Backfill-OpenCapacity"]
         
-        for class_name in class_order:
+        for class_name in CLASS_ORDER:
             if class_name in allocation_stats:
                 stats = allocation_stats[class_name]
                 html_parts.append("<tr>")
@@ -1303,10 +1304,7 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
         device_stats = results["device_stats"]
         class_totals = {}
 
-        # Define the order with hosted capacity emphasis
-        class_order = ["Priority-ResearcherOwned", "Priority-HostedCapacity", "Shared", "Backfill-ResearcherOwned", "Backfill-HostedCapacity", "Backfill-OpenCapacity"]
-
-        for class_name in class_order:
+        for class_name in CLASS_ORDER:
             device_data = device_stats.get(class_name, {})
             if device_data:
                 html_parts.append(f"<h3>{get_display_name(class_name)}</h3>")
@@ -1371,7 +1369,7 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
             html_parts.append("<table border='1' style='margin-top: 20px;'>")
             html_parts.append("<tr style='background-color: #e0e0e0;'><th>Class</th><th>Total Allocated %</th><th>Total Allocated (avg.)</th><th>Total Available (avg.)</th></tr>")
 
-            for class_name in class_order:
+            for class_name in CLASS_ORDER:
                 if class_name in class_totals:
                     totals = class_totals[class_name]
                     html_parts.append("<tr>")
