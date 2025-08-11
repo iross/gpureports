@@ -1301,8 +1301,7 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
         html_parts.append("<tr><th>Class</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>")
 
         allocation_stats = results["allocation_stats_enhanced"]
-        # Order with hosted capacity emphasis
-        class_order = ["Priority-ResearcherOwned", "Priority-HostedCapacity", "Shared", "Backfill-HostedCapacity", "Backfill-ResearcherOwned", "Backfill-OpenCapacity"]
+        class_order = ["Priority-ResearcherOwned", "Priority-HostedCapacity", "Shared", "Backfill-ResearcherOwned", "Backfill-HostedCapacity", "Backfill-OpenCapacity"]
         
         for class_name in class_order:
             if class_name in allocation_stats:
@@ -1325,7 +1324,7 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
         class_totals = {}
 
         # Define the order with hosted capacity emphasis
-        class_order = ["Shared", "Priority-ResearcherOwned", "Priority-HostedCapacity", "Backfill-HostedCapacity", "Backfill-ResearcherOwned", "Backfill-OpenCapacity"]
+        class_order = ["Priority-ResearcherOwned", "Priority-HostedCapacity", "Shared", "Backfill-ResearcherOwned", "Backfill-HostedCapacity", "Backfill-OpenCapacity"]
 
         for class_name in class_order:
             device_data = device_stats.get(class_name, {})
@@ -1582,7 +1581,8 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
         allocation_stats = results["allocation_stats"]
         
         # Order with hosted capacity emphasis (enhanced format is now default)
-        class_order = ["Priority-ResearcherOwned", "Priority-HostedCapacity", "Shared", "Backfill-HostedCapacity", "Backfill-ResearcherOwned", "Backfill-OpenCapacity"]
+        class_order = ["Priority-ResearcherOwned", "Priority-HostedCapacity", "Shared", "Backfill-ResearcherOwned", "Backfill-HostedCapacity", "Backfill-OpenCapacity"]
+
         
         for class_name in class_order:
             if class_name in allocation_stats:
@@ -1599,7 +1599,7 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
         grand_totals = {}
 
         # Define the order with hosted capacity emphasis
-        class_order = ["Shared", "Priority-ResearcherOwned", "Priority-HostedCapacity", "Backfill-HostedCapacity", "Backfill-ResearcherOwned", "Backfill-OpenCapacity"]
+        class_order = ["Priority-ResearcherOwned", "Priority-HostedCapacity", "Shared", "Backfill-ResearcherOwned", "Backfill-HostedCapacity", "Backfill-OpenCapacity"]
 
         for class_name in class_order:
             device_data = device_stats.get(class_name, {})
