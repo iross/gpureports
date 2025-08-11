@@ -1277,30 +1277,12 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
     html_parts.append(f"<p><strong>Period:</strong> {metadata['start_time'].strftime('%Y-%m-%d %H:%M')} to {metadata['end_time'].strftime('%Y-%m-%d %H:%M')} ({metadata['num_intervals']} intervals)</p>")
     html_parts.append(f"<p><strong>Generated:</strong> {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>")
 
-    # Simple summary table
     if "allocation_stats" in results:
         html_parts.append("<h2>Allocation Summary</h2>")
         html_parts.append("<table border='1'>")
         html_parts.append("<tr><th>Class</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>")
 
         allocation_stats = results["allocation_stats"]
-        for class_name, stats in allocation_stats.items():
-            html_parts.append("<tr>")
-            html_parts.append(f"<td>{get_display_name(class_name)}</td>")
-            html_parts.append(f"<td style='text-align: right'>{stats['allocation_usage_percent']:.1f}%</td>")
-            html_parts.append(f"<td style='text-align: right'>{stats['avg_claimed']:.1f}</td>")
-            html_parts.append(f"<td style='text-align: right'>{stats['avg_total_available']:.1f}</td>")
-            html_parts.append("</tr>")
-
-        html_parts.append("</table>")
-    
-    # Allocation summary table
-    elif "allocation_stats_enhanced" in results:
-        html_parts.append("<h2>Allocation Summary</h2>")
-        html_parts.append("<table border='1'>")
-        html_parts.append("<tr><th>Class</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>")
-
-        allocation_stats = results["allocation_stats_enhanced"]
         class_order = ["Priority-ResearcherOwned", "Priority-HostedCapacity", "Shared", "Backfill-ResearcherOwned", "Backfill-HostedCapacity", "Backfill-OpenCapacity"]
         
         for class_name in class_order:
@@ -1314,13 +1296,11 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
                 html_parts.append("</tr>")
 
         html_parts.append("</table>")
-        
-
     # Device stats tables
-    elif "device_stats_enhanced" in results:
+    elif "device_stats" in results:
         html_parts.append("<h2>Usage by Device Type</h2>")
 
-        device_stats = results["device_stats_enhanced"]
+        device_stats = results["device_stats"]
         class_totals = {}
 
         # Define the order with hosted capacity emphasis
@@ -1790,8 +1770,7 @@ def main(
             group_by_device=group_by_device,
             all_devices=all_devices,
             exclude_hosts=exclude_hosts,
-            exclude_hosts_yaml=exclude_hosts_yaml,
-            use_enhanced_classification=True
+            exclude_hosts_yaml=exclude_hosts_yaml
         )
     except ValueError as e:
         print(f"Error: {e}")
