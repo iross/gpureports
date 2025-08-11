@@ -1,10 +1,12 @@
+---
 id: task-16
-title: Update the backfill classification
-status: To Do
+title: Update the prioritized host classifications
+status: Done
 assignee: []
 created_date: '2025-08-07'
 labels: []
 dependencies: []
+---
 
 ## Description
 - Currently, the "backfill" designation is applied to slots on three kinds of machines:
@@ -57,3 +59,5 @@ This task has been broken down into three subtasks:
 - task-16.1 - Implement machine classification logic
 - task-16.2 - Update reporting and create machine category tables  
 - task-16.3 - Update documentation for new machine classifications
+- task-16.4
+- task-16.5
