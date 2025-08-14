@@ -9,5 +9,6 @@ es_credentials.json
 
 full_test_website/
 gpu-backfill-evictions/
+.DS_STORE
 
 *__pycache__
