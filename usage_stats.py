@@ -753,6 +753,7 @@ def run_analysis(
             "end_time": df['timestamp'].max(),
             "num_intervals": num_intervals,
             "total_records": len(df),
+            "hours_back": hours_back,
             "excluded_hosts": gpu_utils.HOST_EXCLUSIONS,
             "filtered_hosts_info": gpu_utils.FILTERED_HOSTS_INFO
         }
@@ -1303,12 +1304,11 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
 
     # Header
     html_parts.append("<h1>CHTC GPU ALLOCATION REPORT</h1>")
-    # Simplified period format: "x hours (starttime-endtime)"
-    start_time = metadata['start_time'].strftime('%m/%d %H:%M')
-    end_time = metadata['end_time'].strftime('%m/%d %H:%M')
-    hours = round((metadata['end_time'] - metadata['start_time']).total_seconds() / 3600, 1)
-    hours_str = str(int(hours)) if hours == int(hours) else str(hours)
-    period_str = f"{hours_str} hours ({start_time}-{end_time})"
+    # Simplified period format: just the lookback hours
+    hours_back = metadata.get('hours_back', 24)
+    hours_str = str(int(hours_back)) if hours_back == int(hours_back) else str(hours_back)
+    hour_word = "hour" if hours_back == 1 else "hours"
+    period_str = f"{hours_str} {hour_word}"
     html_parts.append(f"<p><strong>Period:</strong> {period_str}</p>")
     html_parts.append(f"<p><strong>Generated:</strong> {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>")
 
@@ -1674,12 +1674,11 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
     print(f"\n{'='*70}")
     print(f"{'CHTC GPU UTILIZATION REPORT':^70}")
     print(f"{'='*70}")
-    # Simplified period format for console: "x hours (starttime-endtime)"
-    start_time = metadata['start_time'].strftime('%m/%d %H:%M')
-    end_time = metadata['end_time'].strftime('%m/%d %H:%M')
-    hours = round((metadata['end_time'] - metadata['start_time']).total_seconds() / 3600, 1)
-    hours_str = str(int(hours)) if hours == int(hours) else str(hours)
-    period_str = f"{hours_str} hours ({start_time}-{end_time})"
+    # Simplified period format for console: just the lookback hours
+    hours_back = metadata.get('hours_back', 24)
+    hours_str = str(int(hours_back)) if hours_back == int(hours_back) else str(hours_back)
+    hour_word = "hour" if hours_back == 1 else "hours"
+    period_str = f"{hours_str} {hour_word}"
     print(f"Period: {period_str}")
     print(f"{'='*70}")
 
