@@ -17,41 +17,41 @@ HOST_EXCLUSIONS = {}
 FILTERED_HOSTS_INFO = []
 
 # Global variable to cache hosted capacity list
-_HOSTED_CAPACITY_HOSTS = None
+_CHTC_OWNED_HOSTS = None
 
 
-def load_hosted_capacity_hosts(hosted_capacity_file: str = "hosted_capacity") -> set:
+def load_chtc_owned_hosts(chtc_owned_file: str = "chtc_owned") -> set:
     """
-    Load hosted capacity hosts from file.
+    Load CHTC owned hosts from file.
     
     Args:
-        hosted_capacity_file: Path to file containing hosted capacity host names
+        chtc_owned_file: Path to file containing CHTC owned host names
         
     Returns:
-        Set of hosted capacity host names
+        Set of CHTC owned host names
     """
-    global _HOSTED_CAPACITY_HOSTS
+    global _CHTC_OWNED_HOSTS
     
-    if _HOSTED_CAPACITY_HOSTS is not None:
-        return _HOSTED_CAPACITY_HOSTS
+    if _CHTC_OWNED_HOSTS is not None:
+        return _CHTC_OWNED_HOSTS
     
-    hosted_capacity_hosts = set()
-    hosted_capacity_path = Path(hosted_capacity_file)
+    chtc_owned_hosts = set()
+    chtc_owned_path = Path(chtc_owned_file)
     
-    if hosted_capacity_path.exists():
+    if chtc_owned_path.exists():
         try:
-            with open(hosted_capacity_path, 'r') as f:
+            with open(chtc_owned_path, 'r') as f:
                 for line in f:
                     host = line.strip()
                     if host:  # Skip empty lines
-                        hosted_capacity_hosts.add(host)
+                        chtc_owned_hosts.add(host)
         except Exception as e:
-            print(f"Warning: Could not load hosted capacity hosts from {hosted_capacity_file}: {e}")
+            print(f"Warning: Could not load CHTC owned hosts from {chtc_owned_file}: {e}")
     else:
-        print(f"Warning: Hosted capacity file {hosted_capacity_file} not found")
+        print(f"Warning: CHTC owned file {chtc_owned_file} not found")
     
-    _HOSTED_CAPACITY_HOSTS = hosted_capacity_hosts
-    return hosted_capacity_hosts
+    _CHTC_OWNED_HOSTS = chtc_owned_hosts
+    return chtc_owned_hosts
 
 
 def load_host_exclusions(exclusions_config: Optional[str] = None, yaml_file: Optional[str] = None) -> Dict[str, str]:
@@ -226,13 +226,13 @@ def classify_machine_category(machine: str, prioritized_projects: str) -> str:
         prioritized_projects: PrioritizedProjects field value
         
     Returns:
-        Category: "Hosted Capacity", "Researcher Owned", or "Open Capacity"
+        Category: "CHTC Owned", "Researcher Owned", or "Open Capacity"
     """
-    hosted_capacity_hosts = load_hosted_capacity_hosts()
+    chtc_owned_hosts = load_chtc_owned_hosts()
     
-    # Check if machine is in hosted capacity list
-    if machine in hosted_capacity_hosts:
-        return "Hosted Capacity"
+    # Check if machine is in CHTC owned list
+    if machine in chtc_owned_hosts:
+        return "CHTC Owned"
     
     # Check if machine has non-empty PrioritizedProjects
     if prioritized_projects and prioritized_projects.strip():
@@ -248,28 +248,28 @@ def filter_df_by_machine_category(df: pd.DataFrame, category: str) -> pd.DataFra
     
     Args:
         df: Input DataFrame with GPU state data
-        category: Machine category ("Hosted Capacity", "Researcher Owned", "Open Capacity")
+        category: Machine category ("CHTC Owned", "Researcher Owned", "Open Capacity")
         
     Returns:
         Filtered DataFrame
     """
     df = df.copy()
-    hosted_capacity_hosts = load_hosted_capacity_hosts()
+    chtc_owned_hosts = load_chtc_owned_hosts()
     
-    if category == "Hosted Capacity":
-        df = df[df['Machine'].isin(hosted_capacity_hosts)]
+    if category == "CHTC Owned":
+        df = df[df['Machine'].isin(chtc_owned_hosts)]
     elif category == "Researcher Owned":
-        # Researcher owned: has PrioritizedProjects AND not in hosted capacity list
+        # Researcher owned: has PrioritizedProjects AND not in CHTC owned list
         df = df[
             (df['PrioritizedProjects'] != "") & 
             (df['PrioritizedProjects'].notna()) & 
-            (~df['Machine'].isin(hosted_capacity_hosts))
+            (~df['Machine'].isin(chtc_owned_hosts))
         ]
     elif category == "Open Capacity":
-        # Open capacity: no PrioritizedProjects AND not in hosted capacity list
+        # Open capacity: no PrioritizedProjects AND not in CHTC owned list
         df = df[
             ((df['PrioritizedProjects'] == "") | (df['PrioritizedProjects'].isna())) & 
-            (~df['Machine'].isin(hosted_capacity_hosts))
+            (~df['Machine'].isin(chtc_owned_hosts))
         ]
     
     return df
@@ -289,7 +289,7 @@ def get_machines_by_category(df: pd.DataFrame) -> dict:
     unique_machines = df.groupby('Machine')['PrioritizedProjects'].first().reset_index()
     
     categories = {
-        "Hosted Capacity": [],
+        "CHTC Owned": [],
         "Researcher Owned": [],
         "Open Capacity": []
     }
@@ -311,7 +311,7 @@ def filter_df_enhanced(df: pd.DataFrame, utilization: str = "", state: str = "",
     
     Args:
         df: Input DataFrame with GPU state data
-        utilization: Filter by type ("Priority-ResearcherOwned", "Priority-HostedCapacity", "Shared", "Backfill-ResearcherOwned", "Backfill-HostedCapacity", "Backfill-OpenCapacity")
+        utilization: Filter by type ("Priority-ResearcherOwned", "Priority-CHTCOwned", "Shared", "Backfill-ResearcherOwned", "Backfill-CHTCOwned", "Backfill-OpenCapacity")
         state: Filter by GPU state ("Claimed", "Unclaimed")
         host: Filter by host name pattern
         
@@ -340,7 +340,7 @@ def filter_df_enhanced(df: pd.DataFrame, utilization: str = "", state: str = "",
             if filtered_info not in FILTERED_HOSTS_INFO:
                 FILTERED_HOSTS_INFO.append(filtered_info)
     
-    hosted_capacity_hosts = load_hosted_capacity_hosts()
+    chtc_owned_hosts = load_chtc_owned_hosts()
     
     if utilization == "Priority-ResearcherOwned":
         # Priority slots on researcher owned machines (non-empty PrioritizedProjects AND not in hosted capacity)
@@ -362,27 +362,27 @@ def filter_df_enhanced(df: pd.DataFrame, utilization: str = "", state: str = "",
             df = df.drop(columns=['_rank'])
         if state == "Claimed":  # Only care about claimed and prioritized
             df = df[(df['PrioritizedProjects'] != "") & 
-                    (~df['Machine'].isin(hosted_capacity_hosts)) &
+                    (~df['Machine'].isin(chtc_owned_hosts)) &
                     (df['State'] == state if state != "" else True) & 
                     (df['Name'].str.contains(host) if host != "" else True) & 
                     (~df['Name'].str.contains("backfill"))] 
         elif state == "Unclaimed":  # Care about unclaimed and prioritized, but some might be claimed as backfill so count those.
             df = df[((df['PrioritizedProjects'] != "") & 
-                     (~df['Machine'].isin(hosted_capacity_hosts)) &
+                     (~df['Machine'].isin(chtc_owned_hosts)) &
                      (df['State'] == state if state != "" else True) & 
                      (df['Name'].str.contains(host) if host != "" else True) & 
                      (~df['Name'].str.contains("backfill"))) |
                     ((df['PrioritizedProjects'] != "") & 
-                     (~df['Machine'].isin(hosted_capacity_hosts)) &
+                     (~df['Machine'].isin(chtc_owned_hosts)) &
                      (df['State'] == "Claimed") & 
                      (df['Name'].str.contains(host) if host != "" else True) & 
                      (df['Name'].str.contains("backfill")))]
         else:  # When state is empty, still need to filter for priority projects
             df = df[(df['PrioritizedProjects'] != "") & 
-                    (~df['Machine'].isin(hosted_capacity_hosts)) &
+                    (~df['Machine'].isin(chtc_owned_hosts)) &
                     (df['Name'].str.contains(host) if host != "" else True) & 
                     (~df['Name'].str.contains("backfill"))]
-    elif utilization == "Priority-HostedCapacity":
+    elif utilization == "Priority-CHTCOwned":
         # Priority slots on hosted capacity machines (non-empty PrioritizedProjects AND in hosted capacity)
         # Do some cleanup -- primary slots still have in-use GPUs listed as Assigned, so remove them if they're in use
         duplicated_gpus = df[~df['AssignedGPUs'].isna()]['AssignedGPUs'].duplicated(keep=False)
@@ -402,24 +402,24 @@ def filter_df_enhanced(df: pd.DataFrame, utilization: str = "", state: str = "",
             df = df.drop(columns=['_rank'])
         if state == "Claimed":  # Only care about claimed and prioritized
             df = df[(df['PrioritizedProjects'] != "") & 
-                    (df['Machine'].isin(hosted_capacity_hosts)) &
+                    (df['Machine'].isin(chtc_owned_hosts)) &
                     (df['State'] == state if state != "" else True) & 
                     (df['Name'].str.contains(host) if host != "" else True) & 
                     (~df['Name'].str.contains("backfill"))] 
         elif state == "Unclaimed":  # Care about unclaimed and prioritized, but some might be claimed as backfill so count those.
             df = df[((df['PrioritizedProjects'] != "") & 
-                     (df['Machine'].isin(hosted_capacity_hosts)) &
+                     (df['Machine'].isin(chtc_owned_hosts)) &
                      (df['State'] == state if state != "" else True) & 
                      (df['Name'].str.contains(host) if host != "" else True) & 
                      (~df['Name'].str.contains("backfill"))) |
                     ((df['PrioritizedProjects'] != "") & 
-                     (df['Machine'].isin(hosted_capacity_hosts)) &
+                     (df['Machine'].isin(chtc_owned_hosts)) &
                      (df['State'] == "Claimed") & 
                      (df['Name'].str.contains(host) if host != "" else True) & 
                      (df['Name'].str.contains("backfill")))]
         else:  # When state is empty, still need to filter for priority projects
             df = df[(df['PrioritizedProjects'] != "") & 
-                    (df['Machine'].isin(hosted_capacity_hosts)) &
+                    (df['Machine'].isin(chtc_owned_hosts)) &
                     (df['Name'].str.contains(host) if host != "" else True) & 
                     (~df['Name'].str.contains("backfill"))]
     elif utilization == "Backfill-ResearcherOwned":
@@ -430,15 +430,15 @@ def filter_df_enhanced(df: pd.DataFrame, utilization: str = "", state: str = "",
             (df['Name'].str.contains("backfill")) &
             (df['PrioritizedProjects'] != "") & 
             (df['PrioritizedProjects'].notna()) & 
-            (~df['Machine'].isin(hosted_capacity_hosts))
+            (~df['Machine'].isin(chtc_owned_hosts))
         ]
-    elif utilization == "Backfill-HostedCapacity":
+    elif utilization == "Backfill-CHTCOwned":
         # Backfill slots on hosted capacity machines
         df = df[
             (df['State'] == state if state != "" else True) & 
             (df['Name'].str.contains(host) if host != "" else True) & 
             (df['Name'].str.contains("backfill")) &
-            (df['Machine'].isin(hosted_capacity_hosts))
+            (df['Machine'].isin(chtc_owned_hosts))
         ]
     elif utilization == "Backfill-OpenCapacity":
         # Backfill slots on open capacity machines (reclassified as Backfill-OpenCapacity)
@@ -447,7 +447,7 @@ def filter_df_enhanced(df: pd.DataFrame, utilization: str = "", state: str = "",
             (df['Name'].str.contains(host) if host != "" else True) & 
             (df['Name'].str.contains("backfill")) &
             ((df['PrioritizedProjects'] == "") | (df['PrioritizedProjects'].isna())) & 
-            (~df['Machine'].isin(hosted_capacity_hosts))
+            (~df['Machine'].isin(chtc_owned_hosts))
         ]
     elif utilization == "Shared":
         # Apply same duplicate cleanup logic as Priority - shared GPUs can also appear in backfill slots
@@ -528,9 +528,9 @@ def count_backfill_researcher_owned(df: pd.DataFrame, state: str = "", host: str
     return df.shape[0]
 
 
-def count_backfill_hosted_capacity(df: pd.DataFrame, state: str = "", host: str = "") -> int:
-    """Count backfill GPUs on hosted capacity machines."""
-    df = filter_df_enhanced(df, "Backfill-HostedCapacity", state, host)
+def count_backfill_chtc_owned(df: pd.DataFrame, state: str = "", host: str = "") -> int:
+    """Count backfill GPUs on CHTC owned machines."""
+    df = filter_df_enhanced(df, "Backfill-CHTCOwned", state, host)
     return df.shape[0]
 
 
@@ -545,13 +545,13 @@ def get_display_name(class_name: str) -> str:
     display_names = {
         "Priority": "Prioritized service",  # Legacy support
         "Priority-ResearcherOwned": "Prioritized (Researcher Owned)",
-        "Priority-HostedCapacity": "Prioritized (Hosted Capacity)",
+        "Priority-CHTCOwned": "Prioritized (CHTC Owned)",
         "Shared": "Open Capacity",
         "Backfill": "Backfill",  # Legacy support
         "Backfill-ResearcherOwned": "Backfill (Researcher Owned)",
-        "Backfill-HostedCapacity": "Backfill (Hosted Capacity)",
+        "Backfill-CHTCOwned": "Backfill (CHTC Owned)",
         "Backfill-OpenCapacity": "Backfill (Open Capacity)",
-        "Hosted Capacity": "Hosted Capacity",
+        "CHTC Owned": "CHTC Owned",
         "Researcher Owned": "Researcher Owned",
         "Open Capacity": "Open Capacity"
     }

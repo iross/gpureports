@@ -17,41 +17,41 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from gpu_utils import (
-    load_hosted_capacity_hosts,
+    load_chtc_owned_hosts,
     classify_machine_category,
     filter_df_by_machine_category,
     get_machines_by_category
 )
 
 
-class TestLoadHostedCapacityHosts:
-    """Test the hosted capacity hosts loading functionality."""
+class TestLoadCHTCOwnedHosts:
+    """Test the CHTC owned hosts loading functionality."""
     
-    def test_load_hosted_capacity_hosts_valid_file(self):
-        """Test loading hosted capacity hosts from a valid file."""
+    def test_load_chtc_owned_hosts_valid_file(self):
+        """Test loading CHTC owned hosts from a valid file."""
         test_content = "host1.example.com\nhost2.example.com\nhost3.example.com\n"
         
         with patch('builtins.open', mock_open(read_data=test_content)):
             with patch('pathlib.Path.exists', return_value=True):
-                hosts = load_hosted_capacity_hosts("test_file")
+                hosts = load_chtc_owned_hosts("test_file")
                 
         expected = {"host1.example.com", "host2.example.com", "host3.example.com"}
         assert hosts == expected
     
-    def test_load_hosted_capacity_hosts_file_not_found(self):
-        """Test handling when hosted capacity file doesn't exist."""
+    def test_load_chtc_owned_hosts_file_not_found(self):
+        """Test handling when CHTC owned file doesn't exist."""
         with patch('pathlib.Path.exists', return_value=False):
-            hosts = load_hosted_capacity_hosts("nonexistent_file")
+            hosts = load_chtc_owned_hosts("nonexistent_file")
         
         assert hosts == set()
     
-    def test_load_hosted_capacity_hosts_empty_lines(self):
+    def test_load_chtc_owned_hosts_empty_lines(self):
         """Test that empty lines are skipped."""
         test_content = "host1.example.com\n\nhost2.example.com\n\n"
         
         with patch('builtins.open', mock_open(read_data=test_content)):
             with patch('pathlib.Path.exists', return_value=True):
-                hosts = load_hosted_capacity_hosts("test_file")
+                hosts = load_chtc_owned_hosts("test_file")
                 
         expected = {"host1.example.com", "host2.example.com"}
         assert hosts == expected
@@ -66,32 +66,32 @@ class TestClassifyMachineCategory:
         _HOSTED_CAPACITY_HOSTS = None
     
     def test_classify_hosted_capacity(self):
-        """Test classification of hosted capacity machines."""
-        with patch('gpu_utils.load_hosted_capacity_hosts', return_value={"hosted1.com", "hosted2.com"}):
+        """Test classification of CHTC owned machines."""
+        with patch('gpu_utils.load_chtc_owned_hosts', return_value={"hosted1.com", "hosted2.com"}):
             category = classify_machine_category("hosted1.com", "some_project")
-            assert category == "Hosted Capacity"
+            assert category == "CHTC Owned"
     
     def test_classify_researcher_owned(self):
         """Test classification of researcher owned machines."""
-        with patch('gpu_utils.load_hosted_capacity_hosts', return_value={"hosted1.com"}):
+        with patch('gpu_utils.load_chtc_owned_hosts', return_value={"hosted1.com"}):
             category = classify_machine_category("research1.com", "project_alpha")
             assert category == "Researcher Owned"
     
     def test_classify_researcher_owned_whitespace(self):
         """Test classification with whitespace in prioritized projects."""
-        with patch('gpu_utils.load_hosted_capacity_hosts', return_value={"hosted1.com"}):
+        with patch('gpu_utils.load_chtc_owned_hosts', return_value={"hosted1.com"}):
             category = classify_machine_category("research1.com", "  project_beta  ")
             assert category == "Researcher Owned"
     
     def test_classify_open_capacity_empty_projects(self):
         """Test classification of open capacity machines with empty projects."""
-        with patch('gpu_utils.load_hosted_capacity_hosts', return_value={"hosted1.com"}):
+        with patch('gpu_utils.load_chtc_owned_hosts', return_value={"hosted1.com"}):
             category = classify_machine_category("open1.com", "")
             assert category == "Open Capacity"
     
     def test_classify_open_capacity_none_projects(self):
         """Test classification of open capacity machines with None projects."""
-        with patch('gpu_utils.load_hosted_capacity_hosts', return_value={"hosted1.com"}):
+        with patch('gpu_utils.load_chtc_owned_hosts', return_value={"hosted1.com"}):
             category = classify_machine_category("open1.com", None)
             assert category == "Open Capacity"
 
@@ -109,16 +109,16 @@ class TestFilterDfByMachineCategory:
         })
     
     def test_filter_hosted_capacity(self):
-        """Test filtering for hosted capacity machines."""
-        with patch('gpu_utils.load_hosted_capacity_hosts', return_value={"hosted1.com"}):
-            result = filter_df_by_machine_category(self.test_df, "Hosted Capacity")
+        """Test filtering for CHTC owned machines."""
+        with patch('gpu_utils.load_chtc_owned_hosts', return_value={"hosted1.com"}):
+            result = filter_df_by_machine_category(self.test_df, "CHTC Owned")
             
         assert len(result) == 1
         assert result.iloc[0]['Machine'] == 'hosted1.com'
     
     def test_filter_researcher_owned(self):
         """Test filtering for researcher owned machines."""
-        with patch('gpu_utils.load_hosted_capacity_hosts', return_value={"hosted1.com"}):
+        with patch('gpu_utils.load_chtc_owned_hosts', return_value={"hosted1.com"}):
             result = filter_df_by_machine_category(self.test_df, "Researcher Owned")
             
         assert len(result) == 2
@@ -128,7 +128,7 @@ class TestFilterDfByMachineCategory:
     
     def test_filter_open_capacity(self):
         """Test filtering for open capacity machines."""
-        with patch('gpu_utils.load_hosted_capacity_hosts', return_value={"hosted1.com"}):
+        with patch('gpu_utils.load_chtc_owned_hosts', return_value={"hosted1.com"}):
             result = filter_df_by_machine_category(self.test_df, "Open Capacity")
             
         assert len(result) == 1
@@ -145,11 +145,11 @@ class TestGetMachinesByCategory:
             'PrioritizedProjects': ['', 'project_alpha', '', 'project_beta', ''],
         })
         
-        with patch('gpu_utils.load_hosted_capacity_hosts', return_value={"hosted1.com"}):
+        with patch('gpu_utils.load_chtc_owned_hosts', return_value={"hosted1.com"}):
             result = get_machines_by_category(test_df)
         
         expected = {
-            "Hosted Capacity": ["hosted1.com"],
+            "CHTC Owned": ["hosted1.com"],
             "Researcher Owned": ["research1.com", "research2.com"],
             "Open Capacity": ["open1.com"]
         }
@@ -163,7 +163,7 @@ class TestGetMachinesByCategory:
             'PrioritizedProjects': ['project1', 'project2', 'project3'],
         })
         
-        with patch('gpu_utils.load_hosted_capacity_hosts', return_value=set()):
+        with patch('gpu_utils.load_chtc_owned_hosts', return_value=set()):
             result = get_machines_by_category(test_df)
         
         expected_researcher_owned = ["a-research.com", "m-research.com", "z-research.com"]
