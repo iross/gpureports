@@ -21,12 +21,12 @@ import os
 from pathlib import Path
 # Removed jinja2 and pathlib imports - no longer needed for simple HTML tables
 
-CLASS_ORDER = ["Priority-ResearcherOwned", "Priority-HostedCapacity", "Shared", "Backfill-ResearcherOwned", "Backfill-HostedCapacity", "Backfill-OpenCapacity"]
+CLASS_ORDER = ["Priority-ResearcherOwned", "Priority-CHTCOwned", "Shared", "Backfill-ResearcherOwned", "Backfill-CHTCOwned", "Backfill-OpenCapacity"]
 
 # Import shared utilities
 from gpu_utils import (
     filter_df, filter_df_enhanced, count_backfill, count_shared, count_prioritized,
-    count_backfill_researcher_owned, count_backfill_hosted_capacity, count_glidein,
+    count_backfill_researcher_owned, count_backfill_chtc_owned, count_glidein,
     load_host_exclusions, get_display_name, get_required_databases,
     get_latest_timestamp_from_most_recent_db, get_machines_by_category,
     HOST_EXCLUSIONS, FILTERED_HOSTS_INFO
@@ -297,9 +297,9 @@ def calculate_allocation_usage_enhanced(df: pd.DataFrame, host: str = "") -> dic
     # Utilization types with emphasis on hosted capacity
     utilization_types = [
         "Priority-ResearcherOwned", 
-        "Priority-HostedCapacity", 
+        "Priority-CHTCOwned", 
         "Shared", 
-        "Backfill-HostedCapacity", 
+        "Backfill-CHTCOwned", 
         "Backfill-ResearcherOwned", 
         "Backfill-OpenCapacity"
     ]
@@ -317,15 +317,15 @@ def calculate_allocation_usage_enhanced(df: pd.DataFrame, host: str = "") -> dic
             if utilization_type == "Priority-ResearcherOwned":
                 claimed_gpus = len(filter_df_enhanced(bucket_df, "Priority-ResearcherOwned", "Claimed", host)['AssignedGPUs'].dropna().unique())
                 unclaimed_gpus = len(filter_df_enhanced(bucket_df, "Priority-ResearcherOwned", "Unclaimed", host)['AssignedGPUs'].dropna().unique())
-            elif utilization_type == "Priority-HostedCapacity":
-                claimed_gpus = len(filter_df_enhanced(bucket_df, "Priority-HostedCapacity", "Claimed", host)['AssignedGPUs'].dropna().unique())
-                unclaimed_gpus = len(filter_df_enhanced(bucket_df, "Priority-HostedCapacity", "Unclaimed", host)['AssignedGPUs'].dropna().unique())
+            elif utilization_type == "Priority-CHTCOwned":
+                claimed_gpus = len(filter_df_enhanced(bucket_df, "Priority-CHTCOwned", "Claimed", host)['AssignedGPUs'].dropna().unique())
+                unclaimed_gpus = len(filter_df_enhanced(bucket_df, "Priority-CHTCOwned", "Unclaimed", host)['AssignedGPUs'].dropna().unique())
             elif utilization_type == "Shared":
                 claimed_gpus = len(filter_df_enhanced(bucket_df, "Shared", "Claimed", host)['AssignedGPUs'].dropna().unique())
                 unclaimed_gpus = len(filter_df_enhanced(bucket_df, "Shared", "Unclaimed", host)['AssignedGPUs'].dropna().unique())
-            elif utilization_type == "Backfill-HostedCapacity":
-                claimed_gpus = len(filter_df_enhanced(bucket_df, "Backfill-HostedCapacity", "Claimed", host)['AssignedGPUs'].dropna().unique())
-                unclaimed_gpus = len(filter_df_enhanced(bucket_df, "Backfill-HostedCapacity", "Unclaimed", host)['AssignedGPUs'].dropna().unique())
+            elif utilization_type == "Backfill-CHTCOwned":
+                claimed_gpus = len(filter_df_enhanced(bucket_df, "Backfill-CHTCOwned", "Claimed", host)['AssignedGPUs'].dropna().unique())
+                unclaimed_gpus = len(filter_df_enhanced(bucket_df, "Backfill-CHTCOwned", "Unclaimed", host)['AssignedGPUs'].dropna().unique())
             elif utilization_type == "Backfill-ResearcherOwned":
                 claimed_gpus = len(filter_df_enhanced(bucket_df, "Backfill-ResearcherOwned", "Claimed", host)['AssignedGPUs'].dropna().unique())
                 unclaimed_gpus = len(filter_df_enhanced(bucket_df, "Backfill-ResearcherOwned", "Unclaimed", host)['AssignedGPUs'].dropna().unique())
@@ -384,9 +384,9 @@ def calculate_allocation_usage_by_device_enhanced(df: pd.DataFrame, host: str = 
     # Utilization types with emphasis on hosted capacity
     utilization_types = [
         "Priority-ResearcherOwned", 
-        "Priority-HostedCapacity", 
+        "Priority-CHTCOwned", 
         "Shared", 
-        "Backfill-HostedCapacity", 
+        "Backfill-CHTCOwned", 
         "Backfill-ResearcherOwned", 
         "Backfill-OpenCapacity"
     ]
@@ -416,12 +416,12 @@ def calculate_allocation_usage_by_device_enhanced(df: pd.DataFrame, host: str = 
                 # Count unique GPUs for this utilization type and device in this interval
                 if utilization_type == "Priority-ResearcherOwned":
                     all_gpus_df = filter_df_enhanced(device_df, "Priority-ResearcherOwned", "", host)
-                elif utilization_type == "Priority-HostedCapacity":
-                    all_gpus_df = filter_df_enhanced(device_df, "Priority-HostedCapacity", "", host)
+                elif utilization_type == "Priority-CHTCOwned":
+                    all_gpus_df = filter_df_enhanced(device_df, "Priority-CHTCOwned", "", host)
                 elif utilization_type == "Shared":
                     all_gpus_df = filter_df_enhanced(device_df, "Shared", "", host)
-                elif utilization_type == "Backfill-HostedCapacity":
-                    all_gpus_df = filter_df_enhanced(device_df, "Backfill-HostedCapacity", "", host)
+                elif utilization_type == "Backfill-CHTCOwned":
+                    all_gpus_df = filter_df_enhanced(device_df, "Backfill-CHTCOwned", "", host)
                 elif utilization_type == "Backfill-ResearcherOwned":
                     all_gpus_df = filter_df_enhanced(device_df, "Backfill-ResearcherOwned", "", host)
                 elif utilization_type == "Backfill-OpenCapacity":
@@ -1276,8 +1276,54 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
 
     # Header
     html_parts.append("<h1>CHTC GPU ALLOCATION REPORT</h1>")
-    html_parts.append(f"<p><strong>Period:</strong> {metadata['start_time'].strftime('%Y-%m-%d %H:%M')} to {metadata['end_time'].strftime('%Y-%m-%d %H:%M')} ({metadata['num_intervals']} intervals)</p>")
+    # Simplified period format: "x hours (starttime-endtime)"
+    start_time = metadata['start_time'].strftime('%m/%d %H:%M')
+    end_time = metadata['end_time'].strftime('%m/%d %H:%M')
+    hours = round((metadata['end_time'] - metadata['start_time']).total_seconds() / 3600, 1)
+    hours_str = str(int(hours)) if hours == int(hours) else str(hours)
+    period_str = f"{hours_str} hours ({start_time}-{end_time})"
+    html_parts.append(f"<p><strong>Period:</strong> {period_str}</p>")
     html_parts.append(f"<p><strong>Generated:</strong> {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>")
+
+    # Check if we have device stats for cluster summary
+    device_stats = results.get("device_stats", {})
+    class_totals = {}
+    
+    # Pre-calculate class totals if we have device stats
+    if device_stats:
+        for class_name in CLASS_ORDER:
+            device_data = device_stats.get(class_name, {})
+            if device_data:
+                total_claimed = 0
+                total_available = 0
+                for device_type, stats in device_data.items():
+                    total_claimed += stats['avg_claimed']
+                    total_available += stats['avg_total_available']
+                
+                if total_available > 0:
+                    class_totals[class_name] = {
+                        'claimed': total_claimed,
+                        'total': total_available,
+                        'percent': (total_claimed / total_available) * 100
+                    }
+
+    # Cluster summary at the top (if we have data)
+    if class_totals:
+        html_parts.append("<h2>Cluster Summary</h2>")
+        html_parts.append("<table border='1' style='margin-top: 20px;'>")
+        html_parts.append("<tr style='background-color: #e0e0e0;'><th>Class</th><th>Total Allocated %</th><th>Total Allocated (avg.)</th><th>Total Available (avg.)</th></tr>")
+
+        for class_name in CLASS_ORDER:
+            if class_name in class_totals:
+                totals = class_totals[class_name]
+                html_parts.append("<tr>")
+                html_parts.append(f"<td style='font-weight: bold;'>{get_display_name(class_name)}</td>")
+                html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{totals['percent']:.1f}%</td>")
+                html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{totals['claimed']:.1f}</td>")
+                html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{totals['total']:.1f}</td>")
+                html_parts.append("</tr>")
+
+        html_parts.append("</table>")
 
     if "allocation_stats" in results:
         html_parts.append("<h2>Allocation Summary</h2>")
@@ -1300,9 +1346,6 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
     # Device stats tables
     elif "device_stats" in results:
         html_parts.append("<h2>Usage by Device Type</h2>")
-
-        device_stats = results["device_stats"]
-        class_totals = {}
 
         for class_name in CLASS_ORDER:
             device_data = device_stats.get(class_name, {})
@@ -1363,23 +1406,6 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
                     
                     html_parts.append("</table>")
 
-        # Cluster summary for enhanced view (same logic as original but different totals)
-        if class_totals:
-            html_parts.append("<h2>Cluster Summary</h2>")
-            html_parts.append("<table border='1' style='margin-top: 20px;'>")
-            html_parts.append("<tr style='background-color: #e0e0e0;'><th>Class</th><th>Total Allocated %</th><th>Total Allocated (avg.)</th><th>Total Available (avg.)</th></tr>")
-
-            for class_name in CLASS_ORDER:
-                if class_name in class_totals:
-                    totals = class_totals[class_name]
-                    html_parts.append("<tr>")
-                    html_parts.append(f"<td style='font-weight: bold;'>{get_display_name(class_name)}</td>")
-                    html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{totals['percent']:.1f}%</td>")
-                    html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{totals['claimed']:.1f}</td>")
-                    html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{totals['total']:.1f}</td>")
-                    html_parts.append("</tr>")
-
-            html_parts.append("</table>")
 
     # Device stats tables
     elif "device_stats" in results:
@@ -1550,8 +1576,46 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
     print(f"\n{'='*70}")
     print(f"{'CHTC GPU UTILIZATION REPORT':^70}")
     print(f"{'='*70}")
-    print(f"Period: {metadata['start_time'].strftime('%Y-%m-%d %H:%M')} to {metadata['end_time'].strftime('%Y-%m-%d %H:%M')} ({metadata['num_intervals']} intervals)")
+    # Simplified period format for console: "x hours (starttime-endtime)"
+    start_time = metadata['start_time'].strftime('%m/%d %H:%M')
+    end_time = metadata['end_time'].strftime('%m/%d %H:%M')
+    hours = round((metadata['end_time'] - metadata['start_time']).total_seconds() / 3600, 1)
+    hours_str = str(int(hours)) if hours == int(hours) else str(hours)
+    period_str = f"{hours_str} hours ({start_time}-{end_time})"
+    print(f"Period: {period_str}")
     print(f"{'='*70}")
+
+    # Calculate cluster summary first if we have device stats
+    grand_totals = {}
+    if "device_stats" in results:
+        device_stats = results["device_stats"]
+        class_order = ["Priority-ResearcherOwned", "Priority-CHTCOwned", "Shared", "Backfill-ResearcherOwned", "Backfill-CHTCOwned", "Backfill-OpenCapacity"]
+        
+        for class_name in class_order:
+            device_data = device_stats.get(class_name, {})
+            if device_data:
+                total_claimed = 0
+                total_available = 0
+                for device_type, stats in device_data.items():
+                    total_claimed += stats['avg_claimed']
+                    total_available += stats['avg_total_available']
+                
+                if total_available > 0:
+                    grand_totals[class_name] = {
+                        'claimed': total_claimed,
+                        'total': total_available,
+                        'percent': (total_claimed / total_available) * 100
+                    }
+
+    # Show cluster summary at the top
+    if grand_totals:
+        print(f"\nCluster Summary:")
+        print(f"{'-'*70}")
+        for class_name in ["Priority-ResearcherOwned", "Priority-CHTCOwned", "Shared", "Backfill-ResearcherOwned", "Backfill-CHTCOwned", "Backfill-OpenCapacity"]:
+            if class_name in grand_totals:
+                totals = grand_totals[class_name]
+                print(f"  {get_display_name(class_name)}: {totals['percent']:.1f}% "
+                      f"({totals['claimed']:.1f}/{totals['total']:.1f} GPUs)")
 
     if "allocation_stats" in results:
         print("\nAllocation Summary:")
@@ -1559,7 +1623,7 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
         allocation_stats = results["allocation_stats"]
         
         # Order with hosted capacity emphasis (enhanced format is now default)
-        class_order = ["Priority-ResearcherOwned", "Priority-HostedCapacity", "Shared", "Backfill-ResearcherOwned", "Backfill-HostedCapacity", "Backfill-OpenCapacity"]
+        class_order = ["Priority-ResearcherOwned", "Priority-CHTCOwned", "Shared", "Backfill-ResearcherOwned", "Backfill-CHTCOwned", "Backfill-OpenCapacity"]
 
         
         for class_name in class_order:
@@ -1571,13 +1635,9 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
     elif "device_stats" in results:
         print("\nUsage by Device Type:")
         print(f"{'-'*70}")
-        device_stats = results["device_stats"]
 
-        # Calculate and display grand totals
-        grand_totals = {}
-
-        # Define the order with hosted capacity emphasis
-        class_order = ["Priority-ResearcherOwned", "Priority-HostedCapacity", "Shared", "Backfill-ResearcherOwned", "Backfill-HostedCapacity", "Backfill-OpenCapacity"]
+        # Use the pre-calculated grand_totals and device_stats
+        class_order = ["Priority-ResearcherOwned", "Priority-CHTCOwned", "Shared", "Backfill-ResearcherOwned", "Backfill-CHTCOwned", "Backfill-OpenCapacity"]
 
         for class_name in class_order:
             device_data = device_stats.get(class_name, {})
@@ -1585,39 +1645,17 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
                 print(f"\n{get_display_name(class_name)}:")
                 print(f"{'-'*50}")
 
-                # Calculate totals for this class
-                total_claimed = 0
-                total_available = 0
-
                 for device_type, stats in sorted(device_data.items()):
                     print(f"    {device_type}: {stats['allocation_usage_percent']:.1f}% "
                           f"(avg {stats['avg_claimed']:.1f}/{stats['avg_total_available']:.1f} GPUs)")
-                    total_claimed += stats['avg_claimed']
-                    total_available += stats['avg_total_available']
 
-                # Calculate and store grand total for this class
-                if total_available > 0:
-                    grand_total_percent = (total_claimed / total_available) * 100
-                    grand_totals[class_name] = {
-                        'claimed': total_claimed,
-                        'total': total_available,
-                        'percent': grand_total_percent
-                    }
-
-                    print(f"    {'-'*30}")
-                    print(f"    TOTAL {get_display_name(class_name)}: {grand_total_percent:.1f}% "
-                          f"(avg {total_claimed:.1f}/{total_available:.1f} GPUs)")
-
-        # Cluster summary
-        if grand_totals:
-            print(f"\n{'='*70}")
-            print("Cluster Summary:")
-            print(f"{'-'*70}")
-            for class_name in class_order:
+                # Show class total using pre-calculated data
                 if class_name in grand_totals:
                     totals = grand_totals[class_name]
-                    print(f"  {get_display_name(class_name)}: {totals['percent']:.1f}% "
-                          f"({totals['claimed']:.1f}/{totals['total']:.1f} GPUs)")
+                    print(f"    {'-'*30}")
+                    print(f"    TOTAL {get_display_name(class_name)}: {totals['percent']:.1f}% "
+                          f"(avg {totals['claimed']:.1f}/{totals['total']:.1f} GPUs)")
+
         
 
     elif "timeseries_data" in results:

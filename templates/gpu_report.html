@@ -293,6 +293,39 @@
         <p><strong>Generated:</strong> {{ generated_at }}</p>
     </div>
     
+    {% if cluster_summary %}
+    <div class="cluster-summary">
+        <h2>📈 Cluster Summary</h2>
+        <table class="summary-table">
+            <thead>
+                <tr>
+                    <th>Class</th>
+                    <th>Allocated %</th>
+                    <th>Average GPUs</th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for class_name, stats in cluster_summary.items() %}
+                {% if class_name != 'TOTAL' %}
+                <tr>
+                    <td>{{ class_name }}</td>
+                    <td><span class="percentage">{{ "%.1f"|format(stats.percent) }}%</span></td>
+                    <td>{{ "%.1f"|format(stats.claimed) }} / {{ "%.1f"|format(stats.total) }}</td>
+                </tr>
+                {% endif %}
+            {% endfor %}
+            {% if cluster_summary.TOTAL %}
+                <tr class="total-row">
+                    <td><strong>TOTAL</strong></td>
+                    <td><strong><span class="percentage">{{ "%.1f"|format(cluster_summary.TOTAL.percent) }}%</span></strong></td>
+                    <td><strong>{{ "%.1f"|format(cluster_summary.TOTAL.claimed) }} / {{ "%.1f"|format(cluster_summary.TOTAL.total) }}</strong></td>
+                </tr>
+            {% endif %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+    
     {% if notes and notes|length > 0 %}
     <div class="notes">
         <h3>⚠️ Notes</h3>
@@ -372,39 +405,6 @@
             </div>
             {% endif %}
         {% endfor %}
-    </div>
-    {% endif %}
-    
-    {% if cluster_summary %}
-    <div class="cluster-summary">
-        <h2>📈 Cluster Summary</h2>
-        <table class="summary-table">
-            <thead>
-                <tr>
-                    <th>Class</th>
-                    <th>Allocated %</th>
-                    <th>Average GPUs</th>
-                </tr>
-            </thead>
-            <tbody>
-            {% for class_name, stats in cluster_summary.items() %}
-                {% if class_name != 'TOTAL' %}
-                <tr>
-                    <td>{{ class_name }}</td>
-                    <td><span class="percentage">{{ "%.1f"|format(stats.percent) }}%</span></td>
-                    <td>{{ "%.1f"|format(stats.claimed) }} / {{ "%.1f"|format(stats.total) }}</td>
-                </tr>
-                {% endif %}
-            {% endfor %}
-            {% if cluster_summary.TOTAL %}
-                <tr class="total-row">
-                    <td><strong>TOTAL</strong></td>
-                    <td><strong><span class="percentage">{{ "%.1f"|format(cluster_summary.TOTAL.percent) }}%</span></strong></td>
-                    <td><strong>{{ "%.1f"|format(cluster_summary.TOTAL.claimed) }} / {{ "%.1f"|format(cluster_summary.TOTAL.total) }}</strong></td>
-                </tr>
-            {% endif %}
-            </tbody>
-        </table>
     </div>
     {% endif %}
     
