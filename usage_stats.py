@@ -32,6 +32,7 @@ from gpu_utils import (
     HOST_EXCLUSIONS, FILTERED_HOSTS_INFO
 )
 import gpu_utils
+from device_name_mappings import get_human_readable_device_name
 
 
 def get_time_filtered_data(
@@ -1454,8 +1455,9 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
 
                 # Add individual device rows (sorted alphabetically)
                 for device_type, stats in sorted(device_data.items()):
+                    short_name = get_human_readable_device_name(device_type)
                     html_parts.append("<tr>")
-                    html_parts.append(f"<td>{device_type}</td>")
+                    html_parts.append(f"<td>{short_name}</td>")
                     html_parts.append(f"<td style='text-align: right'>{stats['allocation_usage_percent']:.1f}%</td>")
                     html_parts.append(f"<td style='text-align: right'>{stats['avg_claimed']:.1f}</td>")
                     html_parts.append(f"<td style='text-align: right'>{stats['avg_total_available']:.1f}</td>")
@@ -1524,8 +1526,9 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
 
                 # Add individual device rows (sorted alphabetically)
                 for device_type, stats in sorted(device_data.items()):
+                    short_name = get_human_readable_device_name(device_type)
                     html_parts.append("<tr>")
-                    html_parts.append(f"<td>{device_type}</td>")
+                    html_parts.append(f"<td>{short_name}</td>")
                     html_parts.append(f"<td style='text-align: right'>{stats['allocation_usage_percent']:.1f}%</td>")
                     html_parts.append(f"<td style='text-align: right'>{stats['avg_claimed']:.1f}</td>")
                     html_parts.append(f"<td style='text-align: right'>{stats['avg_total_available']:.1f}</td>")
@@ -1769,7 +1772,8 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
                 print(f"{'-'*50}")
 
                 for device_type, stats in sorted(device_data.items()):
-                    print(f"    {device_type}: {stats['allocation_usage_percent']:.1f}% "
+                    short_name = get_human_readable_device_name(device_type)
+                    print(f"    {short_name}: {stats['allocation_usage_percent']:.1f}% "
                           f"(avg {stats['avg_claimed']:.1f}/{stats['avg_total_available']:.1f} GPUs)")
 
                 # Show class total using pre-calculated data
