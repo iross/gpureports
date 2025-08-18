@@ -119,12 +119,31 @@ def create_eviction_heatmaps(evictions, all_job_configs, output_file):
             fill_value=0
         )
         
+        # Create pivot table for job counts
+        job_count_table = cap_data.pivot_table(
+            index='sleep_time', 
+            columns='requested_gpus', 
+            values='job_count', 
+            fill_value=0
+        )
+        
+        # Create custom annotations that combine avg_eviction_count and job_count
+        custom_annot = pivot_table.copy()
+        for row_idx, row in enumerate(pivot_table.index):
+            for col_idx, col in enumerate(pivot_table.columns):
+                avg_evictions = pivot_table.loc[row, col]
+                job_count = job_count_table.loc[row, col]
+                if job_count > 0:  # Show labels for cells with any jobs (including zero evictions)
+                    custom_annot.loc[row, col] = f'{avg_evictions:.1f}\n({job_count:.0f} jobs)'
+                else:
+                    custom_annot.loc[row, col] = ''
+        
         # Create heatmap with global color scale (no individual colorbars)
         heatmap = sns.heatmap(
             pivot_table, 
             ax=axes[i], 
-            annot=True, 
-            fmt='.1f',  # Format as float with 1 decimal place
+            annot=custom_annot, 
+            fmt='',  # Use custom annotations, no formatting
             cmap='YlOrRd',
             vmin=global_min,  # Set global minimum for color scale
             vmax=global_max,  # Set global maximum for color scale
