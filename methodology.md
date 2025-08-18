@@ -37,6 +37,30 @@
 
 **Calculation Method:** Averages are calculated by sampling GPU states every 15 minutes and computing the mean across all intervals in the specified lookback period.
 
+**Memory Category Classifications:**
+
+GPUs are grouped into memory categories based on their VRAM capacity for easier analysis:
+
+*<48GB Memory Category:*
+- **NVIDIA GeForce GTX 1080 Ti** (11GB)
+- **NVIDIA GeForce RTX 2080 Ti** (11GB)  
+- **Tesla P100-PCIE-16GB** (16GB)
+- **NVIDIA A30** (24GB)
+- **Quadro RTX 6000** (24GB)
+- **NVIDIA A100-SXM4-40GB** (40GB)
+
+*48GB Memory Category:*
+- **NVIDIA A40** (48GB)
+- **NVIDIA L40** (48GB)
+- **NVIDIA L40S** (48GB)
+
+*80GB Memory Category:*
+- **NVIDIA A100-SXM4-80GB** (80GB)
+- **NVIDIA H100 80GB HBM3** (80GB)
+
+*>80GB Memory Category:*
+- **NVIDIA H200** (141GB HBM3e)
+
 **Machine Classifications:**
 
 *CHTC Owned Machines (as of 2025-08-08):*
