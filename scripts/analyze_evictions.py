@@ -256,6 +256,20 @@ def create_simple_summary(evictions, output_file):
         max_evictions = max(data['eviction_count'] for data in summary_data)
         print(f"Max evictions for single job: {max_evictions}")
 
+def check_successful_execution(content):
+    """Check if a job executed successfully by looking for normal termination."""
+    # Look for successful termination pattern
+    success_match = re.search(
+        r'005 \(.*\) (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) Job terminated\.\s*\n\s*\(1\) Normal termination \(return value 0\)',
+        content,
+        re.MULTILINE
+    )
+    
+    # Also check that there was at least one execution start
+    exec_match = re.search(r'001 \(.*\) (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) Job executing on host:', content)
+    
+    return success_match is not None and exec_match is not None
+
 def parse_log_file(file_path):
     """Parse a single log file and extract eviction information."""
     with open(file_path, 'r') as f:
@@ -599,9 +613,17 @@ def analyze_evictions(log_dir, output_file, gpu_jobs_csv=None, host_filter=None,
     print(f"Processing {len(log_files)} log files from {log_dir}")
 
     # Collect all job configurations (including those with 0 evictions)
+    # Only count jobs that have executed successfully
     all_job_configs = {}
     
     for log_file in log_files:
+        # Read the log file content to check for successful execution
+        try:
+            with open(log_file, 'r') as f:
+                content = f.read()
+        except Exception:
+            continue  # Skip files that can't be read
+        
         results = parse_log_file(log_file)
         if results:
             evictions.extend(results)
@@ -615,33 +637,34 @@ def analyze_evictions(log_dir, output_file, gpu_jobs_csv=None, host_filter=None,
                         'capability': result.get('capability', 'unknown')
                     }
         else:
-            # Even if no evictions, try to extract job configuration from filename
-            try:
-                filename_stem = Path(log_file).stem
-                filename_parts = filename_stem.split('_')
-                
-                if len(filename_parts) == 5:
-                    # Full format: requested_gpus_sleep_time_capability_cluster_id_proc_id
-                    requested_gpus, sleep_time, capability, cluster_id, proc_id = filename_parts
-                    job_id = f"{cluster_id}.{proc_id}"
-                elif len(filename_parts) == 2:
-                    # Current format: cluster_id_proc_id - no additional config info
-                    cluster_id, proc_id = filename_parts
-                    job_id = f"{cluster_id}.{proc_id}"
-                    requested_gpus = sleep_time = capability = 'unknown'
-                else:
-                    continue
-                
-                if job_id not in all_job_configs:
-                    all_job_configs[job_id] = {
-                        'requested_gpus': requested_gpus,
-                        'sleep_time': sleep_time,
-                        'capability': capability
-                    }
-            except (ValueError, IndexError):
-                continue  # Skip files with unparseable filenames
+            # Even if no evictions, check if job executed successfully and extract config
+            if check_successful_execution(content):
+                try:
+                    filename_stem = Path(log_file).stem
+                    filename_parts = filename_stem.split('_')
+                    
+                    if len(filename_parts) == 5:
+                        # Full format: requested_gpus_sleep_time_capability_cluster_id_proc_id
+                        requested_gpus, sleep_time, capability, cluster_id, proc_id = filename_parts
+                        job_id = f"{cluster_id}.{proc_id}"
+                    elif len(filename_parts) == 2:
+                        # Current format: cluster_id_proc_id - no additional config info
+                        cluster_id, proc_id = filename_parts
+                        job_id = f"{cluster_id}.{proc_id}"
+                        requested_gpus = sleep_time = capability = 'unknown'
+                    else:
+                        continue
+                    
+                    if job_id not in all_job_configs:
+                        all_job_configs[job_id] = {
+                            'requested_gpus': requested_gpus,
+                            'sleep_time': sleep_time,
+                            'capability': capability
+                        }
+                except (ValueError, IndexError):
+                    continue  # Skip files with unparseable filenames
 
-    print(f"Found {len(evictions)} evicted jobs from {len(all_job_configs)} total jobs")
+    print(f"Found {len(evictions)} evicted jobs from {len(all_job_configs)} total successfully executed jobs")
 
     # Apply host filter if specified
     if host_filter:
