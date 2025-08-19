@@ -73,6 +73,7 @@ def get_time_filtered_data(
                     end_time = pd.to_datetime(df_temp['max_time'].iloc[0])
                 else:
                     end_time = datetime.datetime.now()
+            except Exception:
                 # Final fallback to current time if there's any issue with the database
                 end_time = datetime.datetime.now()
 
@@ -693,7 +694,7 @@ def calculate_allocation_usage_by_memory(df: pd.DataFrame, host: str = "", inclu
                 
                 if not class_df.empty:
                     # Count allocated GPUs for this class and memory category
-                    allocated_count = len(class_df[class_df['status'] == 'Claimed'])
+                    allocated_count = len(class_df[class_df['State'] == 'Claimed'])
                     total_count = len(class_df)
                     
                     bucket_claimed += allocated_count
@@ -842,6 +843,7 @@ def run_analysis(
     if analysis_type == "allocation":
         if group_by_device:
             result["device_stats"] = calculate_allocation_usage_by_device_enhanced(df, host, all_devices)
+            result["memory_stats"] = calculate_allocation_usage_by_memory(df, host, all_devices)
             result["raw_data"] = df  # Pass raw data for unique cluster totals calculation
             result["host_filter"] = host  # Pass host filter for consistency
         else:
@@ -1107,40 +1109,6 @@ def print_gpu_model_analysis(analysis: dict):
             usage_pct = (stats['claimed'] / stats['total'] * 100) if stats['total'] > 0 else 0
             print(f"  {class_name}: {stats['claimed']}/{stats['total']} ({usage_pct:.1f}%)")
 
-    # Real Slots by Memory Category
-    memory_stats = calculate_allocation_usage_by_memory(df, host, include_all_devices)
-    if memory_stats:
-        memory_total_claimed = sum(stats['avg_claimed'] for stats in memory_stats.values())
-        memory_total_available = sum(stats['avg_total_available'] for stats in memory_stats.values())
-        memory_total_percent = (memory_total_claimed / memory_total_available * 100) if memory_total_available > 0 else 0
-        
-        print(f"\nREAL SLOTS BY MEMORY CATEGORY:")
-        print(f"{'-'*50}")
-        print(f"  TOTAL: {memory_total_claimed:.1f}/{memory_total_available:.1f} ({memory_total_percent:.1f}%)")
-        print(f"{'-'*50}")
-        
-        # Sort memory categories by numerical value
-        def sort_memory_categories(categories):
-            def get_sort_key(cat):
-                if cat == "Unknown":
-                    return 999  # Put Unknown at the end
-                elif cat.endswith("GB+"):
-                    return float(cat[:-3])  # Remove "GB+" suffix
-                elif cat.endswith("GB"):
-                    if "-" in cat:
-                        # Handle ranges like "10-12GB"
-                        return float(cat.split("-")[0])
-                    else:
-                        return float(cat[:-2])  # Remove "GB" suffix
-                else:
-                    return 0  # Fallback
-            return sorted(categories, key=get_sort_key)
-        
-        # Individual memory categories (sorted by memory size)
-        sorted_memory_cats = sort_memory_categories(memory_stats.keys())
-        for memory_cat in sorted_memory_cats:
-            stats = memory_stats[memory_cat]
-            print(f"  {memory_cat}: {stats['avg_claimed']:.1f}/{stats['avg_total_available']:.1f} ({stats['allocation_usage_percent']:.1f}%)")
 
     print("\nBACKFILL SLOTS:")
     print(f"{'-'*40}")
@@ -1491,54 +1459,61 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
         html_parts.append("</table>")
 
         # Real Slots by Memory Category Table
-        memory_stats = calculate_allocation_usage_by_memory(df, host, include_all_devices)
-        if memory_stats:
-            html_parts.append("<h2>Real Slots by Memory Category</h2>")
-            html_parts.append("<table border='1' style='margin-top: 20px;'>")
-            html_parts.append("<tr style='background-color: #e0e0e0;'><th>Memory Category</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>")
-            
-            # Calculate totals for memory categories
-            memory_total_claimed = sum(stats['avg_claimed'] for stats in memory_stats.values())
-            memory_total_available = sum(stats['avg_total_available'] for stats in memory_stats.values())
-            memory_total_percent = (memory_total_claimed / memory_total_available * 100) if memory_total_available > 0 else 0
-            
-            # Total row for memory categories
-            html_parts.append("<tr style='background-color: #d0d0d0; font-weight: bold;'>")
-            html_parts.append(f"<td style='font-weight: bold;'>TOTAL</td>")
-            html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{memory_total_percent:.1f}%</td>")
-            html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{memory_total_claimed:.1f}</td>")
-            html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{memory_total_available:.1f}</td>")
-            html_parts.append("</tr>")
-            
-            # Sort memory categories by numerical value
-            def sort_memory_categories(categories):
-                def get_sort_key(cat):
-                    if cat == "Unknown":
-                        return 999  # Put Unknown at the end
-                    elif cat.endswith("GB+"):
-                        return float(cat[:-3])  # Remove "GB+" suffix
-                    elif cat.endswith("GB"):
-                        if "-" in cat:
-                            # Handle ranges like "10-12GB"
-                            return float(cat.split("-")[0])
-                        else:
-                            return float(cat[:-2])  # Remove "GB" suffix
-                    else:
-                        return 0  # Fallback
-                return sorted(categories, key=get_sort_key)
-            
-            # Individual memory categories (sorted by memory size)
-            sorted_memory_cats = sort_memory_categories(memory_stats.keys())
-            for memory_cat in sorted_memory_cats:
-                stats = memory_stats[memory_cat]
-                html_parts.append("<tr>")
-                html_parts.append(f"<td style='font-weight: bold;'>{memory_cat}</td>")
-                html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{stats['allocation_usage_percent']:.1f}%</td>")
-                html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{stats['avg_claimed']:.1f}</td>")
-                html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{stats['avg_total_available']:.1f}</td>")
+        if "memory_stats" in results:
+            memory_stats = results["memory_stats"]
+            if memory_stats:
+                html_parts.append("<h2>Real Slots by Memory Category</h2>")
+                html_parts.append("<table border='1' style='margin-top: 20px;'>")
+                html_parts.append("<tr style='background-color: #e0e0e0;'><th>Memory Category</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>")
+                
+                # Calculate totals for memory categories
+                memory_total_claimed = sum(stats['avg_claimed'] for stats in memory_stats.values())
+                memory_total_available = sum(stats['avg_total_available'] for stats in memory_stats.values())
+                memory_total_percent = (memory_total_claimed / memory_total_available * 100) if memory_total_available > 0 else 0
+                
+                # Total row for memory categories
+                html_parts.append("<tr style='background-color: #d0d0d0; font-weight: bold;'>")
+                html_parts.append(f"<td style='font-weight: bold;'>TOTAL</td>")
+                html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{memory_total_percent:.1f}%</td>")
+                html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{memory_total_claimed:.1f}</td>")
+                html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{memory_total_available:.1f}</td>")
                 html_parts.append("</tr>")
-            
-            html_parts.append("</table>")
+                
+                # Sort memory categories by numerical value
+                def sort_memory_categories(categories):
+                    def get_sort_key(cat):
+                        if cat == "Unknown":
+                            return 999  # Put Unknown at the end
+                        elif cat.startswith("<"):
+                            # Handle <48GB - extract the number after <
+                            return float(cat[1:-2])  # Remove "<" and "GB"
+                        elif cat.startswith(">"):
+                            # Handle >80GB - extract the number after >
+                            return float(cat[1:-2]) + 0.1  # Add 0.1 to sort after exact values
+                        elif cat.endswith("GB+"):
+                            return float(cat[:-3])  # Remove "GB+" suffix
+                        elif cat.endswith("GB"):
+                            if "-" in cat:
+                                # Handle ranges like "10-12GB"
+                                return float(cat.split("-")[0])
+                            else:
+                                return float(cat[:-2])  # Remove "GB" suffix
+                        else:
+                            return 0  # Fallback
+                    return sorted(categories, key=get_sort_key)
+                
+                # Individual memory categories (sorted by memory size)
+                sorted_memory_cats = sort_memory_categories(memory_stats.keys())
+                for memory_cat in sorted_memory_cats:
+                    stats = memory_stats[memory_cat]
+                    html_parts.append("<tr>")
+                    html_parts.append(f"<td style='font-weight: bold;'>{memory_cat}</td>")
+                    html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{stats['allocation_usage_percent']:.1f}%</td>")
+                    html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{stats['avg_claimed']:.1f}</td>")
+                    html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{stats['avg_total_available']:.1f}</td>")
+                    html_parts.append("</tr>")
+                
+                html_parts.append("</table>")
 
         # Backfill Slots Table
         html_parts.append("<h2>Backfill Slots</h2>")
@@ -1742,54 +1717,55 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
             html_parts.append("</table>")
 
             # Real Slots by Memory Category Table
-            memory_stats = calculate_allocation_usage_by_memory(df, host, include_all_devices)
-            if memory_stats:
-                html_parts.append("<h2>Real Slots by Memory Category</h2>")
-                html_parts.append("<table border='1'>")
-                html_parts.append("<tr><th>Memory Category</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>")
-                
-                # Calculate totals for memory categories
-                memory_total_claimed = sum(stats['avg_claimed'] for stats in memory_stats.values())
-                memory_total_available = sum(stats['avg_total_available'] for stats in memory_stats.values())
-                memory_total_percent = (memory_total_claimed / memory_total_available * 100) if memory_total_available > 0 else 0
-                
-                # Total row for memory categories
-                html_parts.append("<tr style='font-weight: bold; background-color: #f0f0f0;'>")
-                html_parts.append("<td>TOTAL</td>")
-                html_parts.append(f"<td style='text-align: right'>{memory_total_percent:.1f}%</td>")
-                html_parts.append(f"<td style='text-align: right'>{memory_total_claimed:.1f}</td>")
-                html_parts.append(f"<td style='text-align: right'>{memory_total_available:.1f}</td>")
-                html_parts.append("</tr>")
-                
-                # Sort memory categories by numerical value
-                def sort_memory_categories(categories):
-                    def get_sort_key(cat):
-                        if cat == "Unknown":
-                            return 999  # Put Unknown at the end
-                        elif cat.endswith("GB+"):
-                            return float(cat[:-3])  # Remove "GB+" suffix
-                        elif cat.endswith("GB"):
-                            if "-" in cat:
-                                # Handle ranges like "10-12GB"
-                                return float(cat.split("-")[0])
-                            else:
-                                return float(cat[:-2])  # Remove "GB" suffix
-                        else:
-                            return 0  # Fallback
-                    return sorted(categories, key=get_sort_key)
-                
-                # Individual memory categories (sorted by memory size)
-                sorted_memory_cats = sort_memory_categories(memory_stats.keys())
-                for memory_cat in sorted_memory_cats:
-                    stats = memory_stats[memory_cat]
-                    html_parts.append("<tr>")
-                    html_parts.append(f"<td>{memory_cat}</td>")
-                    html_parts.append(f"<td style='text-align: right'>{stats['allocation_usage_percent']:.1f}%</td>")
-                    html_parts.append(f"<td style='text-align: right'>{stats['avg_claimed']:.1f}</td>")
-                    html_parts.append(f"<td style='text-align: right'>{stats['avg_total_available']:.1f}</td>")
+            if "memory_stats" in results:
+                memory_stats = results["memory_stats"]
+                if memory_stats:
+                    html_parts.append("<h2>Real Slots by Memory Category</h2>")
+                    html_parts.append("<table border='1'>")
+                    html_parts.append("<tr><th>Memory Category</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>")
+                    
+                    # Calculate totals for memory categories
+                    memory_total_claimed = sum(stats['avg_claimed'] for stats in memory_stats.values())
+                    memory_total_available = sum(stats['avg_total_available'] for stats in memory_stats.values())
+                    memory_total_percent = (memory_total_claimed / memory_total_available * 100) if memory_total_available > 0 else 0
+                    
+                    # Total row for memory categories
+                    html_parts.append("<tr style='font-weight: bold; background-color: #f0f0f0;'>")
+                    html_parts.append("<td>TOTAL</td>")
+                    html_parts.append(f"<td style='text-align: right'>{memory_total_percent:.1f}%</td>")
+                    html_parts.append(f"<td style='text-align: right'>{memory_total_claimed:.1f}</td>")
+                    html_parts.append(f"<td style='text-align: right'>{memory_total_available:.1f}</td>")
                     html_parts.append("</tr>")
-                
-                html_parts.append("</table>")
+                    
+                    # Sort memory categories by numerical value
+                    def sort_memory_categories(categories):
+                        def get_sort_key(cat):
+                            if cat == "Unknown":
+                                return 999  # Put Unknown at the end
+                            elif cat.endswith("GB+"):
+                                return float(cat[:-3])  # Remove "GB+" suffix
+                            elif cat.endswith("GB"):
+                                if "-" in cat:
+                                    # Handle ranges like "10-12GB"
+                                    return float(cat.split("-")[0])
+                                else:
+                                    return float(cat[:-2])  # Remove "GB" suffix
+                            else:
+                                return 0  # Fallback
+                        return sorted(categories, key=get_sort_key)
+                    
+                    # Individual memory categories (sorted by memory size)
+                    sorted_memory_cats = sort_memory_categories(memory_stats.keys())
+                    for memory_cat in sorted_memory_cats:
+                        stats = memory_stats[memory_cat]
+                        html_parts.append("<tr>")
+                        html_parts.append(f"<td>{memory_cat}</td>")
+                        html_parts.append(f"<td style='text-align: right'>{stats['allocation_usage_percent']:.1f}%</td>")
+                        html_parts.append(f"<td style='text-align: right'>{stats['avg_claimed']:.1f}</td>")
+                        html_parts.append(f"<td style='text-align: right'>{stats['avg_total_available']:.1f}</td>")
+                        html_parts.append("</tr>")
+                    
+                    html_parts.append("</table>")
 
             # Backfill Slots Table
             html_parts.append("<h2>Backfill Slots</h2>")
@@ -1948,40 +1924,47 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
                       f"({totals['claimed']:.1f}/{totals['total']:.1f} GPUs)")
 
         # Real Slots by Memory Category
-        memory_stats = calculate_allocation_usage_by_memory(df, host, include_all_devices)
-        if memory_stats:
-            memory_total_claimed = sum(stats['avg_claimed'] for stats in memory_stats.values())
-            memory_total_available = sum(stats['avg_total_available'] for stats in memory_stats.values())
-            memory_total_percent = (memory_total_claimed / memory_total_available * 100) if memory_total_available > 0 else 0
-            
-            print(f"\nREAL SLOTS BY MEMORY CATEGORY:")
-            print(f"{'-'*80}")
-            print(f"  TOTAL: {memory_total_percent:.1f}% ({memory_total_claimed:.1f}/{memory_total_available:.1f} GPUs)")
-            print(f"{'-'*80}")
-            
-            # Sort memory categories by numerical value
-            def sort_memory_categories(categories):
-                def get_sort_key(cat):
-                    if cat == "Unknown":
-                        return 999  # Put Unknown at the end
-                    elif cat.endswith("GB+"):
-                        return float(cat[:-3])  # Remove "GB+" suffix
-                    elif cat.endswith("GB"):
-                        if "-" in cat:
-                            # Handle ranges like "10-12GB"
-                            return float(cat.split("-")[0])
+        if "memory_stats" in results:
+            memory_stats = results["memory_stats"]
+            if memory_stats:
+                memory_total_claimed = sum(stats['avg_claimed'] for stats in memory_stats.values())
+                memory_total_available = sum(stats['avg_total_available'] for stats in memory_stats.values())
+                memory_total_percent = (memory_total_claimed / memory_total_available * 100) if memory_total_available > 0 else 0
+                
+                print(f"\nREAL SLOTS BY MEMORY CATEGORY:")
+                print(f"{'-'*80}")
+                print(f"  TOTAL: {memory_total_percent:.1f}% ({memory_total_claimed:.1f}/{memory_total_available:.1f} GPUs)")
+                print(f"{'-'*80}")
+                
+                # Sort memory categories by numerical value
+                def sort_memory_categories(categories):
+                    def get_sort_key(cat):
+                        if cat == "Unknown":
+                            return 999  # Put Unknown at the end
+                        elif cat.startswith("<"):
+                            # Handle <48GB - extract the number after <
+                            return float(cat[1:-2])  # Remove "<" and "GB"
+                        elif cat.startswith(">"):
+                            # Handle >80GB - extract the number after >
+                            return float(cat[1:-2]) + 0.1  # Add 0.1 to sort after exact values
+                        elif cat.endswith("GB+"):
+                            return float(cat[:-3])  # Remove "GB+" suffix
+                        elif cat.endswith("GB"):
+                            if "-" in cat:
+                                # Handle ranges like "10-12GB"
+                                return float(cat.split("-")[0])
+                            else:
+                                return float(cat[:-2])  # Remove "GB" suffix
                         else:
-                            return float(cat[:-2])  # Remove "GB" suffix
-                    else:
-                        return 0  # Fallback
-                return sorted(categories, key=get_sort_key)
-            
-            # Individual memory categories (sorted by memory size)
-            sorted_memory_cats = sort_memory_categories(memory_stats.keys())
-            for memory_cat in sorted_memory_cats:
-                stats = memory_stats[memory_cat]
-                print(f"  {memory_cat}: {stats['allocation_usage_percent']:.1f}% "
-                      f"({stats['avg_claimed']:.1f}/{stats['avg_total_available']:.1f} GPUs)")
+                            return 0  # Fallback
+                    return sorted(categories, key=get_sort_key)
+                
+                # Individual memory categories (sorted by memory size)
+                sorted_memory_cats = sort_memory_categories(memory_stats.keys())
+                for memory_cat in sorted_memory_cats:
+                    stats = memory_stats[memory_cat]
+                    print(f"  {memory_cat}: {stats['allocation_usage_percent']:.1f}% "
+                          f"({stats['avg_claimed']:.1f}/{stats['avg_total_available']:.1f} GPUs)")
 
         print(f"\nBACKFILL SLOTS:")
         print(f"{'-'*70}")
