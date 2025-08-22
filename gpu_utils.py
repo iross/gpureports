@@ -140,7 +140,8 @@ def filter_df(df: pd.DataFrame, utilization: str = "", state: str = "", host: st
             # Sort by AssignedGPUs and rank (keeping highest rank first)
             df = df.sort_values(['AssignedGPUs', '_rank'], ascending=[True, False])
             # Drop duplicates, keeping the first occurrence (which will be highest rank)
-            df = df.drop_duplicates(subset=['AssignedGPUs'], keep='first')
+            # Only deduplicate within each timestamp, not across different timestamps
+            df = df.drop_duplicates(subset=['timestamp', 'AssignedGPUs'], keep='first')
             # Remove the temporary rank column
             df = df.drop(columns=['_rank'])
         if state == "Claimed":  # Only care about claimed shared GPUs
@@ -175,7 +176,8 @@ def filter_df(df: pd.DataFrame, utilization: str = "", state: str = "", host: st
             # Sort by AssignedGPUs and rank (keeping highest rank first)
             df = df.sort_values(['AssignedGPUs', '_rank'], ascending=[True, False])
             # Drop duplicates, keeping the first occurrence (which will be highest rank)
-            df = df.drop_duplicates(subset=['AssignedGPUs'], keep='first')
+            # Only deduplicate within each timestamp, not across different timestamps
+            df = df.drop_duplicates(subset=['timestamp', 'AssignedGPUs'], keep='first')
             # Remove the temporary rank column
             df = df.drop(columns=['_rank'])
         if state == "Claimed":  # Only care about claimed and prioritized
@@ -357,7 +359,8 @@ def filter_df_enhanced(df: pd.DataFrame, utilization: str = "", state: str = "",
             # Sort by AssignedGPUs and rank (keeping highest rank first)
             df = df.sort_values(['AssignedGPUs', '_rank'], ascending=[True, False])
             # Drop duplicates, keeping the first occurrence (which will be highest rank)
-            df = df.drop_duplicates(subset=['AssignedGPUs'], keep='first')
+            # Only deduplicate within each timestamp, not across different timestamps
+            df = df.drop_duplicates(subset=['timestamp', 'AssignedGPUs'], keep='first')
             # Remove the temporary rank column
             df = df.drop(columns=['_rank'])
         if state == "Claimed":  # Only care about claimed and prioritized
@@ -397,7 +400,8 @@ def filter_df_enhanced(df: pd.DataFrame, utilization: str = "", state: str = "",
             # Sort by AssignedGPUs and rank (keeping highest rank first)
             df = df.sort_values(['AssignedGPUs', '_rank'], ascending=[True, False])
             # Drop duplicates, keeping the first occurrence (which will be highest rank)
-            df = df.drop_duplicates(subset=['AssignedGPUs'], keep='first')
+            # Only deduplicate within each timestamp, not across different timestamps
+            df = df.drop_duplicates(subset=['timestamp', 'AssignedGPUs'], keep='first')
             # Remove the temporary rank column
             df = df.drop(columns=['_rank'])
         if state == "Claimed":  # Only care about claimed and prioritized
@@ -463,7 +467,8 @@ def filter_df_enhanced(df: pd.DataFrame, utilization: str = "", state: str = "",
             # Sort by AssignedGPUs and rank (keeping highest rank first)
             df = df.sort_values(['AssignedGPUs', '_rank'], ascending=[True, False])
             # Drop duplicates, keeping the first occurrence (which will be highest rank)
-            df = df.drop_duplicates(subset=['AssignedGPUs'], keep='first')
+            # Only deduplicate within each timestamp, not across different timestamps
+            df = df.drop_duplicates(subset=['timestamp', 'AssignedGPUs'], keep='first')
             # Remove the temporary rank column
             df = df.drop(columns=['_rank'])
         if state == "Claimed":  # Only care about claimed shared GPUs
@@ -498,7 +503,8 @@ def filter_df_enhanced(df: pd.DataFrame, utilization: str = "", state: str = "",
             # Sort by AssignedGPUs and rank (keeping highest rank first)
             df = df.sort_values(['AssignedGPUs', '_rank'], ascending=[True, False])
             # Drop duplicates, keeping the first occurrence (which will be highest rank)
-            df = df.drop_duplicates(subset=['AssignedGPUs'], keep='first')
+            # Only deduplicate within each timestamp, not across different timestamps
+            df = df.drop_duplicates(subset=['timestamp', 'AssignedGPUs'], keep='first')
             # Remove the temporary rank column
             df = df.drop(columns=['_rank'])
         if state == "Claimed":  # Only care about claimed and prioritized
