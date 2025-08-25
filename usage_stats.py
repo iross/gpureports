@@ -447,16 +447,17 @@ def calculate_allocation_usage_by_device_enhanced(df: pd.DataFrame, host: str = 
                 # Calculate average usage percentage across all intervals
                 avg_usage_percentage = sum(interval_usage_percentages) / len(interval_usage_percentages)
 
-                # Calculate average GPU counts across intervals
-                num_intervals_with_data = len(interval_usage_percentages)
-                avg_claimed = total_claimed_gpus / num_intervals_with_data if num_intervals_with_data > 0 else 0
-                avg_total = total_available_gpus / num_intervals_with_data if num_intervals_with_data > 0 else 0
+                # Calculate average GPU counts across ALL intervals (including those with 0 usage)
+                # This matches the user breakdown method and gives consistent results
+                total_intervals = len(df['15min_bucket'].unique())
+                avg_claimed = total_claimed_gpus / total_intervals if total_intervals > 0 else 0
+                avg_total = total_available_gpus / total_intervals if total_intervals > 0 else 0
 
                 stats[utilization_type][device_type] = {
                     'avg_claimed': avg_claimed,
                     'avg_total_available': avg_total,
                     'allocation_usage_percent': avg_usage_percentage,
-                    'num_intervals': num_intervals_with_data
+                    'num_intervals': total_intervals
                 }
 
     return stats
@@ -626,16 +627,17 @@ def calculate_allocation_usage_by_device(df: pd.DataFrame, host: str = "", inclu
                 # Calculate average usage percentage across all intervals
                 avg_usage_percentage = sum(interval_usage_percentages) / len(interval_usage_percentages)
 
-                # Calculate average GPU counts across intervals
-                num_intervals_with_data = len(interval_usage_percentages)
-                avg_claimed = total_claimed_gpus / num_intervals_with_data if num_intervals_with_data > 0 else 0
-                avg_total = total_available_gpus / num_intervals_with_data if num_intervals_with_data > 0 else 0
+                # Calculate average GPU counts across ALL intervals (including those with 0 usage)
+                # This matches the user breakdown method and gives consistent results
+                total_intervals = len(df['15min_bucket'].unique())
+                avg_claimed = total_claimed_gpus / total_intervals if total_intervals > 0 else 0
+                avg_total = total_available_gpus / total_intervals if total_intervals > 0 else 0
 
                 stats[utilization_type][device_type] = {
                     'avg_claimed': avg_claimed,
                     'avg_total_available': avg_total,
                     'allocation_usage_percent': avg_usage_percentage,
-                    'num_intervals': num_intervals_with_data
+                    'num_intervals': total_intervals
                 }
 
     return stats
@@ -721,13 +723,14 @@ def calculate_allocation_usage_by_memory(df: pd.DataFrame, host: str = "", inclu
     return stats
 
 
-def calculate_h200_user_breakdown(df: pd.DataFrame, host: str = "") -> dict:
+def calculate_h200_user_breakdown(df: pd.DataFrame, host: str = "", hours_back: int = 1) -> dict:
     """
     Calculate H200 usage breakdown by user and slot type.
 
     Args:
         df: DataFrame with GPU state data
         host: Optional host filter
+        hours_back: Lookback period in hours
 
     Returns:
         Dictionary with H200 usage statistics by user and slot type
@@ -746,9 +749,9 @@ def calculate_h200_user_breakdown(df: pd.DataFrame, host: str = "") -> dict:
     if host:
         h200_df = h200_df[h200_df['Machine'].str.contains(host, case=False, na=False)]
 
-    # Use a fixed 1-hour duration to match the device allocation method
+    # Use the actual lookback period to match the device allocation method
     # (Device allocation uses averages across buckets multiplied by lookback period)
-    actual_duration_hours = 1.0
+    actual_duration_hours = hours_back
 
     user_stats = {}
     slot_types = ["Priority-ResearcherOwned", "Priority-CHTCOwned", "Shared", "Backfill-ResearcherOwned", "Backfill-CHTCOwned", "Backfill-OpenCapacity"]
@@ -953,7 +956,7 @@ def run_analysis(
         if group_by_device:
             result["device_stats"] = calculate_allocation_usage_by_device_enhanced(df, host, all_devices)
             result["memory_stats"] = calculate_allocation_usage_by_memory(df, host, all_devices)
-            result["h200_user_stats"] = calculate_h200_user_breakdown(df, host)
+            result["h200_user_stats"] = calculate_h200_user_breakdown(df, host, hours_back)
             result["raw_data"] = df  # Pass raw data for unique cluster totals calculation
             result["host_filter"] = host  # Pass host filter for consistency
         else:
