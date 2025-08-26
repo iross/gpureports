@@ -85,16 +85,26 @@ def get_time_filtered_data(
     end_month = (end_time.year, end_time.month)
 
     if start_month == end_month:
-        # Single month - use traditional approach for backward compatibility and performance
+        # Single month - optimized approach with SQL-level filtering
         try:
             conn = sqlite3.connect(db_path)
-            df = pd.read_sql_query("SELECT * FROM gpu_state", conn)
+            # OPTIMIZATION: Filter at SQL level instead of loading entire database
+            optimized_query = """
+            SELECT * FROM gpu_state
+            WHERE timestamp >= ? AND timestamp <= ?
+            ORDER BY timestamp
+            """
+            df = pd.read_sql_query(
+                optimized_query,
+                conn,
+                params=[start_time.strftime('%Y-%m-%d %H:%M:%S.%f'),
+                       end_time.strftime('%Y-%m-%d %H:%M:%S.%f')]
+            )
             conn.close()
-            df['timestamp'] = pd.to_datetime(df['timestamp'])
 
-            # Filter by time range
-            filtered_df = df[(df['timestamp'] >= start_time) & (df['timestamp'] <= end_time)]
-            return filtered_df
+            if len(df) > 0:
+                df['timestamp'] = pd.to_datetime(df['timestamp'])
+            return df
         except Exception as e:
             # If single-db approach fails, fall back to multi-db approach
             print(f"Warning: Single database query failed, trying multi-database approach: {e}")
@@ -967,50 +977,50 @@ def run_analysis(
 
     elif analysis_type == "monthly":
         result["monthly_stats"] = calculate_monthly_summary(db_path, end_time)
-        
+
     return result
 
 
 def calculate_monthly_summary(db_path: str, end_time: Optional[datetime.datetime] = None) -> dict:
     """
     Calculate complete monthly GPU usage summary for the previous month.
-    
+
     Args:
         db_path: Path to SQLite database (used to determine base directory)
         end_time: Optional end time (defaults to latest data)
-        
+
     Returns:
         Dictionary containing monthly usage statistics
     """
     from pathlib import Path
     import calendar
-    
+
     # Get base directory from the provided db_path
     db_path_obj = Path(db_path)
     base_dir = str(db_path_obj.parent) if db_path_obj.parent != Path('.') else "."
-    
+
     # If end_time is not provided, use the latest timestamp from the most recent database
     if end_time is None:
         end_time = get_latest_timestamp_from_most_recent_db(base_dir)
         if end_time is None:
             end_time = datetime.datetime.now()
-    
+
     # Calculate previous month range
     current_month = end_time.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     prev_month_end = current_month - datetime.timedelta(seconds=1)
     prev_month_start = prev_month_end.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    
+
     # Calculate total hours in the previous month
     days_in_month = calendar.monthrange(prev_month_start.year, prev_month_start.month)[1]
     total_hours = days_in_month * 24
-    
+
     print(f"Calculating monthly summary for {prev_month_start.strftime('%B %Y')}")
     print(f"Period: {prev_month_start} to {prev_month_end}")
     print(f"Total hours in month: {total_hours}")
-    
+
     # Get data for the entire previous month
     df = get_time_filtered_data(db_path, total_hours, prev_month_end + datetime.timedelta(seconds=1))
-    
+
     if df.empty:
         return {
             "error": f"No data found for {prev_month_start.strftime('%B %Y')}",
@@ -1019,12 +1029,12 @@ def calculate_monthly_summary(db_path: str, end_time: Optional[datetime.datetime
             "end_date": prev_month_end,
             "total_hours": total_hours
         }
-    
+
     # Calculate statistics for the month
     device_stats = calculate_allocation_usage_by_device_enhanced(df, "", False)  # All devices, no host filter
     memory_stats = calculate_allocation_usage_by_memory(df, "", False)  # All devices, no host filter
     h200_stats = calculate_h200_user_breakdown(df, "", total_hours)
-    
+
     return {
         "month": prev_month_start.strftime('%B %Y'),
         "start_date": prev_month_start,
@@ -1358,7 +1368,9 @@ def send_email_report(
     use_auth: bool = False,
     timeout: int = 30,
     debug: bool = False,
-    device_stats: Optional[Dict] = None
+    device_stats: Optional[Dict] = None,
+    analysis_type = None,
+    month = None
 ) -> bool:
     """
     Send HTML report via email using SMTP, matching mailx behavior.
@@ -1404,7 +1416,10 @@ def send_email_report(
                 period_str = f"{days}d"
             else:  # Hours for <= 24h or non-exact days
                 period_str = f"{lookback_hours}h"
-            subject += f" {period_str}"
+            if analysis_type == "monthly":
+                subject += f" {month}"
+            else:
+                subject += f" {period_str}"
 
         # Add usage percentages in order: Prioritized (Researcher), Prioritized (CHTC), Open Capacity, Backfill
         if usage_percentages:
@@ -1424,7 +1439,7 @@ def send_email_report(
                     backfill_types = ["Backfill-ResearcherOwned", "Backfill-CHTCOwned", "Backfill-OpenCapacity"]
                     total_claimed = 0
                     total_available = 0
-                    
+
                     if device_stats:
                         for backfill_type in backfill_types:
                             if backfill_type in device_stats:
@@ -1432,7 +1447,7 @@ def send_email_report(
                                 if device_data:
                                     total_claimed += sum(stats['avg_claimed'] for stats in device_data.values())
                                     total_available += sum(stats['avg_total_available'] for stats in device_data.values())
-                        
+
                         if total_available > 0:
                             combined_percentage = (total_claimed / total_available) * 100
                             usage_parts.append(f"{combined_percentage:.1f}%")
@@ -1591,7 +1606,7 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
         monthly_stats = results["monthly_stats"]
         if "error" in monthly_stats:
             return f"<html><body><h1>Monthly Summary Error</h1><p>{monthly_stats['error']}</p></body></html>"
-        
+
         # Convert monthly stats to regular results format so we can reuse existing HTML generation
         regular_results = {
             "metadata": {
@@ -1604,22 +1619,22 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
                 "filtered_hosts_info": {}
             }
         }
-        
+
         # Copy the stats from monthly to regular format
         if "device_stats" in monthly_stats:
             regular_results["device_stats"] = monthly_stats["device_stats"]
         if "memory_stats" in monthly_stats:
-            regular_results["memory_stats"] = monthly_stats["memory_stats"] 
+            regular_results["memory_stats"] = monthly_stats["memory_stats"]
         if "h200_user_stats" in monthly_stats:
             regular_results["h200_user_stats"] = monthly_stats["h200_user_stats"]
         if "raw_data" in monthly_stats:
             regular_results["raw_data"] = monthly_stats["raw_data"]
         if "host_filter" in monthly_stats:
             regular_results["host_filter"] = monthly_stats["host_filter"]
-            
+
         # Use existing HTML generation but with monthly title
         html_content = generate_html_report(regular_results, output_file)
-        
+
         # Update the title to indicate it's a monthly report
         start_date_str = monthly_stats['start_date'].strftime('%B %Y') if hasattr(monthly_stats['start_date'], 'strftime') else str(monthly_stats['month'])
         html_content = html_content.replace(
@@ -1629,7 +1644,7 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
             "<h1>CHTC GPU ALLOCATION REPORT</h1>",
             f"<h1>CHTC MONTHLY GPU REPORT - {start_date_str.upper()}</h1>"
         )
-        
+
         return html_content
 
     metadata = results["metadata"]
@@ -2217,7 +2232,7 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
         if "error" in monthly_stats:
             print(monthly_stats["error"])
             return
-        
+
         # Convert monthly stats to regular results format so we can reuse existing text output
         regular_results = {
             "metadata": {
@@ -2230,28 +2245,28 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
                 "filtered_hosts_info": {}
             }
         }
-        
+
         # Copy the stats from monthly to regular format
         if "device_stats" in monthly_stats:
             regular_results["device_stats"] = monthly_stats["device_stats"]
         if "memory_stats" in monthly_stats:
-            regular_results["memory_stats"] = monthly_stats["memory_stats"] 
+            regular_results["memory_stats"] = monthly_stats["memory_stats"]
         if "h200_user_stats" in monthly_stats:
             regular_results["h200_user_stats"] = monthly_stats["h200_user_stats"]
         if "raw_data" in monthly_stats:
             regular_results["raw_data"] = monthly_stats["raw_data"]
         if "host_filter" in monthly_stats:
             regular_results["host_filter"] = monthly_stats["host_filter"]
-            
+
         # Override results with converted monthly data and continue with normal text processing
         results = regular_results
-        
+
         # Mark as monthly for different header formatting
         results["metadata"]["is_monthly"] = True
         results["metadata"]["monthly_period"] = monthly_stats['start_date'].strftime('%B %Y') if hasattr(monthly_stats['start_date'], 'strftime') else str(monthly_stats['month'])
 
     metadata = results["metadata"]
-    
+
     # Print appropriate header based on type
     if metadata.get("is_monthly", False):
         print(f"\n{'='*70}")
@@ -2511,7 +2526,7 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
             print("FILTERING IMPACT:")
             print(f"  Records excluded: {records_excluded:,}")
             print(f"  Records analyzed: {total_filtered:,}")
-    
+
     # Add time range information at the very end
     print(f"\n{'='*70}")
     if metadata.get("is_monthly", False):
@@ -2679,7 +2694,9 @@ def main(
             lookback_hours=hours_back,
             timeout=email_timeout,
             debug=email_debug,
-            device_stats=results.get("device_stats")
+            device_stats=results.get("device_stats"),
+            analysis_type=analysis_type,
+            month=results["metadata"]["monthly_period"] if "metadata" in results and "monthly_period" in results["metadata"] else None
         )
 
         if not success:
