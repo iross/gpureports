@@ -1283,7 +1283,8 @@ def send_email_report(
     lookback_hours: Optional[int] = None,
     use_auth: bool = False,
     timeout: int = 30,
-    debug: bool = False
+    debug: bool = False,
+    device_stats: Optional[Dict] = None
 ) -> bool:
     """
     Send HTML report via email using SMTP, matching mailx behavior.
@@ -1331,19 +1332,43 @@ def send_email_report(
                 period_str = f"{lookback_hours}h"
             subject += f" {period_str}"
 
-        # Add usage percentages in order: Open Capacity, Prioritized Service, Backfill
+        # Add usage percentages in order: Open Capacity, Prioritized (Researcher), Prioritized (CHTC), Backfill
         if usage_percentages:
-            class_order = ["Shared", "Priority", "Backfill"]  # Internal names
+            class_order = [
+                "Shared",  # Open Capacity
+                "Priority-ResearcherOwned",  # Prioritized (Researcher Owned)
+                "Priority-CHTCOwned",  # Prioritized (CHTC Owned)
+                "Backfill"  # Backfill (all types combined)
+            ]
             usage_parts = []
             for class_name in class_order:
                 if class_name in usage_percentages:
                     percentage = usage_percentages[class_name]
                     usage_parts.append(f"{percentage:.1f}%")
+                elif class_name == "Backfill":
+                    # For Backfill, combine all backfill types
+                    backfill_types = ["Backfill-ResearcherOwned", "Backfill-CHTCOwned", "Backfill-OpenCapacity"]
+                    total_claimed = 0
+                    total_available = 0
+                    
+                    if device_stats:
+                        for backfill_type in backfill_types:
+                            if backfill_type in device_stats:
+                                device_data = device_stats[backfill_type]
+                                if device_data:
+                                    total_claimed += sum(stats['avg_claimed'] for stats in device_data.values())
+                                    total_available += sum(stats['avg_total_available'] for stats in device_data.values())
+                        
+                        if total_available > 0:
+                            combined_percentage = (total_claimed / total_available) * 100
+                            usage_parts.append(f"{combined_percentage:.1f}%")
 
             if usage_parts:
                 subject += f" ({' | '.join(usage_parts)})"
 
         msg['Subject'] = subject
+        if debug:
+            print(f"DEBUG: Email subject would be: {subject}")
         msg['From'] = from_email
         msg['To'] = ', '.join(recipients)
 
@@ -2432,7 +2457,8 @@ def main(
             usage_percentages=usage_percentages,
             lookback_hours=hours_back,
             timeout=email_timeout,
-            debug=email_debug
+            debug=email_debug,
+            device_stats=results.get("device_stats")
         )
 
         if not success:
