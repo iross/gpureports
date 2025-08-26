@@ -1417,7 +1417,9 @@ def send_email_report(
             else:  # Hours for <= 24h or non-exact days
                 period_str = f"{lookback_hours}h"
             if analysis_type == "monthly":
-                subject += f" {month}"
+                # Use month if available, otherwise fall back to indicating it's monthly
+                month_str = month if month else "Monthly"
+                subject += f" {month_str}"
             else:
                 subject += f" {period_str}"
 
@@ -2696,7 +2698,7 @@ def main(
             debug=email_debug,
             device_stats=results.get("device_stats"),
             analysis_type=analysis_type,
-            month=results["metadata"]["monthly_period"] if "metadata" in results and "monthly_period" in results["metadata"] else None
+            month=results.get("monthly_stats", {}).get("month") if analysis_type == "monthly" else (results.get("metadata", {}).get("monthly_period"))
         )
 
         if not success:
