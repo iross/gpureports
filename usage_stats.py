@@ -1332,12 +1332,12 @@ def send_email_report(
                 period_str = f"{lookback_hours}h"
             subject += f" {period_str}"
 
-        # Add usage percentages in order: Open Capacity, Prioritized (Researcher), Prioritized (CHTC), Backfill
+        # Add usage percentages in order: Prioritized (Researcher), Prioritized (CHTC), Open Capacity, Backfill
         if usage_percentages:
             class_order = [
-                "Shared",  # Open Capacity
                 "Priority-ResearcherOwned",  # Prioritized (Researcher Owned)
                 "Priority-CHTCOwned",  # Prioritized (CHTC Owned)
+                "Shared",  # Open Capacity
                 "Backfill"  # Backfill (all types combined)
             ]
             usage_parts = []
