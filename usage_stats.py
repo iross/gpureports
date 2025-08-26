@@ -965,7 +965,81 @@ def run_analysis(
     elif analysis_type == "timeseries":
         result["timeseries_data"] = calculate_time_series_usage(df, bucket_minutes, host)
 
+    elif analysis_type == "monthly":
+        result["monthly_stats"] = calculate_monthly_summary(db_path, end_time)
+        
     return result
+
+
+def calculate_monthly_summary(db_path: str, end_time: Optional[datetime.datetime] = None) -> dict:
+    """
+    Calculate complete monthly GPU usage summary for the previous month.
+    
+    Args:
+        db_path: Path to SQLite database (used to determine base directory)
+        end_time: Optional end time (defaults to latest data)
+        
+    Returns:
+        Dictionary containing monthly usage statistics
+    """
+    from pathlib import Path
+    import calendar
+    
+    # Get base directory from the provided db_path
+    db_path_obj = Path(db_path)
+    base_dir = str(db_path_obj.parent) if db_path_obj.parent != Path('.') else "."
+    
+    # If end_time is not provided, use the latest timestamp from the most recent database
+    if end_time is None:
+        end_time = get_latest_timestamp_from_most_recent_db(base_dir)
+        if end_time is None:
+            end_time = datetime.datetime.now()
+    
+    # Calculate previous month range
+    current_month = end_time.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    prev_month_end = current_month - datetime.timedelta(seconds=1)
+    prev_month_start = prev_month_end.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    
+    # Calculate total hours in the previous month
+    days_in_month = calendar.monthrange(prev_month_start.year, prev_month_start.month)[1]
+    total_hours = days_in_month * 24
+    
+    print(f"Calculating monthly summary for {prev_month_start.strftime('%B %Y')}")
+    print(f"Period: {prev_month_start} to {prev_month_end}")
+    print(f"Total hours in month: {total_hours}")
+    
+    # Get data for the entire previous month
+    df = get_time_filtered_data(db_path, total_hours, prev_month_end + datetime.timedelta(seconds=1))
+    
+    if df.empty:
+        return {
+            "error": f"No data found for {prev_month_start.strftime('%B %Y')}",
+            "month": prev_month_start.strftime('%B %Y'),
+            "start_date": prev_month_start,
+            "end_date": prev_month_end,
+            "total_hours": total_hours
+        }
+    
+    # Calculate statistics for the month
+    device_stats = calculate_allocation_usage_by_device_enhanced(df, "", False)  # All devices, no host filter
+    memory_stats = calculate_allocation_usage_by_memory(df, "", False)  # All devices, no host filter
+    h200_stats = calculate_h200_user_breakdown(df, "", total_hours)
+    
+    return {
+        "month": prev_month_start.strftime('%B %Y'),
+        "start_date": prev_month_start,
+        "end_date": prev_month_end,
+        "total_hours": total_hours,
+        "device_stats": device_stats,
+        "memory_stats": memory_stats,
+        "h200_user_stats": h200_stats,
+        "data_coverage": {
+            "start_time": df['timestamp'].min(),
+            "end_time": df['timestamp'].max(),
+            "total_records": len(df),
+            "unique_intervals": len(df['15min_bucket'].unique()) if '15min_bucket' in df.columns else 0
+        }
+    }
 
 
 def get_gpu_models_at_time(
@@ -1512,6 +1586,52 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
     if "error" in results:
         return f"<html><body><h1>Error</h1><p>{results['error']}</p></body></html>"
 
+    # Handle monthly summary - convert to regular results format and use existing HTML generation
+    if "monthly_stats" in results:
+        monthly_stats = results["monthly_stats"]
+        if "error" in monthly_stats:
+            return f"<html><body><h1>Monthly Summary Error</h1><p>{monthly_stats['error']}</p></body></html>"
+        
+        # Convert monthly stats to regular results format so we can reuse existing HTML generation
+        regular_results = {
+            "metadata": {
+                "hours_back": monthly_stats["total_hours"],
+                "start_time": monthly_stats.get("start_date"),
+                "end_time": monthly_stats.get("end_date"),
+                "num_intervals": monthly_stats["data_coverage"].get("unique_intervals", 0),
+                "total_records": monthly_stats["data_coverage"].get("total_records", 0),
+                "excluded_hosts": {},
+                "filtered_hosts_info": {}
+            }
+        }
+        
+        # Copy the stats from monthly to regular format
+        if "device_stats" in monthly_stats:
+            regular_results["device_stats"] = monthly_stats["device_stats"]
+        if "memory_stats" in monthly_stats:
+            regular_results["memory_stats"] = monthly_stats["memory_stats"] 
+        if "h200_user_stats" in monthly_stats:
+            regular_results["h200_user_stats"] = monthly_stats["h200_user_stats"]
+        if "raw_data" in monthly_stats:
+            regular_results["raw_data"] = monthly_stats["raw_data"]
+        if "host_filter" in monthly_stats:
+            regular_results["host_filter"] = monthly_stats["host_filter"]
+            
+        # Use existing HTML generation but with monthly title
+        html_content = generate_html_report(regular_results, output_file)
+        
+        # Update the title to indicate it's a monthly report
+        start_date_str = monthly_stats['start_date'].strftime('%B %Y') if hasattr(monthly_stats['start_date'], 'strftime') else str(monthly_stats['month'])
+        html_content = html_content.replace(
+            "<title>CHTC GPU Allocation Report</title>",
+            f"<title>CHTC Monthly GPU Report - {start_date_str}</title>"
+        ).replace(
+            "<h1>CHTC GPU ALLOCATION REPORT</h1>",
+            f"<h1>CHTC MONTHLY GPU REPORT - {start_date_str.upper()}</h1>"
+        )
+        
+        return html_content
+
     metadata = results["metadata"]
 
     # Start building HTML
@@ -2024,6 +2144,33 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
     html_parts.append(methodology_html)
     html_parts.append("</div>")
 
+    # Add time range information at the end
+    html_parts.append("<div style='background-color: #f0f0f0; padding: 10px; margin-top: 20px; text-align: center; font-style: italic; color: #666;'>")
+    if metadata.get("is_monthly", False):
+        # For monthly reports, show the month
+        monthly_period = metadata.get("monthly_period", "Unknown Period")
+        html_parts.append(f"<strong>Data Period:</strong> {monthly_period}")
+    else:
+        # For regular reports, show start and end times
+        start_time = metadata.get("start_time")
+        end_time = metadata.get("end_time")
+        if start_time and end_time:
+            # Format timestamps nicely
+            if hasattr(start_time, 'strftime'):
+                start_str = start_time.strftime('%Y-%m-%d %H:%M:%S')
+            else:
+                start_str = str(start_time)
+            if hasattr(end_time, 'strftime'):
+                end_str = end_time.strftime('%Y-%m-%d %H:%M:%S')
+            else:
+                end_str = str(end_time)
+            html_parts.append(f"<strong>Data Period:</strong> {start_str} to {end_str}")
+        else:
+            # Fallback to hours_back if timestamps not available
+            hours_back = metadata.get("hours_back", 24)
+            html_parts.append(f"<strong>Data Period:</strong> Last {hours_back} hours")
+    html_parts.append("</div>")
+
     html_parts.append("</body>")
     html_parts.append("</html>")
 
@@ -2064,18 +2211,65 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
         print(results["error"])
         return
 
-    metadata = results["metadata"]
+    # Handle monthly summary - convert to regular results format and use existing text output
+    if "monthly_stats" in results:
+        monthly_stats = results["monthly_stats"]
+        if "error" in monthly_stats:
+            print(monthly_stats["error"])
+            return
+        
+        # Convert monthly stats to regular results format so we can reuse existing text output
+        regular_results = {
+            "metadata": {
+                "hours_back": monthly_stats["total_hours"],
+                "start_time": monthly_stats.get("start_date"),
+                "end_time": monthly_stats.get("end_date"),
+                "num_intervals": monthly_stats["data_coverage"].get("unique_intervals", 0),
+                "total_records": monthly_stats["data_coverage"].get("total_records", 0),
+                "excluded_hosts": {},
+                "filtered_hosts_info": {}
+            }
+        }
+        
+        # Copy the stats from monthly to regular format
+        if "device_stats" in monthly_stats:
+            regular_results["device_stats"] = monthly_stats["device_stats"]
+        if "memory_stats" in monthly_stats:
+            regular_results["memory_stats"] = monthly_stats["memory_stats"] 
+        if "h200_user_stats" in monthly_stats:
+            regular_results["h200_user_stats"] = monthly_stats["h200_user_stats"]
+        if "raw_data" in monthly_stats:
+            regular_results["raw_data"] = monthly_stats["raw_data"]
+        if "host_filter" in monthly_stats:
+            regular_results["host_filter"] = monthly_stats["host_filter"]
+            
+        # Override results with converted monthly data and continue with normal text processing
+        results = regular_results
+        
+        # Mark as monthly for different header formatting
+        results["metadata"]["is_monthly"] = True
+        results["metadata"]["monthly_period"] = monthly_stats['start_date'].strftime('%B %Y') if hasattr(monthly_stats['start_date'], 'strftime') else str(monthly_stats['month'])
 
-    print(f"\n{'='*70}")
-    print(f"{'CHTC GPU UTILIZATION REPORT':^70}")
-    print(f"{'='*70}")
-    # Simplified period format for console: just the lookback hours
-    hours_back = metadata.get('hours_back', 24)
-    hours_str = str(int(hours_back)) if hours_back == int(hours_back) else str(hours_back)
-    hour_word = "hour" if hours_back == 1 else "hours"
-    period_str = f"{hours_str} {hour_word}"
-    print(f"Period: {period_str}")
-    print(f"{'='*70}")
+    metadata = results["metadata"]
+    
+    # Print appropriate header based on type
+    if metadata.get("is_monthly", False):
+        print(f"\n{'='*70}")
+        print(f"{'CHTC MONTHLY GPU REPORT - ' + metadata['monthly_period'].upper():^70}")
+        print(f"{'='*70}")
+        print(f"Period: {metadata['monthly_period']}")
+        print(f"{'='*70}")
+    else:
+        print(f"\n{'='*70}")
+        print(f"{'CHTC GPU UTILIZATION REPORT':^70}")
+        print(f"{'='*70}")
+        # Simplified period format for console: just the lookback hours
+        hours_back = metadata.get('hours_back', 24)
+        hours_str = str(int(hours_back)) if hours_back == int(hours_back) else str(hours_back)
+        hour_word = "hour" if hours_back == 1 else "hours"
+        period_str = f"{hours_str} {hour_word}"
+        print(f"Period: {period_str}")
+        print(f"{'='*70}")
 
     # Calculate cluster summary first if we have device stats
     grand_totals = {}
@@ -2317,6 +2511,33 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
             print("FILTERING IMPACT:")
             print(f"  Records excluded: {records_excluded:,}")
             print(f"  Records analyzed: {total_filtered:,}")
+    
+    # Add time range information at the very end
+    print(f"\n{'='*70}")
+    if metadata.get("is_monthly", False):
+        # For monthly reports, show the month
+        monthly_period = metadata.get("monthly_period", "Unknown Period")
+        print(f"Data Period: {monthly_period}")
+    else:
+        # For regular reports, show start and end times
+        start_time = metadata.get("start_time")
+        end_time = metadata.get("end_time")
+        if start_time and end_time:
+            # Format timestamps nicely
+            if hasattr(start_time, 'strftime'):
+                start_str = start_time.strftime('%Y-%m-%d %H:%M:%S')
+            else:
+                start_str = str(start_time)
+            if hasattr(end_time, 'strftime'):
+                end_str = end_time.strftime('%Y-%m-%d %H:%M:%S')
+            else:
+                end_str = str(end_time)
+            print(f"Data Period: {start_str} to {end_str}")
+        else:
+            # Fallback to hours_back if timestamps not available
+            hours_back = metadata.get("hours_back", 24)
+            print(f"Data Period: Last {hours_back} hours")
+    print(f"{'='*70}")
 
 
 def main(
@@ -2325,7 +2546,7 @@ def main(
     db_path: str = typer.Option("gpu_state_2025-08.db", help="Path to SQLite database"),
     analysis_type: str = typer.Option(
         "allocation",
-        help="Type of analysis: allocation (% GPUs claimed), timeseries, or gpu_model_snapshot"
+        help="Type of analysis: allocation (% GPUs claimed), timeseries, gpu_model_snapshot, or monthly"
     ),
     bucket_minutes: int = typer.Option(15, help="Time bucket size in minutes for timeseries analysis"),
     end_time: Optional[str] = typer.Option(None, help="End time for analysis (YYYY-MM-DD HH:MM:SS), defaults to latest in DB"),
