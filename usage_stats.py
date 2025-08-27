@@ -18,10 +18,86 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import Optional, Dict
 import os
+import functools
 from pathlib import Path
 # Removed jinja2 and pathlib imports - no longer needed for simple HTML tables
 
 CLASS_ORDER = ["Priority-ResearcherOwned", "Priority-CHTCOwned", "Shared", "Backfill-ResearcherOwned", "Backfill-CHTCOwned", "Backfill-OpenCapacity"]
+
+# Global cache for preprocessed DataFrames and filtered datasets to avoid repeated work
+_dataframe_cache = {}
+_filtered_cache = {}
+
+def get_preprocessed_dataframe(df: pd.DataFrame, cache_key: str = None) -> pd.DataFrame:
+    """
+    Get a preprocessed DataFrame with common operations applied, using caching to avoid repeated work.
+    Optimized to avoid multiple copies and improve cache effectiveness.
+    
+    Args:
+        df: Input DataFrame
+        cache_key: Optional cache key to avoid reprocessing the same data
+        
+    Returns:
+        DataFrame with timestamp conversion and 15-minute buckets added
+    """
+    # If no cache_key provided, process without caching
+    if not cache_key:
+        processed_df = df.copy()
+        if 'timestamp' not in processed_df.columns or not pd.api.types.is_datetime64_any_dtype(processed_df['timestamp']):
+            processed_df['timestamp'] = pd.to_datetime(processed_df['timestamp'])
+        if '15min_bucket' not in processed_df.columns:
+            processed_df['15min_bucket'] = processed_df['timestamp'].dt.floor('15min')
+        return processed_df
+    
+    # Check cache first
+    if cache_key in _dataframe_cache:
+        return _dataframe_cache[cache_key]
+    
+    # Process and cache - avoid unnecessary operations if already processed
+    processed_df = df.copy()
+    
+    # Only convert timestamp if not already datetime
+    if 'timestamp' not in processed_df.columns or not pd.api.types.is_datetime64_any_dtype(processed_df['timestamp']):
+        processed_df['timestamp'] = pd.to_datetime(processed_df['timestamp'])
+    
+    # Only add 15min_bucket if not already present
+    if '15min_bucket' not in processed_df.columns:
+        processed_df['15min_bucket'] = processed_df['timestamp'].dt.floor('15min')
+    
+    # Cache the result
+    _dataframe_cache[cache_key] = processed_df
+    return processed_df
+
+def get_cached_filtered_dataframe(df: pd.DataFrame, filter_func, filter_args, cache_key: str = None) -> pd.DataFrame:
+    """
+    Get a filtered DataFrame with caching to avoid repeated filtering operations.
+    
+    Args:
+        df: Input DataFrame
+        filter_func: Filtering function to apply
+        filter_args: Arguments for the filtering function
+        cache_key: Optional cache key to avoid reprocessing the same filter
+        
+    Returns:
+        Filtered DataFrame
+    """
+    if cache_key and cache_key in _filtered_cache:
+        return _filtered_cache[cache_key]
+    
+    # Apply the filter
+    filtered_df = filter_func(df, *filter_args)
+    
+    # Cache the result if cache_key is provided
+    if cache_key:
+        _filtered_cache[cache_key] = filtered_df
+    
+    return filtered_df
+
+def clear_dataframe_cache():
+    """Clear all DataFrame caches to free memory."""
+    global _dataframe_cache, _filtered_cache
+    _dataframe_cache.clear()
+    _filtered_cache.clear()
 
 # Import shared utilities
 from gpu_utils import (
@@ -85,16 +161,26 @@ def get_time_filtered_data(
     end_month = (end_time.year, end_time.month)
 
     if start_month == end_month:
-        # Single month - use traditional approach for backward compatibility and performance
+        # Single month - optimized approach with SQL-level filtering
         try:
             conn = sqlite3.connect(db_path)
-            df = pd.read_sql_query("SELECT * FROM gpu_state", conn)
+            # OPTIMIZATION: Filter at SQL level instead of loading entire database
+            optimized_query = """
+            SELECT * FROM gpu_state
+            WHERE timestamp >= ? AND timestamp <= ?
+            ORDER BY timestamp
+            """
+            df = pd.read_sql_query(
+                optimized_query,
+                conn,
+                params=[start_time.strftime('%Y-%m-%d %H:%M:%S.%f'),
+                       end_time.strftime('%Y-%m-%d %H:%M:%S.%f')]
+            )
             conn.close()
-            df['timestamp'] = pd.to_datetime(df['timestamp'])
 
-            # Filter by time range
-            filtered_df = df[(df['timestamp'] >= start_time) & (df['timestamp'] <= end_time)]
-            return filtered_df
+            if len(df) > 0:
+                df['timestamp'] = pd.to_datetime(df['timestamp'])
+            return df
         except Exception as e:
             # If single-db approach fails, fall back to multi-db approach
             print(f"Warning: Single database query failed, trying multi-database approach: {e}")
@@ -372,10 +458,10 @@ def calculate_allocation_usage_by_device_enhanced(df: pd.DataFrame, host: str = 
     Returns:
         Dictionary with usage statistics for each enhanced class and device type
     """
-    # Create 15-minute time buckets
-    df = df.copy()
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
-    df['15min_bucket'] = df['timestamp'].dt.floor('15min')
+    # Use cached preprocessing to avoid repeated timestamp/bucket operations
+    # Generate unified cache key based on DataFrame identity
+    cache_key = f"preprocessed_{len(df)}_{hash(str(df['timestamp'].iloc[0])) if len(df) > 0 else 'empty'}"
+    df = get_preprocessed_dataframe(df, cache_key)
 
     # Get unique device types
     device_types = df['GPUs_DeviceName'].dropna().unique()
@@ -392,6 +478,29 @@ def calculate_allocation_usage_by_device_enhanced(df: pd.DataFrame, host: str = 
         "Backfill-OpenCapacity"
     ]
 
+    # Pre-filter data by utilization type and device type to avoid repeated filtering
+    filtered_data = {}
+    for utilization_type in utilization_types:
+        filtered_data[utilization_type] = {}
+        for device_type in device_types:
+            # Skip old/uncommon GPU types for cleaner output (unless requested to include all)  
+            if not include_all_devices and any(old_gpu in device_type for old_gpu in ["GTX 1080", "P100", "Quadro", "A30", "A40"]):
+                continue
+                
+            # Create cache key for this specific filter combination - include all parameters
+            filter_cache_key = f"enhanced_{utilization_type}_{device_type}_{host}_{len(df)}_{hash(str(df['timestamp'].iloc[0])) if len(df) > 0 else 'empty'}"
+            
+            # Get filtered dataset (cached if available) - correct parameter order
+            # filter_df_enhanced(df, utilization, state, host)
+            # We need to filter by device type separately since filter_df_enhanced doesn't take device_type
+            device_df = df[df['GPUs_DeviceName'] == device_type]
+            filtered_df = get_cached_filtered_dataframe(
+                device_df, filter_df_enhanced, 
+                (utilization_type, "", host), 
+                filter_cache_key
+            )
+            filtered_data[utilization_type][device_type] = filtered_df
+
     for utilization_type in utilization_types:
         stats[utilization_type] = {}
 
@@ -399,41 +508,30 @@ def calculate_allocation_usage_by_device_enhanced(df: pd.DataFrame, host: str = 
             # Skip old/uncommon GPU types for cleaner output (unless requested to include all)
             if not include_all_devices and any(old_gpu in device_type for old_gpu in ["GTX 1080", "P100", "Quadro", "A30", "A40"]):
                 continue
+                
+            # Use pre-filtered data instead of calling filter_df_enhanced repeatedly
+            if device_type not in filtered_data[utilization_type]:
+                continue
+            device_utilization_df = filtered_data[utilization_type][device_type]
 
             interval_usage_percentages = []
             total_claimed_gpus = 0
             total_available_gpus = 0
 
-            # For each 15-minute interval, count unique GPUs of this device type
+            # For each 15-minute interval, count unique GPUs using pre-filtered data
             for bucket in sorted(df['15min_bucket'].unique()):
-                bucket_df = df[df['15min_bucket'] == bucket]
+                # Use pre-filtered data for this bucket
+                bucket_filtered_df = device_utilization_df[device_utilization_df['15min_bucket'] == bucket]
 
-                # Filter by device type
-                device_df = bucket_df[bucket_df['GPUs_DeviceName'] == device_type]
-
-                if device_df.empty:
+                if bucket_filtered_df.empty:
                     continue
 
-                # Count unique GPUs for this utilization type and device in this interval
-                if utilization_type == "Priority-ResearcherOwned":
-                    all_gpus_df = filter_df_enhanced(device_df, "Priority-ResearcherOwned", "", host)
-                elif utilization_type == "Priority-CHTCOwned":
-                    all_gpus_df = filter_df_enhanced(device_df, "Priority-CHTCOwned", "", host)
-                elif utilization_type == "Shared":
-                    all_gpus_df = filter_df_enhanced(device_df, "Shared", "", host)
-                elif utilization_type == "Backfill-CHTCOwned":
-                    all_gpus_df = filter_df_enhanced(device_df, "Backfill-CHTCOwned", "", host)
-                elif utilization_type == "Backfill-ResearcherOwned":
-                    all_gpus_df = filter_df_enhanced(device_df, "Backfill-ResearcherOwned", "", host)
-                elif utilization_type == "Backfill-OpenCapacity":
-                    all_gpus_df = filter_df_enhanced(device_df, "Backfill-OpenCapacity", "", host)
-
                 # Count unique GPUs (total available for this utilization type)
-                unique_gpu_ids = set(all_gpus_df['AssignedGPUs'].dropna().unique())
+                unique_gpu_ids = set(bucket_filtered_df['AssignedGPUs'].dropna().unique())
                 total_gpus_this_interval = len(unique_gpu_ids)
 
                 # Count how many of these unique GPUs are currently claimed
-                claimed_gpus_df = all_gpus_df[all_gpus_df['State'] == 'Claimed']
+                claimed_gpus_df = bucket_filtered_df[bucket_filtered_df['State'] == 'Claimed']
                 claimed_unique_gpu_ids = set(claimed_gpus_df['AssignedGPUs'].dropna().unique())
                 claimed_gpus = len(claimed_unique_gpu_ids)
 
@@ -654,10 +752,10 @@ def calculate_allocation_usage_by_memory(df: pd.DataFrame, host: str = "", inclu
     Returns:
         Dictionary with usage statistics for each memory category (for Real slots only)
     """
-    # Create 15-minute time buckets
-    df = df.copy()
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
-    df['15min_bucket'] = df['timestamp'].dt.floor('15min')
+    # Use cached preprocessing to avoid repeated timestamp/bucket operations
+    # Generate unified cache key based on DataFrame identity
+    cache_key = f"preprocessed_{len(df)}_{hash(str(df['timestamp'].iloc[0])) if len(df) > 0 else 'empty'}"
+    df = get_preprocessed_dataframe(df, cache_key)
 
     # Add memory category column based on GPUs_GlobalMemoryMb
     df['memory_category'] = df['GPUs_GlobalMemoryMb'].apply(get_memory_category_from_mb)
@@ -667,8 +765,28 @@ def calculate_allocation_usage_by_memory(df: pd.DataFrame, host: str = "", inclu
 
     stats = {}
 
-    # Only calculate for Real slot classes (Priority + Shared)
-    real_slot_classes = ["Priority", "Shared"]
+    # Only calculate for Real slot classes (Priority-ResearcherOwned + Priority-CHTCOwned + Shared)
+    real_slot_classes = ["Priority-ResearcherOwned", "Priority-CHTCOwned", "Shared"]
+
+    # Pre-filter data by class and memory category to avoid repeated filtering
+    filtered_memory_data = {}
+    for memory_cat in memory_categories:
+        filtered_memory_data[memory_cat] = {}
+        for class_name in real_slot_classes:
+            # Create cache key for this specific filter combination
+            filter_cache_key = f"memory_{class_name}_{memory_cat}_{len(df)}_{hash(str(df['timestamp'].iloc[0])) if len(df) > 0 else 'empty'}"
+            
+            # Filter by memory category first, then by class
+            memory_cat_df = df[df['memory_category'] == memory_cat]
+            if not memory_cat_df.empty:
+                # Get filtered dataset (cached if available)
+                # filter_df_enhanced(df, utilization, state, host)
+                filtered_df = get_cached_filtered_dataframe(
+                    memory_cat_df, filter_df_enhanced, 
+                    (class_name, "", host), 
+                    filter_cache_key
+                )
+                filtered_memory_data[memory_cat][class_name] = filtered_df
 
     for memory_cat in memory_categories:
         total_claimed_across_intervals = 0
@@ -679,25 +797,30 @@ def calculate_allocation_usage_by_memory(df: pd.DataFrame, host: str = "", inclu
         unique_buckets = df['15min_bucket'].unique()
 
         for bucket_time in unique_buckets:
-            bucket_df = df[df['15min_bucket'] == bucket_time]
-
-            # Filter by memory category
-            memory_df = bucket_df[bucket_df['memory_category'] == memory_cat]
-            if memory_df.empty:
-                continue
-
             bucket_claimed = 0
             bucket_total = 0
 
-            # Sum across all Real slot classes for this memory category
+            # Sum across all Real slot classes for this memory category using pre-filtered data
             for class_name in real_slot_classes:
-                # Filter by class and apply host filter
-                class_df = filter_df(memory_df, class_name, "", host)
+                # Use pre-filtered data for this memory category and class
+                if class_name not in filtered_memory_data[memory_cat]:
+                    continue
+                    
+                class_filtered_df = filtered_memory_data[memory_cat][class_name]
+                
+                # Filter by bucket time
+                bucket_class_df = class_filtered_df[class_filtered_df['15min_bucket'] == bucket_time]
 
-                if not class_df.empty:
-                    # Count allocated GPUs for this class and memory category
-                    allocated_count = len(class_df[class_df['State'] == 'Claimed'])
-                    total_count = len(class_df)
+                if not bucket_class_df.empty:
+                    # Count unique GPUs for this class and memory category (like device calculation)
+                    # Total unique GPUs available for this class
+                    unique_gpu_ids = set(bucket_class_df['AssignedGPUs'].dropna().unique())
+                    total_count = len(unique_gpu_ids)
+                    
+                    # Count unique claimed GPUs
+                    claimed_gpus_df = bucket_class_df[bucket_class_df['State'] == 'Claimed']
+                    claimed_unique_gpu_ids = set(claimed_gpus_df['AssignedGPUs'].dropna().unique())
+                    allocated_count = len(claimed_unique_gpu_ids)
 
                     bucket_claimed += allocated_count
                     bucket_total += total_count
@@ -741,9 +864,10 @@ def calculate_h200_user_breakdown(df: pd.DataFrame, host: str = "", hours_back: 
     if h200_df.empty:
         return {}
 
-    # Create 15-minute time buckets
-    h200_df['timestamp'] = pd.to_datetime(h200_df['timestamp'])
-    h200_df['15min_bucket'] = h200_df['timestamp'].dt.floor('15min')
+    # Use cached preprocessing for H200 data
+    # Generate unified cache key based on DataFrame identity
+    cache_key = f"preprocessed_{len(h200_df)}_{hash(str(h200_df['timestamp'].iloc[0])) if len(h200_df) > 0 else 'empty'}"
+    h200_df = get_preprocessed_dataframe(h200_df, cache_key)
 
     # Apply host filter if specified
     if host:
@@ -924,6 +1048,10 @@ def run_analysis(
     Returns:
         Dictionary containing analysis results and metadata
     """
+    import time
+    analysis_start_time = time.time()
+    analysis_start_datetime = datetime.datetime.now()
+    
     # Set up host exclusions
     gpu_utils.HOST_EXCLUSIONS = load_host_exclusions(exclude_hosts, exclude_hosts_yaml)
     gpu_utils.FILTERED_HOSTS_INFO = []  # Reset tracking
@@ -967,50 +1095,58 @@ def run_analysis(
 
     elif analysis_type == "monthly":
         result["monthly_stats"] = calculate_monthly_summary(db_path, end_time)
-        
+
+    # Add runtime information to metadata
+    analysis_end_time = time.time()
+    runtime_seconds = analysis_end_time - analysis_start_time
+    
+    result["metadata"]["analysis_runtime_seconds"] = round(runtime_seconds, 3)
+    result["metadata"]["analysis_start_datetime"] = analysis_start_datetime.isoformat()
+    result["metadata"]["analysis_end_datetime"] = datetime.datetime.now().isoformat()
+    
     return result
 
 
 def calculate_monthly_summary(db_path: str, end_time: Optional[datetime.datetime] = None) -> dict:
     """
     Calculate complete monthly GPU usage summary for the previous month.
-    
+
     Args:
         db_path: Path to SQLite database (used to determine base directory)
         end_time: Optional end time (defaults to latest data)
-        
+
     Returns:
         Dictionary containing monthly usage statistics
     """
     from pathlib import Path
     import calendar
-    
+
     # Get base directory from the provided db_path
     db_path_obj = Path(db_path)
     base_dir = str(db_path_obj.parent) if db_path_obj.parent != Path('.') else "."
-    
+
     # If end_time is not provided, use the latest timestamp from the most recent database
     if end_time is None:
         end_time = get_latest_timestamp_from_most_recent_db(base_dir)
         if end_time is None:
             end_time = datetime.datetime.now()
-    
+
     # Calculate previous month range
     current_month = end_time.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     prev_month_end = current_month - datetime.timedelta(seconds=1)
     prev_month_start = prev_month_end.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    
+
     # Calculate total hours in the previous month
     days_in_month = calendar.monthrange(prev_month_start.year, prev_month_start.month)[1]
     total_hours = days_in_month * 24
-    
+
     print(f"Calculating monthly summary for {prev_month_start.strftime('%B %Y')}")
     print(f"Period: {prev_month_start} to {prev_month_end}")
     print(f"Total hours in month: {total_hours}")
-    
+
     # Get data for the entire previous month
     df = get_time_filtered_data(db_path, total_hours, prev_month_end + datetime.timedelta(seconds=1))
-    
+
     if df.empty:
         return {
             "error": f"No data found for {prev_month_start.strftime('%B %Y')}",
@@ -1019,12 +1155,12 @@ def calculate_monthly_summary(db_path: str, end_time: Optional[datetime.datetime
             "end_date": prev_month_end,
             "total_hours": total_hours
         }
-    
+
     # Calculate statistics for the month
     device_stats = calculate_allocation_usage_by_device_enhanced(df, "", False)  # All devices, no host filter
     memory_stats = calculate_allocation_usage_by_memory(df, "", False)  # All devices, no host filter
     h200_stats = calculate_h200_user_breakdown(df, "", total_hours)
-    
+
     return {
         "month": prev_month_start.strftime('%B %Y'),
         "start_date": prev_month_start,
@@ -1358,7 +1494,9 @@ def send_email_report(
     use_auth: bool = False,
     timeout: int = 30,
     debug: bool = False,
-    device_stats: Optional[Dict] = None
+    device_stats: Optional[Dict] = None,
+    analysis_type = None,
+    month = None
 ) -> bool:
     """
     Send HTML report via email using SMTP, matching mailx behavior.
@@ -1404,7 +1542,12 @@ def send_email_report(
                 period_str = f"{days}d"
             else:  # Hours for <= 24h or non-exact days
                 period_str = f"{lookback_hours}h"
-            subject += f" {period_str}"
+            if analysis_type == "monthly":
+                # Use month if available, otherwise fall back to indicating it's monthly
+                month_str = month if month else "Monthly"
+                subject += f" {month_str}"
+            else:
+                subject += f" {period_str}"
 
         # Add usage percentages in order: Prioritized (Researcher), Prioritized (CHTC), Open Capacity, Backfill
         if usage_percentages:
@@ -1424,7 +1567,7 @@ def send_email_report(
                     backfill_types = ["Backfill-ResearcherOwned", "Backfill-CHTCOwned", "Backfill-OpenCapacity"]
                     total_claimed = 0
                     total_available = 0
-                    
+
                     if device_stats:
                         for backfill_type in backfill_types:
                             if backfill_type in device_stats:
@@ -1432,7 +1575,7 @@ def send_email_report(
                                 if device_data:
                                     total_claimed += sum(stats['avg_claimed'] for stats in device_data.values())
                                     total_available += sum(stats['avg_total_available'] for stats in device_data.values())
-                        
+
                         if total_available > 0:
                             combined_percentage = (total_claimed / total_available) * 100
                             usage_parts.append(f"{combined_percentage:.1f}%")
@@ -1591,7 +1734,7 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
         monthly_stats = results["monthly_stats"]
         if "error" in monthly_stats:
             return f"<html><body><h1>Monthly Summary Error</h1><p>{monthly_stats['error']}</p></body></html>"
-        
+
         # Convert monthly stats to regular results format so we can reuse existing HTML generation
         regular_results = {
             "metadata": {
@@ -1604,22 +1747,22 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
                 "filtered_hosts_info": {}
             }
         }
-        
+
         # Copy the stats from monthly to regular format
         if "device_stats" in monthly_stats:
             regular_results["device_stats"] = monthly_stats["device_stats"]
         if "memory_stats" in monthly_stats:
-            regular_results["memory_stats"] = monthly_stats["memory_stats"] 
+            regular_results["memory_stats"] = monthly_stats["memory_stats"]
         if "h200_user_stats" in monthly_stats:
             regular_results["h200_user_stats"] = monthly_stats["h200_user_stats"]
         if "raw_data" in monthly_stats:
             regular_results["raw_data"] = monthly_stats["raw_data"]
         if "host_filter" in monthly_stats:
             regular_results["host_filter"] = monthly_stats["host_filter"]
-            
+
         # Use existing HTML generation but with monthly title
         html_content = generate_html_report(regular_results, output_file)
-        
+
         # Update the title to indicate it's a monthly report
         start_date_str = monthly_stats['start_date'].strftime('%B %Y') if hasattr(monthly_stats['start_date'], 'strftime') else str(monthly_stats['month'])
         html_content = html_content.replace(
@@ -1629,7 +1772,7 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
             "<h1>CHTC GPU ALLOCATION REPORT</h1>",
             f"<h1>CHTC MONTHLY GPU REPORT - {start_date_str.upper()}</h1>"
         )
-        
+
         return html_content
 
     metadata = results["metadata"]
@@ -1651,7 +1794,6 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
     hour_word = "hour" if hours_back == 1 else "hours"
     period_str = f"{hours_str} {hour_word}"
     html_parts.append(f"<p><strong>Period:</strong> {period_str}</p>")
-    html_parts.append(f"<p><strong>Generated:</strong> {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>")
 
     # Check if we have device stats for cluster summary
     device_stats = results.get("device_stats", {})
@@ -2171,6 +2313,35 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
             html_parts.append(f"<strong>Data Period:</strong> Last {hours_back} hours")
     html_parts.append("</div>")
 
+    # Add runtime footer
+    html_parts.append("<hr>")
+    html_parts.append("<div style='font-size: 12px; color: #666; text-align: center; margin-top: 20px;'>")
+    
+    # Add runtime information if available
+    if "analysis_runtime_seconds" in metadata:
+        runtime = metadata["analysis_runtime_seconds"]
+        if runtime < 60:
+            runtime_str = f"{runtime:.2f} seconds"
+        else:
+            minutes = int(runtime // 60)
+            seconds = runtime % 60
+            runtime_str = f"{minutes}m {seconds:.1f}s"
+        html_parts.append(f"Report generated in {runtime_str}")
+        
+        # Add generation timestamp if available
+        if "analysis_end_datetime" in metadata:
+            end_time = metadata["analysis_end_datetime"]
+            # Parse ISO format and format for display
+            try:
+                from datetime import datetime as dt_parser
+                dt = dt_parser.fromisoformat(end_time.replace('Z', '+00:00'))
+                time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+                html_parts.append(f" | Generated: {time_str}")
+            except:
+                pass
+    
+    html_parts.append("</div>")
+
     html_parts.append("</body>")
     html_parts.append("</html>")
 
@@ -2217,7 +2388,7 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
         if "error" in monthly_stats:
             print(monthly_stats["error"])
             return
-        
+
         # Convert monthly stats to regular results format so we can reuse existing text output
         regular_results = {
             "metadata": {
@@ -2230,28 +2401,28 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
                 "filtered_hosts_info": {}
             }
         }
-        
+
         # Copy the stats from monthly to regular format
         if "device_stats" in monthly_stats:
             regular_results["device_stats"] = monthly_stats["device_stats"]
         if "memory_stats" in monthly_stats:
-            regular_results["memory_stats"] = monthly_stats["memory_stats"] 
+            regular_results["memory_stats"] = monthly_stats["memory_stats"]
         if "h200_user_stats" in monthly_stats:
             regular_results["h200_user_stats"] = monthly_stats["h200_user_stats"]
         if "raw_data" in monthly_stats:
             regular_results["raw_data"] = monthly_stats["raw_data"]
         if "host_filter" in monthly_stats:
             regular_results["host_filter"] = monthly_stats["host_filter"]
-            
+
         # Override results with converted monthly data and continue with normal text processing
         results = regular_results
-        
+
         # Mark as monthly for different header formatting
         results["metadata"]["is_monthly"] = True
         results["metadata"]["monthly_period"] = monthly_stats['start_date'].strftime('%B %Y') if hasattr(monthly_stats['start_date'], 'strftime') else str(monthly_stats['month'])
 
     metadata = results["metadata"]
-    
+
     # Print appropriate header based on type
     if metadata.get("is_monthly", False):
         print(f"\n{'='*70}")
@@ -2511,7 +2682,7 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
             print("FILTERING IMPACT:")
             print(f"  Records excluded: {records_excluded:,}")
             print(f"  Records analyzed: {total_filtered:,}")
-    
+
     # Add time range information at the very end
     print(f"\n{'='*70}")
     if metadata.get("is_monthly", False):
@@ -2679,7 +2850,9 @@ def main(
             lookback_hours=hours_back,
             timeout=email_timeout,
             debug=email_debug,
-            device_stats=results.get("device_stats")
+            device_stats=results.get("device_stats"),
+            analysis_type=analysis_type,
+            month=results.get("monthly_stats", {}).get("month") if analysis_type == "monthly" else (results.get("metadata", {}).get("monthly_period"))
         )
 
         if not success:
