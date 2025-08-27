@@ -1048,6 +1048,10 @@ def run_analysis(
     Returns:
         Dictionary containing analysis results and metadata
     """
+    import time
+    analysis_start_time = time.time()
+    analysis_start_datetime = datetime.datetime.now()
+    
     # Set up host exclusions
     gpu_utils.HOST_EXCLUSIONS = load_host_exclusions(exclude_hosts, exclude_hosts_yaml)
     gpu_utils.FILTERED_HOSTS_INFO = []  # Reset tracking
@@ -1092,6 +1096,14 @@ def run_analysis(
     elif analysis_type == "monthly":
         result["monthly_stats"] = calculate_monthly_summary(db_path, end_time)
 
+    # Add runtime information to metadata
+    analysis_end_time = time.time()
+    runtime_seconds = analysis_end_time - analysis_start_time
+    
+    result["metadata"]["analysis_runtime_seconds"] = round(runtime_seconds, 3)
+    result["metadata"]["analysis_start_datetime"] = analysis_start_datetime.isoformat()
+    result["metadata"]["analysis_end_datetime"] = datetime.datetime.now().isoformat()
+    
     return result
 
 
@@ -1782,7 +1794,6 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
     hour_word = "hour" if hours_back == 1 else "hours"
     period_str = f"{hours_str} {hour_word}"
     html_parts.append(f"<p><strong>Period:</strong> {period_str}</p>")
-    html_parts.append(f"<p><strong>Generated:</strong> {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>")
 
     # Check if we have device stats for cluster summary
     device_stats = results.get("device_stats", {})
@@ -2300,6 +2311,35 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
             # Fallback to hours_back if timestamps not available
             hours_back = metadata.get("hours_back", 24)
             html_parts.append(f"<strong>Data Period:</strong> Last {hours_back} hours")
+    html_parts.append("</div>")
+
+    # Add runtime footer
+    html_parts.append("<hr>")
+    html_parts.append("<div style='font-size: 12px; color: #666; text-align: center; margin-top: 20px;'>")
+    
+    # Add runtime information if available
+    if "analysis_runtime_seconds" in metadata:
+        runtime = metadata["analysis_runtime_seconds"]
+        if runtime < 60:
+            runtime_str = f"{runtime:.2f} seconds"
+        else:
+            minutes = int(runtime // 60)
+            seconds = runtime % 60
+            runtime_str = f"{minutes}m {seconds:.1f}s"
+        html_parts.append(f"Report generated in {runtime_str}")
+        
+        # Add generation timestamp if available
+        if "analysis_end_datetime" in metadata:
+            end_time = metadata["analysis_end_datetime"]
+            # Parse ISO format and format for display
+            try:
+                from datetime import datetime as dt_parser
+                dt = dt_parser.fromisoformat(end_time.replace('Z', '+00:00'))
+                time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+                html_parts.append(f" | Generated: {time_str}")
+            except:
+                pass
+    
     html_parts.append("</div>")
 
     html_parts.append("</body>")
