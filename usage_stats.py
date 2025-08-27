@@ -677,8 +677,8 @@ def calculate_allocation_usage_by_memory(df: pd.DataFrame, host: str = "", inclu
 
     stats = {}
 
-    # Only calculate for Real slot classes (Priority + Shared)
-    real_slot_classes = ["Priority", "Shared"]
+    # Only calculate for Real slot classes (Priority-ResearcherOwned + Priority-CHTCOwned + Shared)
+    real_slot_classes = ["Priority-ResearcherOwned", "Priority-CHTCOwned", "Shared"]
 
     for memory_cat in memory_categories:
         total_claimed_across_intervals = 0
@@ -701,13 +701,19 @@ def calculate_allocation_usage_by_memory(df: pd.DataFrame, host: str = "", inclu
 
             # Sum across all Real slot classes for this memory category
             for class_name in real_slot_classes:
-                # Filter by class and apply host filter
-                class_df = filter_df(memory_df, class_name, "", host)
+                # Filter by class and apply host filter (using enhanced filter with new class names)
+                class_df = filter_df_enhanced(memory_df, class_name, "", host)
 
                 if not class_df.empty:
-                    # Count allocated GPUs for this class and memory category
-                    allocated_count = len(class_df[class_df['State'] == 'Claimed'])
-                    total_count = len(class_df)
+                    # Count unique GPUs for this class and memory category (like device calculation)
+                    # Total unique GPUs available for this class
+                    unique_gpu_ids = set(class_df['AssignedGPUs'].dropna().unique())
+                    total_count = len(unique_gpu_ids)
+                    
+                    # Count unique claimed GPUs
+                    claimed_gpus_df = class_df[class_df['State'] == 'Claimed']
+                    claimed_unique_gpu_ids = set(claimed_gpus_df['AssignedGPUs'].dropna().unique())
+                    allocated_count = len(claimed_unique_gpu_ids)
 
                     bucket_claimed += allocated_count
                     bucket_total += total_count
