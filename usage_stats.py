@@ -32,11 +32,11 @@ def get_preprocessed_dataframe(df: pd.DataFrame, cache_key: str = None) -> pd.Da
     """
     Get a preprocessed DataFrame with common operations applied, using caching to avoid repeated work.
     Optimized to avoid multiple copies and improve cache effectiveness.
-    
+
     Args:
         df: Input DataFrame
         cache_key: Optional cache key to avoid reprocessing the same data
-        
+
     Returns:
         DataFrame with timestamp conversion and 15-minute buckets added
     """
@@ -48,22 +48,22 @@ def get_preprocessed_dataframe(df: pd.DataFrame, cache_key: str = None) -> pd.Da
         if '15min_bucket' not in processed_df.columns:
             processed_df['15min_bucket'] = processed_df['timestamp'].dt.floor('15min')
         return processed_df
-    
+
     # Check cache first
     if cache_key in _dataframe_cache:
         return _dataframe_cache[cache_key]
-    
+
     # Process and cache - avoid unnecessary operations if already processed
     processed_df = df.copy()
-    
+
     # Only convert timestamp if not already datetime
     if 'timestamp' not in processed_df.columns or not pd.api.types.is_datetime64_any_dtype(processed_df['timestamp']):
         processed_df['timestamp'] = pd.to_datetime(processed_df['timestamp'])
-    
+
     # Only add 15min_bucket if not already present
     if '15min_bucket' not in processed_df.columns:
         processed_df['15min_bucket'] = processed_df['timestamp'].dt.floor('15min')
-    
+
     # Cache the result
     _dataframe_cache[cache_key] = processed_df
     return processed_df
@@ -71,26 +71,26 @@ def get_preprocessed_dataframe(df: pd.DataFrame, cache_key: str = None) -> pd.Da
 def get_cached_filtered_dataframe(df: pd.DataFrame, filter_func, filter_args, cache_key: str = None) -> pd.DataFrame:
     """
     Get a filtered DataFrame with caching to avoid repeated filtering operations.
-    
+
     Args:
         df: Input DataFrame
         filter_func: Filtering function to apply
         filter_args: Arguments for the filtering function
         cache_key: Optional cache key to avoid reprocessing the same filter
-        
+
     Returns:
         Filtered DataFrame
     """
     if cache_key and cache_key in _filtered_cache:
         return _filtered_cache[cache_key]
-    
+
     # Apply the filter
     filtered_df = filter_func(df, *filter_args)
-    
+
     # Cache the result if cache_key is provided
     if cache_key:
         _filtered_cache[cache_key] = filtered_df
-    
+
     return filtered_df
 
 def clear_dataframe_cache():
@@ -483,20 +483,20 @@ def calculate_allocation_usage_by_device_enhanced(df: pd.DataFrame, host: str = 
     for utilization_type in utilization_types:
         filtered_data[utilization_type] = {}
         for device_type in device_types:
-            # Skip old/uncommon GPU types for cleaner output (unless requested to include all)  
+            # Skip old/uncommon GPU types for cleaner output (unless requested to include all)
             if not include_all_devices and any(old_gpu in device_type for old_gpu in ["GTX 1080", "P100", "Quadro", "A30", "A40"]):
                 continue
-                
+
             # Create cache key for this specific filter combination - include all parameters
             filter_cache_key = f"enhanced_{utilization_type}_{device_type}_{host}_{len(df)}_{hash(str(df['timestamp'].iloc[0])) if len(df) > 0 else 'empty'}"
-            
+
             # Get filtered dataset (cached if available) - correct parameter order
             # filter_df_enhanced(df, utilization, state, host)
             # We need to filter by device type separately since filter_df_enhanced doesn't take device_type
             device_df = df[df['GPUs_DeviceName'] == device_type]
             filtered_df = get_cached_filtered_dataframe(
-                device_df, filter_df_enhanced, 
-                (utilization_type, "", host), 
+                device_df, filter_df_enhanced,
+                (utilization_type, "", host),
                 filter_cache_key
             )
             filtered_data[utilization_type][device_type] = filtered_df
@@ -508,7 +508,7 @@ def calculate_allocation_usage_by_device_enhanced(df: pd.DataFrame, host: str = 
             # Skip old/uncommon GPU types for cleaner output (unless requested to include all)
             if not include_all_devices and any(old_gpu in device_type for old_gpu in ["GTX 1080", "P100", "Quadro", "A30", "A40"]):
                 continue
-                
+
             # Use pre-filtered data instead of calling filter_df_enhanced repeatedly
             if device_type not in filtered_data[utilization_type]:
                 continue
@@ -775,15 +775,15 @@ def calculate_allocation_usage_by_memory(df: pd.DataFrame, host: str = "", inclu
         for class_name in real_slot_classes:
             # Create cache key for this specific filter combination
             filter_cache_key = f"memory_{class_name}_{memory_cat}_{len(df)}_{hash(str(df['timestamp'].iloc[0])) if len(df) > 0 else 'empty'}"
-            
+
             # Filter by memory category first, then by class
             memory_cat_df = df[df['memory_category'] == memory_cat]
             if not memory_cat_df.empty:
                 # Get filtered dataset (cached if available)
                 # filter_df_enhanced(df, utilization, state, host)
                 filtered_df = get_cached_filtered_dataframe(
-                    memory_cat_df, filter_df_enhanced, 
-                    (class_name, "", host), 
+                    memory_cat_df, filter_df_enhanced,
+                    (class_name, "", host),
                     filter_cache_key
                 )
                 filtered_memory_data[memory_cat][class_name] = filtered_df
@@ -805,9 +805,9 @@ def calculate_allocation_usage_by_memory(df: pd.DataFrame, host: str = "", inclu
                 # Use pre-filtered data for this memory category and class
                 if class_name not in filtered_memory_data[memory_cat]:
                     continue
-                    
+
                 class_filtered_df = filtered_memory_data[memory_cat][class_name]
-                
+
                 # Filter by bucket time
                 bucket_class_df = class_filtered_df[class_filtered_df['15min_bucket'] == bucket_time]
 
@@ -816,7 +816,7 @@ def calculate_allocation_usage_by_memory(df: pd.DataFrame, host: str = "", inclu
                     # Total unique GPUs available for this class
                     unique_gpu_ids = set(bucket_class_df['AssignedGPUs'].dropna().unique())
                     total_count = len(unique_gpu_ids)
-                    
+
                     # Count unique claimed GPUs
                     claimed_gpus_df = bucket_class_df[bucket_class_df['State'] == 'Claimed']
                     claimed_unique_gpu_ids = set(claimed_gpus_df['AssignedGPUs'].dropna().unique())
@@ -1051,7 +1051,7 @@ def run_analysis(
     import time
     analysis_start_time = time.time()
     analysis_start_datetime = datetime.datetime.now()
-    
+
     # Set up host exclusions
     gpu_utils.HOST_EXCLUSIONS = load_host_exclusions(exclude_hosts, exclude_hosts_yaml)
     gpu_utils.FILTERED_HOSTS_INFO = []  # Reset tracking
@@ -1099,11 +1099,11 @@ def run_analysis(
     # Add runtime information to metadata
     analysis_end_time = time.time()
     runtime_seconds = analysis_end_time - analysis_start_time
-    
+
     result["metadata"]["analysis_runtime_seconds"] = round(runtime_seconds, 3)
     result["metadata"]["analysis_start_datetime"] = analysis_start_datetime.isoformat()
     result["metadata"]["analysis_end_datetime"] = datetime.datetime.now().isoformat()
-    
+
     return result
 
 
@@ -2316,7 +2316,7 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
     # Add runtime footer
     html_parts.append("<hr>")
     html_parts.append("<div style='font-size: 12px; color: #666; text-align: center; margin-top: 20px;'>")
-    
+
     # Add runtime information if available
     if "analysis_runtime_seconds" in metadata:
         runtime = metadata["analysis_runtime_seconds"]
@@ -2327,7 +2327,7 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
             seconds = runtime % 60
             runtime_str = f"{minutes}m {seconds:.1f}s"
         html_parts.append(f"Report generated in {runtime_str}")
-        
+
         # Add generation timestamp if available
         if "analysis_end_datetime" in metadata:
             end_time = metadata["analysis_end_datetime"]
@@ -2339,7 +2339,7 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
                 html_parts.append(f" | Generated: {time_str}")
             except:
                 pass
-    
+
     html_parts.append("</div>")
 
     html_parts.append("</body>")
@@ -2714,7 +2714,7 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
 def main(
     hours_back: int = typer.Option(24, help="Number of hours to analyze (default: 24)"),
     host: str = typer.Option("", help="Host name to filter results"),
-    db_path: str = typer.Option("gpu_state_2025-08.db", help="Path to SQLite database"),
+    db_path: Optional[str] = typer.Option(None, help="Path to SQLite database (defaults to current month)"),
     analysis_type: str = typer.Option(
         "allocation",
         help="Type of analysis: allocation (% GPUs claimed), timeseries, gpu_model_snapshot, or monthly"
@@ -2751,6 +2751,27 @@ def main(
     # prioritize the explicit exclude_hosts option
     if exclude_hosts and exclude_hosts_yaml == "masked_hosts.yaml":
         exclude_hosts_yaml = None
+
+    # Auto-detect database path if not provided
+    if db_path is None:
+        current_date = datetime.datetime.now()
+        current_month_db = f"gpu_state_{current_date.strftime('%Y-%m')}.db"
+        
+        # Check if current month database exists
+        if os.path.exists(current_month_db):
+            db_path = current_month_db
+            print(f"Using current month database: {db_path}")
+        else:
+            # Fall back to most recent database file
+            import glob
+            db_files = glob.glob("gpu_state_*.db")
+            if db_files:
+                # Sort by filename (which includes date) to get most recent
+                db_path = sorted(db_files)[-1]
+                print(f"Current month database not found, using most recent: {db_path}")
+            else:
+                print("Error: No database files found. Please specify --db-path.")
+                return
 
     # Parse end_time if provided
     parsed_end_time = None
