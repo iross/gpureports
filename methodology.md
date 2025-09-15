@@ -37,20 +37,26 @@
 
 **Calculation Method:** Averages are calculated by sampling GPU states every 15 minutes and computing the mean across all intervals in the specified lookback period.
 
+**GPU Model Filtering:** For consistency and cleaner analysis, certain older or uncommon GPU models are filtered out of allocation calculations and user usage tables by default. This filtering ensures that the allocation statistics and usage breakdowns focus on the most relevant and commonly used GPU types in the cluster.
+
+*Filtered GPU Models:*
+- **GTX 1080** series
+- **P100**
+- **Quadro** series
+- **A30**
+- **A40**
+
+*Note:* Tables marked with "(filtered)" exclude these GPU models from calculations. The raw allocation summary tables include all GPU types for completeness.
+
 **Memory Category Classifications:**
 
-GPUs are grouped into memory categories based on their VRAM capacity for easier analysis:
+GPUs are grouped into memory categories based on their VRAM capacity for easier analysis. The classifications below reflect the GPU models included in filtered tables (marked with "(filtered)"):
 
 *<48GB Memory Category:*
-- **NVIDIA GeForce GTX 1080 Ti** (11GB)
-- **NVIDIA GeForce RTX 2080 Ti** (11GB)  
-- **Tesla P100-PCIE-16GB** (16GB)
-- **NVIDIA A30** (24GB)
-- **Quadro RTX 6000** (24GB)
+- **NVIDIA GeForce RTX 2080 Ti** (11GB)
 - **NVIDIA A100-SXM4-40GB** (40GB)
 
 *48GB Memory Category:*
-- **NVIDIA A40** (48GB)
 - **NVIDIA L40** (48GB)
 - **NVIDIA L40S** (48GB)
 
@@ -60,6 +66,8 @@ GPUs are grouped into memory categories based on their VRAM capacity for easier 
 
 *>80GB Memory Category:*
 - **NVIDIA H200** (141GB HBM3e)
+
+*Note: Additional GPU models exist in the cluster but are excluded from filtered tables for cleaner analysis. See "GPU Model Filtering" section above for details.*
 
 **Machine Classifications:**
 
