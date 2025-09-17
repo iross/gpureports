@@ -19,6 +19,11 @@ FILTERED_HOSTS_INFO = []
 # Global variable to cache hosted capacity list
 _CHTC_OWNED_HOSTS = None
 
+# Shared constants for GPU slot classification
+CLASS_ORDER = ["Priority-ResearcherOwned", "Priority-CHTCOwned", "Shared", "Backfill-ResearcherOwned", "Backfill-CHTCOwned", "Backfill-OpenCapacity"]
+UTILIZATION_TYPES = ["Priority", "Shared", "Backfill"]
+BACKFILL_SLOT_TYPES = ["Backfill-ResearcherOwned", "Backfill-CHTCOwned", "Backfill-OpenCapacity"]
+
 
 def load_chtc_owned_hosts(chtc_owned_file: str = "chtc_owned") -> set:
     """
@@ -648,3 +653,78 @@ def get_latest_timestamp_from_most_recent_db(base_dir: str = ".") -> Optional[da
         pass
     
     return None
+
+
+def analyze_backfill_utilization_by_day(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Analyze backfill usage patterns over time using consistent methodology.
+    
+    Args:
+        df: DataFrame with GPU state data
+        
+    Returns:
+        DataFrame with daily utilization statistics by slot type
+    """
+    # Create daily buckets for analysis
+    df['date'] = df['timestamp'].dt.date
+    df['15min_bucket'] = df['timestamp'].dt.floor('15min')
+    
+    usage_data = []
+    
+    # Analyze usage for each day and slot type
+    for slot_type in BACKFILL_SLOT_TYPES:
+        filtered_df = filter_df_enhanced(df, slot_type, "", "")
+        if filtered_df.empty:
+            continue
+        
+        daily_stats = []
+        
+        # Process each day separately to match usage_stats.py methodology
+        for date in sorted(df['date'].unique()):
+            day_df = filtered_df[filtered_df['date'] == date]
+            if day_df.empty:
+                continue
+                
+            # Get all 15-minute buckets for this day
+            day_buckets = day_df['15min_bucket'].unique()
+            
+            total_assigned = 0
+            total_claimed = 0
+            bucket_count = 0
+            
+            for bucket in day_buckets:
+                bucket_df = day_df[day_df['15min_bucket'] == bucket]
+                if bucket_df.empty:
+                    continue
+                
+                # Count unique GPUs in this bucket (all states)
+                unique_gpus = bucket_df['AssignedGPUs'].nunique()
+                
+                # Count unique GPUs that are claimed
+                claimed_gpus = bucket_df[bucket_df['State'] == 'Claimed']['AssignedGPUs'].nunique()
+                
+                total_assigned += unique_gpus
+                total_claimed += claimed_gpus
+                bucket_count += 1
+            
+            if bucket_count > 0:
+                # Calculate average GPUs per bucket for this day
+                avg_assigned = total_assigned / bucket_count
+                avg_claimed = total_claimed / bucket_count
+                utilization = (avg_claimed / avg_assigned * 100) if avg_assigned > 0 else 0
+                
+                daily_stats.append({
+                    'date': date,
+                    'slot_type': slot_type.replace('Backfill-', ''),
+                    'AssignedGPUs': avg_assigned,
+                    'State': avg_claimed,
+                    'utilization': utilization
+                })
+        
+        if daily_stats:
+            usage_data.extend(daily_stats)
+    
+    if not usage_data:
+        return pd.DataFrame()
+        
+    return pd.DataFrame(usage_data)

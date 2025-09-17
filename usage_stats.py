@@ -22,7 +22,8 @@ import functools
 from pathlib import Path
 # Removed jinja2 and pathlib imports - no longer needed for simple HTML tables
 
-CLASS_ORDER = ["Priority-ResearcherOwned", "Priority-CHTCOwned", "Shared", "Backfill-ResearcherOwned", "Backfill-CHTCOwned", "Backfill-OpenCapacity"]
+# Import shared constants from gpu_utils
+from gpu_utils import CLASS_ORDER, UTILIZATION_TYPES, BACKFILL_SLOT_TYPES
 
 # Global cache for preprocessed DataFrames and filtered datasets to avoid repeated work
 _dataframe_cache = {}
@@ -317,7 +318,7 @@ def calculate_allocation_usage(df: pd.DataFrame, host: str = "") -> dict:
 
     stats = {}
 
-    for utilization_type in ["Priority", "Shared", "Backfill"]:
+    for utilization_type in UTILIZATION_TYPES:
         interval_usage_percentages = []
         total_claimed_gpus = 0
         total_available_gpus = 0
@@ -574,7 +575,7 @@ def calculate_performance_usage(df: pd.DataFrame, host: str = "") -> dict:
     """
     stats = {}
 
-    for utilization_type in ["Priority", "Shared", "Backfill"]:
+    for utilization_type in UTILIZATION_TYPES:
         # Filter to only claimed GPUs with utilization data
         filtered_df = filter_df(df, utilization_type, "Claimed", host)
 
@@ -629,7 +630,7 @@ def calculate_time_series_usage(
         bucket_df = df[df[f'{bucket_minutes}min_bucket'] == bucket]
         bucket_stats = {'timestamp': bucket}
 
-        for utilization_type in ["Priority", "Shared", "Backfill"]:
+        for utilization_type in UTILIZATION_TYPES:
             # Count unique GPUs for this utilization type in this interval
             if utilization_type == "Priority":
                 claimed_gpus = len(filter_df(bucket_df, "Priority", "Claimed", host)['AssignedGPUs'].dropna().unique())
@@ -675,7 +676,7 @@ def calculate_allocation_usage_by_device(df: pd.DataFrame, host: str = "", inclu
 
     stats = {}
 
-    for utilization_type in ["Priority", "Shared", "Backfill"]:
+    for utilization_type in UTILIZATION_TYPES:
         stats[utilization_type] = {}
 
         for device_type in device_types:
@@ -878,7 +879,7 @@ def calculate_h200_user_breakdown(df: pd.DataFrame, host: str = "", hours_back: 
     actual_duration_hours = hours_back
 
     user_stats = {}
-    slot_types = ["Priority-ResearcherOwned", "Priority-CHTCOwned", "Shared", "Backfill-ResearcherOwned", "Backfill-CHTCOwned", "Backfill-OpenCapacity"]
+    slot_types = CLASS_ORDER
 
     # For each slot type, analyze user usage using averaging approach like device allocation
     for slot_type in slot_types:
@@ -993,7 +994,7 @@ def calculate_backfill_usage_by_user(df: pd.DataFrame, host: str = "", hours_bac
     user_stats = {}
 
     # Only focus on backfill slot types
-    backfill_slot_types = ["Backfill-ResearcherOwned", "Backfill-CHTCOwned", "Backfill-OpenCapacity"]
+    backfill_slot_types = BACKFILL_SLOT_TYPES
 
     # For each backfill slot type, analyze user usage
     for slot_type in backfill_slot_types:
@@ -1098,7 +1099,7 @@ def calculate_unique_cluster_totals_from_raw_data(df: pd.DataFrame, host: str = 
         all_available_gpus = set()
 
         # Collect from all three categories to ensure we don't miss backfill-only GPUs
-        for utilization_type in ["Priority", "Shared", "Backfill"]:
+        for utilization_type in UTILIZATION_TYPES:
             claimed_df = filter_df(bucket_df, utilization_type, "Claimed", host)
             unclaimed_df = filter_df(bucket_df, utilization_type, "Unclaimed", host)
 
@@ -2606,7 +2607,7 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
     grand_totals = {}
     if "device_stats" in results:
         device_stats = results["device_stats"]
-        class_order = ["Priority-ResearcherOwned", "Priority-CHTCOwned", "Shared", "Backfill-ResearcherOwned", "Backfill-CHTCOwned", "Backfill-OpenCapacity"]
+        class_order = CLASS_ORDER
 
         for class_name in class_order:
             device_data = device_stats.get(class_name, {})
@@ -2800,7 +2801,7 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
         allocation_stats = results["allocation_stats"]
 
         # Order with hosted capacity emphasis (enhanced format is now default)
-        class_order = ["Priority-ResearcherOwned", "Priority-CHTCOwned", "Shared", "Backfill-ResearcherOwned", "Backfill-CHTCOwned", "Backfill-OpenCapacity"]
+        class_order = CLASS_ORDER
 
 
         for class_name in class_order:
@@ -2814,7 +2815,7 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
         print(f"{'-'*70}")
 
         # Use the pre-calculated grand_totals and device_stats
-        class_order = ["Priority-ResearcherOwned", "Priority-CHTCOwned", "Shared", "Backfill-ResearcherOwned", "Backfill-CHTCOwned", "Backfill-OpenCapacity"]
+        class_order = CLASS_ORDER
 
         for class_name in class_order:
             device_data = device_stats.get(class_name, {})
