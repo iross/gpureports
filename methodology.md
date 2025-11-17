@@ -48,6 +48,24 @@
 
 *Note:* Tables marked with "(filtered)" exclude these GPU models from calculations. The raw allocation summary tables include all GPU types for completeness.
 
+**GPU Performance Tier Classifications:**
+
+Open Capacity GPUs are grouped into performance tiers to provide visibility into high-demand vs standard GPU utilization:
+
+*Flagship Tier:*
+- **NVIDIA H100 80GB HBM3** - Latest Hopper architecture, highest performance
+- **NVIDIA H200** - Latest generation with 141GB HBM3e memory
+- **NVIDIA A100-SXM4-80GB** - High-memory variant of A100
+
+*Standard Tier:*
+- **NVIDIA L40S** (48GB)
+- **NVIDIA L40** (48GB)
+- **NVIDIA GeForce RTX 2080 Ti** (11GB)
+- **NVIDIA A100-SXM4-40GB** (40GB)
+- All other GPU models not in Flagship tier
+
+*Note:* This classification groups the most capable, high-memory GPUs (H100, H200, A100 80GB) together as "Flagship" to track utilization of premium resources separately from standard GPUs.
+
 **Memory Category Classifications:**
 
 GPUs are grouped into memory categories based on their VRAM capacity for easier analysis. The classifications below reflect the GPU models included in filtered tables (marked with "(filtered)"):
