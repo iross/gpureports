@@ -1,0 +1,352 @@
+#!/usr/bin/env python3
+"""
+GPU Daily Hours Analysis Script
+
+Analyzes total GPU hours used per day across multiple database files.
+Calculates usage based on the 'Claimed' state of GPUs over time.
+"""
+
+import sqlite3
+import csv
+from datetime import datetime
+import argparse
+import sys
+from pathlib import Path
+from collections import defaultdict
+try:
+    import matplotlib.pyplot as plt
+    import matplotlib.dates as mdates
+    from datetime import datetime as dt
+    MATPLOTLIB_AVAILABLE = True
+except ImportError:
+    MATPLOTLIB_AVAILABLE = False
+
+def get_gpu_hours_from_db(db_path):
+    """Extract GPU usage data from a single database file."""
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+
+        # Query to get claimed GPUs with timestamps, ordered by timestamp
+        query = """
+        SELECT
+            timestamp,
+            COUNT(*) as claimed_gpus
+        FROM gpu_state
+        WHERE State = 'Claimed'
+        GROUP BY timestamp
+        ORDER BY timestamp
+        """
+
+        cursor.execute(query)
+        results = cursor.fetchall()
+        conn.close()
+
+        if not results:
+            print(f"Warning: No claimed GPU data found in {db_path}")
+            return {}
+
+        # Calculate actual GPU hours based on time intervals
+        daily_data = defaultdict(lambda: {'total_gpu_hours': 0, 'total_claimed_gpus': 0, 'measurements': 0})
+
+        for i in range(len(results)):
+            timestamp_str, claimed_gpus = results[i]
+            current_time = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+            date_str = current_time.date().isoformat()
+
+            # Calculate time interval for this measurement
+            if i < len(results) - 1:
+                # Use interval to next measurement
+                next_timestamp_str = results[i + 1][0]
+                next_time = datetime.fromisoformat(next_timestamp_str.replace('Z', '+00:00'))
+                interval_hours = (next_time - current_time).total_seconds() / 3600
+            else:
+                # For the last measurement, estimate interval from previous measurements
+                if i > 0:
+                    prev_timestamp_str = results[i - 1][0]
+                    prev_time = datetime.fromisoformat(prev_timestamp_str.replace('Z', '+00:00'))
+                    interval_hours = (current_time - prev_time).total_seconds() / 3600
+                else:
+                    # Single measurement - assume 15 minute interval
+                    interval_hours = 0.25
+
+            # GPU hours = number of claimed GPUs × time interval
+            gpu_hours = claimed_gpus * interval_hours
+            daily_data[date_str]['total_gpu_hours'] += gpu_hours
+            daily_data[date_str]['total_claimed_gpus'] += claimed_gpus
+            daily_data[date_str]['measurements'] += 1
+
+        # Convert to final format
+        data = {}
+        for date_str, metrics in daily_data.items():
+            avg_claimed_gpus = metrics['total_claimed_gpus'] / metrics['measurements']
+            data[date_str] = {
+                'claimed_gpus': avg_claimed_gpus,
+                'gpu_hours': metrics['total_gpu_hours']
+            }
+
+        return data
+
+    except Exception as e:
+        print(f"Error processing {db_path}: {e}")
+        return {}
+
+def analyze_gpu_usage(db_files):
+    """Analyze GPU usage across multiple database files."""
+    all_data = defaultdict(lambda: {'claimed_gpus': 0, 'gpu_hours': 0, 'db_count': 0})
+
+    for db_file in db_files:
+        if not Path(db_file).exists():
+            print(f"Warning: Database file {db_file} not found")
+            continue
+
+        print(f"Processing {db_file}...")
+        data = get_gpu_hours_from_db(db_file)
+
+        for date_str, metrics in data.items():
+            # Sum up data from multiple databases
+            all_data[date_str]['claimed_gpus'] += metrics['claimed_gpus']
+            all_data[date_str]['gpu_hours'] += metrics['gpu_hours']
+            all_data[date_str]['db_count'] += 1
+
+    if not all_data:
+        print("No data found in any database files")
+        return None
+
+    # Convert to sorted list of tuples
+    daily_summary = []
+    for date_str in sorted(all_data.keys()):
+        metrics = all_data[date_str]
+        daily_summary.append((
+            date_str,
+            metrics['claimed_gpus'],
+            metrics['gpu_hours']
+        ))
+
+    return daily_summary
+
+def calculate_monthly_stats(daily_data):
+    """Calculate monthly statistics from daily data."""
+    monthly = defaultdict(lambda: {'total_hours': 0, 'days': 0, 'hours_list': []})
+
+    for date_str, claimed_gpus, gpu_hours in daily_data:
+        month = date_str[:7]  # Extract YYYY-MM
+        monthly[month]['total_hours'] += gpu_hours
+        monthly[month]['days'] += 1
+        monthly[month]['hours_list'].append(gpu_hours)
+
+    # Calculate averages
+    for month in monthly:
+        hours_list = monthly[month]['hours_list']
+        monthly[month]['avg_hours'] = monthly[month]['total_hours'] / monthly[month]['days']
+
+    return dict(monthly)
+
+def print_summary_stats(daily_data):
+    """Print summary statistics."""
+    print("\n" + "="*60)
+    print("GPU USAGE SUMMARY STATISTICS")
+    print("="*60)
+
+    if not daily_data:
+        print("No data to analyze")
+        return
+
+    dates = [row[0] for row in daily_data]
+    gpu_hours = [row[2] for row in daily_data]
+
+    print(f"Date Range: {min(dates)} to {max(dates)}")
+    print(f"Total Days: {len(daily_data)}")
+    print(f"Total GPU Hours: {sum(gpu_hours):,.0f}")
+    print(f"Average GPU Hours per Day: {sum(gpu_hours) / len(gpu_hours):.1f}")
+    print(f"Peak GPU Hours in a Day: {max(gpu_hours):.0f}")
+    print(f"Min GPU Hours in a Day: {min(gpu_hours):.0f}")
+
+    # Monthly breakdown
+    monthly_stats = calculate_monthly_stats(daily_data)
+
+    print("\nMONTHLY BREAKDOWN:")
+    print("-" * 50)
+    for month in sorted(monthly_stats.keys()):
+        stats = monthly_stats[month]
+        print(f"{month}: {stats['total_hours']:,.0f} total hours "
+              f"({stats['avg_hours']:.1f} avg/day, {stats['days']} days)")
+
+def create_plots(daily_data, output_dir=None):
+    """Create various plots to visualize GPU usage data."""
+    if not MATPLOTLIB_AVAILABLE:
+        print("Error: matplotlib is required for plotting. Install it with: pip install matplotlib")
+        return
+
+    if not daily_data:
+        print("No data available for plotting")
+        return
+
+    # Convert data for plotting
+    dates = [dt.strptime(row[0], '%Y-%m-%d') for row in daily_data]
+    gpu_hours = [row[2] for row in daily_data]
+    claimed_gpus = [row[1] for row in daily_data]
+
+    # Create figure with subplots
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
+    fig.suptitle('GPU Usage Analysis', fontsize=16, fontweight='bold')
+
+    # Plot 1: Daily GPU Hours over time
+    ax1.plot(dates, gpu_hours, 'b-', linewidth=2, marker='o', markersize=4)
+    ax1.set_title('Daily GPU Hours Over Time')
+    ax1.set_xlabel('Date')
+    ax1.set_ylabel('GPU Hours')
+    ax1.grid(True, alpha=0.3)
+    ax1.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+    ax1.xaxis.set_major_locator(mdates.WeekdayLocator(interval=2))
+    plt.setp(ax1.xaxis.get_majorticklabels(), rotation=45)
+
+    # Plot 2: Average Claimed GPUs over time
+    ax2.plot(dates, claimed_gpus, 'g-', linewidth=2, marker='s', markersize=4)
+    ax2.set_title('Average Claimed GPUs Over Time')
+    ax2.set_xlabel('Date')
+    ax2.set_ylabel('Number of GPUs')
+    ax2.grid(True, alpha=0.3)
+    ax2.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+    ax2.xaxis.set_major_locator(mdates.WeekdayLocator(interval=2))
+    plt.setp(ax2.xaxis.get_majorticklabels(), rotation=45)
+
+    # Plot 3: GPU Hours distribution histogram
+    ax3.hist(gpu_hours, bins=20, color='skyblue', alpha=0.7, edgecolor='black')
+    ax3.set_title('Distribution of Daily GPU Hours')
+    ax3.set_xlabel('GPU Hours')
+    ax3.set_ylabel('Frequency')
+    ax3.grid(True, alpha=0.3)
+
+    # Plot 4: Monthly totals
+    monthly_stats = calculate_monthly_stats(daily_data)
+    months = sorted(monthly_stats.keys())
+    monthly_totals = [monthly_stats[month]['total_hours'] for month in months]
+
+    ax4.bar(months, monthly_totals, color='orange', alpha=0.7, edgecolor='black')
+    ax4.set_title('Monthly GPU Hours Totals')
+    ax4.set_xlabel('Month')
+    ax4.set_ylabel('Total GPU Hours')
+    ax4.grid(True, alpha=0.3)
+    plt.setp(ax4.xaxis.get_majorticklabels(), rotation=45)
+
+    plt.tight_layout()
+
+    # Save plot if output directory is specified
+    if output_dir:
+        output_path = Path(output_dir) / 'gpu_usage_analysis.png'
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        print(f"Plot saved to: {output_path}")
+
+    plt.show()
+
+def create_trend_plot(daily_data, output_dir=None):
+    """Create a detailed trend plot with moving average."""
+    if not MATPLOTLIB_AVAILABLE:
+        print("Error: matplotlib is required for plotting. Install it with: pip install matplotlib")
+        return
+
+    if not daily_data:
+        print("No data available for plotting")
+        return
+
+    dates = [dt.strptime(row[0], '%Y-%m-%d') for row in daily_data]
+    gpu_hours = [row[2] for row in daily_data]
+
+    # Calculate 7-day moving average
+    window_size = 7
+    moving_avg = []
+    for i in range(len(gpu_hours)):
+        start_idx = max(0, i - window_size + 1)
+        avg = sum(gpu_hours[start_idx:i+1]) / (i - start_idx + 1)
+        moving_avg.append(avg)
+
+    plt.figure(figsize=(12, 6))
+    plt.plot(dates, gpu_hours, 'b-', alpha=0.6, linewidth=1, label='Daily GPU Hours')
+    plt.plot(dates, moving_avg, 'r-', linewidth=2, label='7-day Moving Average')
+
+    plt.title('GPU Usage Trend Analysis', fontsize=14, fontweight='bold')
+    plt.xlabel('Date')
+    plt.ylabel('GPU Hours')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+    plt.gca().xaxis.set_major_locator(mdates.WeekdayLocator(interval=2))
+    plt.xticks(rotation=45)
+
+    plt.tight_layout()
+
+    # Save plot if output directory is specified
+    if output_dir:
+        output_path = Path(output_dir) / 'gpu_usage_trend.png'
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        print(f"Trend plot saved to: {output_path}")
+
+    plt.show()
+
+def main():
+    parser = argparse.ArgumentParser(description='Analyze daily GPU hours from multiple database files')
+    parser.add_argument('--databases', '-d', nargs='+',
+                       default=['gpu_state_2025-06.db', 'gpu_state_2025-07.db',
+                               'gpu_state_2025-08.db', 'gpu_state_2025-09.db'],
+                       help='Database files to analyze')
+    parser.add_argument('--output', '-o', help='Output CSV file path')
+    parser.add_argument('--detailed', action='store_true',
+                       help='Show detailed daily breakdown')
+    parser.add_argument('--plot', action='store_true',
+                       help='Generate visualization plots')
+    parser.add_argument('--trend', action='store_true',
+                       help='Generate trend analysis plot with moving average')
+    parser.add_argument('--plot-output', help='Directory to save plot images')
+
+    args = parser.parse_args()
+
+    print("GPU Daily Hours Analysis")
+    print("=" * 40)
+    print(f"Analyzing databases: {', '.join(args.databases)}")
+
+    # Analyze the data
+    daily_summary = analyze_gpu_usage(args.databases)
+    if daily_summary is None:
+        sys.exit(1)
+
+    # Print summary statistics
+    print_summary_stats(daily_summary)
+
+    # Show detailed breakdown if requested
+    if args.detailed:
+        print("\nDETAILED DAILY BREAKDOWN:")
+        print("-" * 60)
+        print(f"{'Date':<12} {'Avg GPUs':<10} {'GPU Hours':<10}")
+        print("-" * 60)
+        for date_str, claimed_gpus, gpu_hours in daily_summary:
+            print(f"{date_str:<12} {claimed_gpus:<10.1f} {gpu_hours:<10.0f}")
+
+    # Save to CSV if requested
+    if args.output:
+        with open(args.output, 'w', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(['date', 'claimed_gpus', 'gpu_hours'])
+            for date_str, claimed_gpus, gpu_hours in daily_summary:
+                writer.writerow([date_str, claimed_gpus, gpu_hours])
+        print(f"\nDetailed results saved to: {args.output}")
+
+    # Generate plots if requested
+    if args.plot:
+        try:
+            create_plots(daily_summary, args.plot_output)
+        except ImportError:
+            print("Error: matplotlib is required for plotting. Install it with: pip install matplotlib")
+        except Exception as e:
+            print(f"Error generating plots: {e}")
+
+    if args.trend:
+        try:
+            create_trend_plot(daily_summary, args.plot_output)
+        except ImportError:
+            print("Error: matplotlib is required for plotting. Install it with: pip install matplotlib")
+        except Exception as e:
+            print(f"Error generating trend plot: {e}")
+
+if __name__ == "__main__":
+    main()

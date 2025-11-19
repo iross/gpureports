@@ -7,7 +7,10 @@ website_generator/gpu_website/
 es_credentials.json
 logs/
 
-
+# Test outputs and temporary files
+*.html
+test_*/
+*_output/
 full_test_website/
 gpu-backfill-evictions/
 .DS_STORE
