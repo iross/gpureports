@@ -1,3 +1,4 @@
-voyles2000: Prioritized via hardcoded start expression, not PrioritizedProjects
-gpulab2003: Interactive slots only.
-gpulab2004: Interactive slots only.
+excluded_hosts:
+  voyles2000: Prioritized via hardcoded start expression, not PrioritizedProjects
+  gpulab2003: Interactive slots only.
+  gpulab2004: Interactive slots only.
