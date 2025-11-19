@@ -8,9 +8,10 @@ Usage:
     python run_tests.py -k test_filter     # Run only filter tests
 """
 
+import os
 import subprocess
 import sys
-import os
+
 
 def main():
     """Run the test suite."""
@@ -33,6 +34,7 @@ def main():
     except Exception as e:
         print(f"Error running tests: {e}")
         return 1
+
 
 if __name__ == "__main__":
     sys.exit(main())

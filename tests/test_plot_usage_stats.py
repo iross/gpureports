@@ -6,25 +6,26 @@ Tests the plotting functionality of plot_usage_stats.py including
 plot generation and data visualization functions.
 """
 
-import pytest
-import pandas as pd
-import matplotlib.pyplot as plt
-import tempfile
 import os
 import sys
+import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
+import matplotlib.pyplot as plt
+import pandas as pd
+import pytest
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'scripts'))
+sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
 
 # Import the functions we want to test
 from plot_usage_stats import (
-    create_usage_timeline_plot,
-    create_gpu_count_plot,
     create_device_usage_heatmap,
+    create_gpu_count_plot,
+    create_summary_dashboard,
+    create_usage_timeline_plot,
     create_utilization_distribution_plot,
-    create_summary_dashboard
 )
 
 
@@ -32,21 +33,23 @@ from plot_usage_stats import (
 def sample_timeseries_data():
     """Create sample time series data for testing."""
     data = []
-    timestamps = pd.date_range('2025-01-01 10:00:00', periods=8, freq='15min')
+    timestamps = pd.date_range("2025-01-01 10:00:00", periods=8, freq="15min")
 
     for i, ts in enumerate(timestamps):
-        data.append({
-            'timestamp': ts,
-            'priority_claimed': 10 + i,
-            'priority_total': 20 + i,
-            'priority_usage_percent': ((10 + i) / (20 + i)) * 100,
-            'shared_claimed': 5 + i,
-            'shared_total': 15 + i,
-            'shared_usage_percent': ((5 + i) / (15 + i)) * 100,
-            'backfill_claimed': 2 + i,
-            'backfill_total': 8 + i,
-            'backfill_usage_percent': ((2 + i) / (8 + i)) * 100
-        })
+        data.append(
+            {
+                "timestamp": ts,
+                "priority_claimed": 10 + i,
+                "priority_total": 20 + i,
+                "priority_usage_percent": ((10 + i) / (20 + i)) * 100,
+                "shared_claimed": 5 + i,
+                "shared_total": 15 + i,
+                "shared_usage_percent": ((5 + i) / (15 + i)) * 100,
+                "backfill_claimed": 2 + i,
+                "backfill_total": 8 + i,
+                "backfill_usage_percent": ((2 + i) / (8 + i)) * 100,
+            }
+        )
 
     return pd.DataFrame(data)
 
@@ -55,46 +58,54 @@ def sample_timeseries_data():
 def sample_raw_gpu_data():
     """Create sample raw GPU data for testing."""
     data = []
-    timestamps = pd.date_range('2025-01-01 10:00:00', periods=4, freq='15min')
+    timestamps = pd.date_range("2025-01-01 10:00:00", periods=4, freq="15min")
 
     for ts in timestamps:
         # Priority slots
-        data.append({
-            'Name': 'slot1@host1.domain.com',
-            'AssignedGPUs': 'GPU-001',
-            'State': 'Claimed',
-            'GPUs_DeviceName': 'Tesla V100-SXM2-32GB',
-            'PrioritizedProjects': 'project1',
-            'timestamp': ts
-        })
-        data.append({
-            'Name': 'slot2@host1.domain.com',
-            'AssignedGPUs': 'GPU-002',
-            'State': 'Unclaimed',
-            'GPUs_DeviceName': 'Tesla A100-SXM4-40GB',
-            'PrioritizedProjects': 'project1',
-            'timestamp': ts
-        })
+        data.append(
+            {
+                "Name": "slot1@host1.domain.com",
+                "AssignedGPUs": "GPU-001",
+                "State": "Claimed",
+                "GPUs_DeviceName": "Tesla V100-SXM2-32GB",
+                "PrioritizedProjects": "project1",
+                "timestamp": ts,
+            }
+        )
+        data.append(
+            {
+                "Name": "slot2@host1.domain.com",
+                "AssignedGPUs": "GPU-002",
+                "State": "Unclaimed",
+                "GPUs_DeviceName": "Tesla A100-SXM4-40GB",
+                "PrioritizedProjects": "project1",
+                "timestamp": ts,
+            }
+        )
 
         # Shared slots
-        data.append({
-            'Name': 'slot3@host2.domain.com',
-            'AssignedGPUs': 'GPU-003',
-            'State': 'Claimed',
-            'GPUs_DeviceName': 'Tesla A100-SXM4-40GB',
-            'PrioritizedProjects': '',
-            'timestamp': ts
-        })
+        data.append(
+            {
+                "Name": "slot3@host2.domain.com",
+                "AssignedGPUs": "GPU-003",
+                "State": "Claimed",
+                "GPUs_DeviceName": "Tesla A100-SXM4-40GB",
+                "PrioritizedProjects": "",
+                "timestamp": ts,
+            }
+        )
 
         # Backfill slots
-        data.append({
-            'Name': 'slot1_backfill@host1.domain.com',
-            'AssignedGPUs': 'GPU-004',
-            'State': 'Claimed',
-            'GPUs_DeviceName': 'Tesla V100-SXM2-32GB',
-            'PrioritizedProjects': '',
-            'timestamp': ts
-        })
+        data.append(
+            {
+                "Name": "slot1_backfill@host1.domain.com",
+                "AssignedGPUs": "GPU-004",
+                "State": "Claimed",
+                "GPUs_DeviceName": "Tesla V100-SXM2-32GB",
+                "PrioritizedProjects": "",
+                "timestamp": ts,
+            }
+        )
 
     return pd.DataFrame(data)
 
@@ -107,11 +118,7 @@ class TestPlotCreation:
         with tempfile.TemporaryDirectory() as tmpdir:
             save_path = Path(tmpdir) / "timeline_test.png"
 
-            fig, ax = create_usage_timeline_plot(
-                sample_timeseries_data,
-                "Test Timeline",
-                str(save_path)
-            )
+            fig, ax = create_usage_timeline_plot(sample_timeseries_data, "Test Timeline", str(save_path))
 
             # Check that plot was created
             assert fig is not None
@@ -134,11 +141,7 @@ class TestPlotCreation:
         with tempfile.TemporaryDirectory() as tmpdir:
             save_path = Path(tmpdir) / "counts_test.png"
 
-            fig, axes = create_gpu_count_plot(
-                sample_timeseries_data,
-                "Test GPU Counts",
-                str(save_path)
-            )
+            fig, axes = create_gpu_count_plot(sample_timeseries_data, "Test GPU Counts", str(save_path))
 
             # Check that plot was created
             assert fig is not None
@@ -147,9 +150,9 @@ class TestPlotCreation:
 
             # Check subplot properties
             for i, ax in enumerate(axes):
-                expected_titles = ['Priority GPU Usage', 'Shared GPU Usage', 'Backfill GPU Usage']
+                expected_titles = ["Priority GPU Usage", "Shared GPU Usage", "Backfill GPU Usage"]
                 assert ax.get_title() == expected_titles[i]
-                assert 'GPU Count' in ax.get_ylabel()
+                assert "GPU Count" in ax.get_ylabel()
 
             plt.close(fig)
 
@@ -158,11 +161,7 @@ class TestPlotCreation:
         with tempfile.TemporaryDirectory() as tmpdir:
             save_path = Path(tmpdir) / "heatmap_test.png"
 
-            fig, ax = create_device_usage_heatmap(
-                sample_raw_gpu_data,
-                "Test Heatmap",
-                str(save_path)
-            )
+            fig, ax = create_device_usage_heatmap(sample_raw_gpu_data, "Test Heatmap", str(save_path))
 
             # Check that plot was created
             assert fig is not None
@@ -181,11 +180,7 @@ class TestPlotCreation:
         with tempfile.TemporaryDirectory() as tmpdir:
             save_path = Path(tmpdir) / "distribution_test.png"
 
-            fig, ax = create_utilization_distribution_plot(
-                sample_timeseries_data,
-                "Test Distribution",
-                str(save_path)
-            )
+            fig, ax = create_utilization_distribution_plot(sample_timeseries_data, "Test Distribution", str(save_path))
 
             # Check that plot was created
             assert fig is not None
@@ -204,12 +199,7 @@ class TestPlotCreation:
         with tempfile.TemporaryDirectory() as tmpdir:
             save_path = Path(tmpdir) / "dashboard_test.png"
 
-            fig = create_summary_dashboard(
-                sample_raw_gpu_data,
-                sample_timeseries_data,
-                "Test Period",
-                str(save_path)
-            )
+            fig = create_summary_dashboard(sample_raw_gpu_data, sample_timeseries_data, "Test Period", str(save_path))
 
             # Check that plot was created
             assert fig is not None
@@ -227,8 +217,9 @@ class TestPlotDataHandling:
 
     def test_empty_timeseries_data(self):
         """Test handling of empty time series data."""
-        empty_df = pd.DataFrame(columns=['timestamp', 'priority_usage_percent',
-                                        'shared_usage_percent', 'backfill_usage_percent'])
+        empty_df = pd.DataFrame(
+            columns=["timestamp", "priority_usage_percent", "shared_usage_percent", "backfill_usage_percent"]
+        )
 
         fig, ax = create_usage_timeline_plot(empty_df, "Empty Data Test")
 
@@ -248,7 +239,7 @@ class TestPlotDataHandling:
     def test_missing_columns(self, sample_timeseries_data):
         """Test handling of missing columns in time series data."""
         # Remove some columns
-        incomplete_df = sample_timeseries_data.drop(columns=['shared_usage_percent', 'shared_claimed', 'shared_total'])
+        incomplete_df = sample_timeseries_data.drop(columns=["shared_usage_percent", "shared_claimed", "shared_total"])
 
         fig, ax = create_usage_timeline_plot(incomplete_df, "Missing Columns Test")
 
@@ -264,12 +255,13 @@ class TestPlotDataHandling:
 
     def test_device_heatmap_no_data(self):
         """Test device heatmap with no device data."""
-        empty_df = pd.DataFrame(columns=['Name', 'AssignedGPUs', 'State',
-                                        'GPUs_DeviceName', 'PrioritizedProjects', 'timestamp'])
+        empty_df = pd.DataFrame(
+            columns=["Name", "AssignedGPUs", "State", "GPUs_DeviceName", "PrioritizedProjects", "timestamp"]
+        )
 
         # Mock the calculate_allocation_usage_by_device function to return empty data
-        with patch('plot_usage_stats.calculate_allocation_usage_by_device') as mock_calc:
-            mock_calc.return_value = {'Priority': {}, 'Shared': {}, 'Backfill': {}}
+        with patch("plot_usage_stats.calculate_allocation_usage_by_device") as mock_calc:
+            mock_calc.return_value = {"Priority": {}, "Shared": {}, "Backfill": {}}
 
             result = create_device_usage_heatmap(empty_df, "No Data Test")
 
@@ -351,10 +343,9 @@ class TestErrorHandling:
     def test_invalid_dataframe_structure(self):
         """Test handling of DataFrames with wrong structure."""
         # Create DataFrame with wrong column names
-        wrong_df = pd.DataFrame({
-            'wrong_timestamp': pd.date_range('2025-01-01', periods=5, freq='15min'),
-            'wrong_data': [1, 2, 3, 4, 5]
-        })
+        wrong_df = pd.DataFrame(
+            {"wrong_timestamp": pd.date_range("2025-01-01", periods=5, freq="15min"), "wrong_data": [1, 2, 3, 4, 5]}
+        )
 
         # Should handle gracefully
         fig, ax = create_usage_timeline_plot(wrong_df, "Wrong Structure Test")
@@ -372,7 +363,7 @@ class TestErrorHandling:
         """Test handling of data with NaN values."""
         # Introduce some NaN values
         nan_df = sample_timeseries_data.copy()
-        nan_df.loc[2:4, 'priority_usage_percent'] = float('nan')
+        nan_df.loc[2:4, "priority_usage_percent"] = float("nan")
 
         fig, ax = create_usage_timeline_plot(nan_df, "NaN Test")
 

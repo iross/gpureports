@@ -1,7 +1,7 @@
 def calculate_linear_trend(dates, values):
     """Calculate linear trend statistics for the data."""
     # Convert dates to ordinal numbers for regression
-    date_nums = [datetime.strptime(date, '%Y-%m-%d').toordinal() for date in dates]
+    date_nums = [datetime.strptime(date, "%Y-%m-%d").toordinal() for date in dates]
 
     # Pure Python implementation (works without numpy/scipy)
     n = len(dates)
@@ -31,7 +31,7 @@ def calculate_linear_trend(dates, values):
     else:
         r_value = numerator / (x_var * y_var) ** 0.5
 
-    r_squared = r_value ** 2
+    r_squared = r_value**2
     trend_line = [slope * x + intercept for x in date_nums]
 
     # Set p_value and std_err to None for pure Python
@@ -44,15 +44,15 @@ def calculate_linear_trend(dates, values):
     trend_per_year = slope * 365.25
 
     return {
-        'slope': slope,
-        'intercept': intercept,
-        'r_squared': r_squared,
-        'r_value': r_value,
-        'p_value': p_value,
-        'std_err': std_err,
-        'trend_line': trend_line,
-        'trend_per_day': trend_per_day,
-        'trend_per_month': trend_per_month,
-        'trend_per_year': trend_per_year,
-        'date_nums': date_nums
+        "slope": slope,
+        "intercept": intercept,
+        "r_squared": r_squared,
+        "r_value": r_value,
+        "p_value": p_value,
+        "std_err": std_err,
+        "trend_line": trend_line,
+        "trend_per_day": trend_per_day,
+        "trend_per_month": trend_per_month,
+        "trend_per_year": trend_per_year,
+        "date_nums": date_nums,
     }

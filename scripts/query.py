@@ -1,7 +1,7 @@
 from datetime import datetime
+
 from elasticsearch import Elasticsearch
 from elasticsearch.helpers import scan
-
 
 INDEX = "chtc-schedd-*"
 FROM = datetime(2024, 10, 20)
@@ -15,7 +15,7 @@ FIELDS = [
     "JobStatus",
     "LastRemoteHost",
     "Owner",
-    "ProjectName"
+    "ProjectName",
 ]
 
 
@@ -29,12 +29,14 @@ def get_query():
             "query": {
                 "bool": {
                     "filter": [
-                        {"range": {
-                            "RecordTime": {
-                                "gte": int(FROM.timestamp()),
-                                "lt": int(TO.timestamp()),
-                            },
-                        }},
+                        {
+                            "range": {
+                                "RecordTime": {
+                                    "gte": int(FROM.timestamp()),
+                                    "lt": int(TO.timestamp()),
+                                },
+                            }
+                        },
                     ],
                 },
             },
@@ -46,7 +48,7 @@ def get_query():
 def print_csv(docs):
     print(",".join(FIELDS))
     for doc in docs:
-        print(",".join([str(doc.get(field,"UNKNOWN")) for field in FIELDS]))
+        print(",".join([str(doc.get(field, "UNKNOWN")) for field in FIELDS]))
 
 
 def main():
@@ -60,4 +62,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
