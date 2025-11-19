@@ -16,13 +16,13 @@ def main():
     """Run the test suite."""
     # Make sure we're in the right directory
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
-    
-    # Build the pytest command
-    cmd = [sys.executable, "-m", "pytest", "test_usage_stats.py"]
-    
+
+    # Build the pytest command - run all tests in tests/ directory
+    cmd = [sys.executable, "-m", "pytest", "tests/"]
+
     # Add any command line arguments passed to this script
     cmd.extend(sys.argv[1:])
-    
+
     # Run the tests
     try:
         result = subprocess.run(cmd, check=False)
