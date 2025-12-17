@@ -628,6 +628,31 @@ def count_glidein(df: pd.DataFrame, state: str = "", host: str = "") -> int:
     return df.shape[0]
 
 
+def get_gpu_performance_tier(device_name: str) -> str:
+    """
+    Classify GPU device into performance tier.
+
+    Args:
+        device_name: Full GPU device name (e.g., 'NVIDIA H100 80GB HBM3')
+
+    Returns:
+        Performance tier: 'Flagship' or 'Standard'
+    """
+    # Flagship tier: H100, H200, and 80GB A100
+    flagship_patterns = [
+        "H100",
+        "H200",
+        "A100-SXM4-80GB",
+        "A100 80GB",
+    ]
+
+    for pattern in flagship_patterns:
+        if pattern in device_name:
+            return "Flagship"
+
+    return "Standard"
+
+
 def get_display_name(class_name: str) -> str:
     """Convert internal class names to user-friendly display names."""
     display_names = {
@@ -642,6 +667,9 @@ def get_display_name(class_name: str) -> str:
         "CHTC Owned": "CHTC Owned",
         "Researcher Owned": "Researcher Owned",
         "Open Capacity": "Open Capacity",
+        # New tier-based display names for Open Capacity breakdown
+        "Open Capacity (Flagship)": "Open Capacity (Flagship)",
+        "Open Capacity (Standard)": "Open Capacity (Standard)",
     }
     return display_names.get(class_name, class_name)
 
