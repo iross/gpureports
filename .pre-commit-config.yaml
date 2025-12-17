@@ -1,0 +1,22 @@
+# Pre-commit hooks configuration
+repos:
+  # Ruff linting and formatting
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.4
+    hooks:
+      # Run the linter
+      - id: ruff
+        args: [--fix, --ignore, W293, --ignore, W291]
+      # Run the formatter
+      - id: ruff-format
+
+  # Run tests before committing
+  - repo: local
+    hooks:
+      - id: pytest
+        name: pytest
+        entry: uv run run_tests.py
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]

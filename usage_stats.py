@@ -7,27 +7,37 @@ over a specified time range. It provides both allocation-based usage (percentage
 GPUs in use) and performance-based usage (actual GPU utilization metrics).
 """
 
-import pandas as pd
 import datetime
-import typer
-import sqlite3
-import json
-import yaml
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from typing import Optional, Dict
 import os
-import functools
+import smtplib
+import sqlite3
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from pathlib import Path
-# Removed jinja2 and pathlib imports - no longer needed for simple HTML tables
 
-# Import shared constants from gpu_utils
-from gpu_utils import CLASS_ORDER, UTILIZATION_TYPES, BACKFILL_SLOT_TYPES
+import pandas as pd
+import typer
+
+# Import shared utilities
+import gpu_utils
+from device_name_mappings import get_human_readable_device_name, get_memory_category_from_mb
+from gpu_utils import (
+    BACKFILL_SLOT_TYPES,
+    CLASS_ORDER,
+    UTILIZATION_TYPES,
+    filter_df,
+    filter_df_enhanced,
+    get_display_name,
+    get_gpu_performance_tier,
+    get_latest_timestamp_from_most_recent_db,
+    get_required_databases,
+    load_host_exclusions,
+)
 
 # Global cache for preprocessed DataFrames and filtered datasets to avoid repeated work
 _dataframe_cache = {}
 _filtered_cache = {}
+
 
 def get_preprocessed_dataframe(df: pd.DataFrame, cache_key: str = None) -> pd.DataFrame:
     """
@@ -44,10 +54,12 @@ def get_preprocessed_dataframe(df: pd.DataFrame, cache_key: str = None) -> pd.Da
     # If no cache_key provided, process without caching
     if not cache_key:
         processed_df = df.copy()
-        if 'timestamp' not in processed_df.columns or not pd.api.types.is_datetime64_any_dtype(processed_df['timestamp']):
-            processed_df['timestamp'] = pd.to_datetime(processed_df['timestamp'])
-        if '15min_bucket' not in processed_df.columns:
-            processed_df['15min_bucket'] = processed_df['timestamp'].dt.floor('15min')
+        if "timestamp" not in processed_df.columns or not pd.api.types.is_datetime64_any_dtype(
+            processed_df["timestamp"]
+        ):
+            processed_df["timestamp"] = pd.to_datetime(processed_df["timestamp"])
+        if "15min_bucket" not in processed_df.columns:
+            processed_df["15min_bucket"] = processed_df["timestamp"].dt.floor("15min")
         return processed_df
 
     # Check cache first
@@ -58,16 +70,17 @@ def get_preprocessed_dataframe(df: pd.DataFrame, cache_key: str = None) -> pd.Da
     processed_df = df.copy()
 
     # Only convert timestamp if not already datetime
-    if 'timestamp' not in processed_df.columns or not pd.api.types.is_datetime64_any_dtype(processed_df['timestamp']):
-        processed_df['timestamp'] = pd.to_datetime(processed_df['timestamp'])
+    if "timestamp" not in processed_df.columns or not pd.api.types.is_datetime64_any_dtype(processed_df["timestamp"]):
+        processed_df["timestamp"] = pd.to_datetime(processed_df["timestamp"])
 
     # Only add 15min_bucket if not already present
-    if '15min_bucket' not in processed_df.columns:
-        processed_df['15min_bucket'] = processed_df['timestamp'].dt.floor('15min')
+    if "15min_bucket" not in processed_df.columns:
+        processed_df["15min_bucket"] = processed_df["timestamp"].dt.floor("15min")
 
     # Cache the result
     _dataframe_cache[cache_key] = processed_df
     return processed_df
+
 
 def get_cached_filtered_dataframe(df: pd.DataFrame, filter_func, filter_args, cache_key: str = None) -> pd.DataFrame:
     """
@@ -94,29 +107,16 @@ def get_cached_filtered_dataframe(df: pd.DataFrame, filter_func, filter_args, ca
 
     return filtered_df
 
+
 def clear_dataframe_cache():
     """Clear all DataFrame caches to free memory."""
     global _dataframe_cache, _filtered_cache
     _dataframe_cache.clear()
     _filtered_cache.clear()
 
-# Import shared utilities
-from gpu_utils import (
-    filter_df, filter_df_enhanced, count_backfill, count_shared, count_prioritized,
-    count_backfill_researcher_owned, count_backfill_chtc_owned, count_glidein,
-    load_host_exclusions, get_display_name, get_required_databases,
-    get_latest_timestamp_from_most_recent_db, get_machines_by_category,
-    get_gpu_performance_tier,
-    HOST_EXCLUSIONS, FILTERED_HOSTS_INFO
-)
-import gpu_utils
-from device_name_mappings import get_human_readable_device_name, get_memory_category_from_mb
-
 
 def get_time_filtered_data(
-    db_path: str,
-    hours_back: int = 24,
-    end_time: Optional[datetime.datetime] = None
+    db_path: str, hours_back: int = 24, end_time: datetime.datetime | None = None
 ) -> pd.DataFrame:
     """
     Get GPU state data filtered by time range.
@@ -134,7 +134,7 @@ def get_time_filtered_data(
 
     # Get base directory from the provided db_path
     db_path_obj = Path(db_path)
-    base_dir = str(db_path_obj.parent) if db_path_obj.parent != Path('.') else "."
+    base_dir = str(db_path_obj.parent) if db_path_obj.parent != Path(".") else "."
 
     # If end_time is not provided, use the latest timestamp from the most recent database
     if end_time is None:
@@ -147,8 +147,8 @@ def get_time_filtered_data(
                 conn = sqlite3.connect(db_path)
                 df_temp = pd.read_sql_query("SELECT MAX(timestamp) as max_time FROM gpu_state", conn)
                 conn.close()
-                if len(df_temp) > 0 and df_temp['max_time'].iloc[0] is not None:
-                    end_time = pd.to_datetime(df_temp['max_time'].iloc[0])
+                if len(df_temp) > 0 and df_temp["max_time"].iloc[0] is not None:
+                    end_time = pd.to_datetime(df_temp["max_time"].iloc[0])
                 else:
                     end_time = datetime.datetime.now()
             except Exception:
@@ -175,13 +175,12 @@ def get_time_filtered_data(
             df = pd.read_sql_query(
                 optimized_query,
                 conn,
-                params=[start_time.strftime('%Y-%m-%d %H:%M:%S.%f'),
-                       end_time.strftime('%Y-%m-%d %H:%M:%S.%f')]
+                params=[start_time.strftime("%Y-%m-%d %H:%M:%S.%f"), end_time.strftime("%Y-%m-%d %H:%M:%S.%f")],
             )
             conn.close()
 
             if len(df) > 0:
-                df['timestamp'] = pd.to_datetime(df['timestamp'])
+                df["timestamp"] = pd.to_datetime(df["timestamp"])
             return df
         except Exception as e:
             # If single-db approach fails, fall back to multi-db approach
@@ -200,16 +199,18 @@ def get_time_filtered_data(
             WHERE timestamp BETWEEN ? AND ?
             ORDER BY timestamp
             """
-            df = pd.read_sql_query(query, conn, params=[start_time.strftime('%Y-%m-%d %H:%M:%S.%f'), end_time.strftime('%Y-%m-%d %H:%M:%S.%f')])
+            df = pd.read_sql_query(
+                query,
+                conn,
+                params=[start_time.strftime("%Y-%m-%d %H:%M:%S.%f"), end_time.strftime("%Y-%m-%d %H:%M:%S.%f")],
+            )
             conn.close()
             if len(df) > 0:
-                df['timestamp'] = pd.to_datetime(df['timestamp'])
+                df["timestamp"] = pd.to_datetime(df["timestamp"])
             return df
         except Exception as final_e:
             print(f"Error: All database query methods failed: {final_e}")
             return pd.DataFrame()
-
-
 
 
 def get_multi_db_data(db_paths: list, start_time: datetime.datetime, end_time: datetime.datetime) -> pd.DataFrame:
@@ -242,13 +243,17 @@ def get_multi_db_data(db_paths: list, start_time: datetime.datetime, end_time: d
             WHERE timestamp BETWEEN ? AND ?
             ORDER BY timestamp
             """
-            df = pd.read_sql_query(query, conn, params=[buffered_start.strftime('%Y-%m-%d %H:%M:%S.%f'), end_time.strftime('%Y-%m-%d %H:%M:%S.%f')])
+            df = pd.read_sql_query(
+                query,
+                conn,
+                params=[buffered_start.strftime("%Y-%m-%d %H:%M:%S.%f"), end_time.strftime("%Y-%m-%d %H:%M:%S.%f")],
+            )
             conn.close()
 
             if len(df) > 0:
-                df['timestamp'] = pd.to_datetime(df['timestamp'])
+                df["timestamp"] = pd.to_datetime(df["timestamp"])
                 # Apply the precise time filtering after loading, since we used a buffered start
-                df = df[(df['timestamp'] >= start_time) & (df['timestamp'] <= end_time)]
+                df = df[(df["timestamp"] >= start_time) & (df["timestamp"] <= end_time)]
                 if len(df) > 0:
                     all_dataframes.append(df)
 
@@ -263,21 +268,16 @@ def get_multi_db_data(db_paths: list, start_time: datetime.datetime, end_time: d
     combined_df = pd.concat(all_dataframes, ignore_index=True)
 
     # Sort by timestamp to ensure proper ordering
-    combined_df = combined_df.sort_values('timestamp').reset_index(drop=True)
+    combined_df = combined_df.sort_values("timestamp").reset_index(drop=True)
 
     # Apply final time filtering to handle any edge cases
-    combined_df = combined_df[
-        (combined_df['timestamp'] >= start_time) &
-        (combined_df['timestamp'] <= end_time)
-    ]
+    combined_df = combined_df[(combined_df["timestamp"] >= start_time) & (combined_df["timestamp"] <= end_time)]
 
     return combined_df
 
 
 def get_time_filtered_data_multi_db(
-    start_time: datetime.datetime,
-    end_time: datetime.datetime,
-    base_dir: str = "."
+    start_time: datetime.datetime, end_time: datetime.datetime, base_dir: str = "."
 ) -> pd.DataFrame:
     """
     Get GPU state data filtered by time range, automatically handling multiple database files.
@@ -314,8 +314,8 @@ def calculate_allocation_usage(df: pd.DataFrame, host: str = "") -> dict:
     """
     # Create 15-minute time buckets
     df = df.copy()
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
-    df['15min_bucket'] = df['timestamp'].dt.floor('15min')
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    df["15min_bucket"] = df["timestamp"].dt.floor("15min")
 
     stats = {}
 
@@ -325,19 +325,25 @@ def calculate_allocation_usage(df: pd.DataFrame, host: str = "") -> dict:
         total_available_gpus = 0
 
         # For each 15-minute interval, count unique GPUs
-        for bucket in sorted(df['15min_bucket'].unique()):
-            bucket_df = df[df['15min_bucket'] == bucket]
+        for bucket in sorted(df["15min_bucket"].unique()):
+            bucket_df = df[df["15min_bucket"] == bucket]
 
             # Count unique GPUs for this utilization type in this interval
             if utilization_type == "Priority":
-                claimed_gpus = len(filter_df(bucket_df, "Priority", "Claimed", host)['AssignedGPUs'].dropna().unique())
-                unclaimed_gpus = len(filter_df(bucket_df, "Priority", "Unclaimed", host)['AssignedGPUs'].dropna().unique())
+                claimed_gpus = len(filter_df(bucket_df, "Priority", "Claimed", host)["AssignedGPUs"].dropna().unique())
+                unclaimed_gpus = len(
+                    filter_df(bucket_df, "Priority", "Unclaimed", host)["AssignedGPUs"].dropna().unique()
+                )
             elif utilization_type == "Shared":
-                claimed_gpus = len(filter_df(bucket_df, "Shared", "Claimed", host)['AssignedGPUs'].dropna().unique())
-                unclaimed_gpus = len(filter_df(bucket_df, "Shared", "Unclaimed", host)['AssignedGPUs'].dropna().unique())
+                claimed_gpus = len(filter_df(bucket_df, "Shared", "Claimed", host)["AssignedGPUs"].dropna().unique())
+                unclaimed_gpus = len(
+                    filter_df(bucket_df, "Shared", "Unclaimed", host)["AssignedGPUs"].dropna().unique()
+                )
             elif utilization_type == "Backfill":
-                claimed_gpus = len(filter_df(bucket_df, "Backfill", "Claimed", host)['AssignedGPUs'].dropna().unique())
-                unclaimed_gpus = len(filter_df(bucket_df, "Backfill", "Unclaimed", host)['AssignedGPUs'].dropna().unique())
+                claimed_gpus = len(filter_df(bucket_df, "Backfill", "Claimed", host)["AssignedGPUs"].dropna().unique())
+                unclaimed_gpus = len(
+                    filter_df(bucket_df, "Backfill", "Unclaimed", host)["AssignedGPUs"].dropna().unique()
+                )
 
             total_gpus_this_interval = claimed_gpus + unclaimed_gpus
 
@@ -348,18 +354,20 @@ def calculate_allocation_usage(df: pd.DataFrame, host: str = "") -> dict:
                 total_available_gpus += total_gpus_this_interval
 
         # Calculate average usage percentage across all intervals
-        avg_usage_percentage = sum(interval_usage_percentages) / len(interval_usage_percentages) if interval_usage_percentages else 0
+        avg_usage_percentage = (
+            sum(interval_usage_percentages) / len(interval_usage_percentages) if interval_usage_percentages else 0
+        )
 
         # Calculate average GPU counts across intervals
-        num_intervals = len(df['15min_bucket'].unique())
+        num_intervals = len(df["15min_bucket"].unique())
         avg_claimed = total_claimed_gpus / num_intervals if num_intervals > 0 else 0
         avg_total = total_available_gpus / num_intervals if num_intervals > 0 else 0
 
         stats[utilization_type] = {
-            'avg_claimed': avg_claimed,
-            'avg_total_available': avg_total,
-            'allocation_usage_percent': avg_usage_percentage,
-            'num_intervals': num_intervals
+            "avg_claimed": avg_claimed,
+            "avg_total_available": avg_total,
+            "allocation_usage_percent": avg_usage_percentage,
+            "num_intervals": num_intervals,
         }
 
     return stats
@@ -378,8 +386,8 @@ def calculate_allocation_usage_enhanced(df: pd.DataFrame, host: str = "") -> dic
     """
     # Create 15-minute time buckets
     df = df.copy()
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
-    df['15min_bucket'] = df['timestamp'].dt.floor('15min')
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    df["15min_bucket"] = df["timestamp"].dt.floor("15min")
 
     stats = {}
 
@@ -390,7 +398,7 @@ def calculate_allocation_usage_enhanced(df: pd.DataFrame, host: str = "") -> dic
         "Shared",
         "Backfill-CHTCOwned",
         "Backfill-ResearcherOwned",
-        "Backfill-OpenCapacity"
+        "Backfill-OpenCapacity",
     ]
 
     for utilization_type in utilization_types:
@@ -399,28 +407,72 @@ def calculate_allocation_usage_enhanced(df: pd.DataFrame, host: str = "") -> dic
         total_available_gpus = 0
 
         # For each 15-minute interval, count unique GPUs
-        for bucket in sorted(df['15min_bucket'].unique()):
-            bucket_df = df[df['15min_bucket'] == bucket]
+        for bucket in sorted(df["15min_bucket"].unique()):
+            bucket_df = df[df["15min_bucket"] == bucket]
 
             # Count unique GPUs for this utilization type in this interval
             if utilization_type == "Priority-ResearcherOwned":
-                claimed_gpus = len(filter_df_enhanced(bucket_df, "Priority-ResearcherOwned", "Claimed", host)['AssignedGPUs'].dropna().unique())
-                unclaimed_gpus = len(filter_df_enhanced(bucket_df, "Priority-ResearcherOwned", "Unclaimed", host)['AssignedGPUs'].dropna().unique())
+                claimed_gpus = len(
+                    filter_df_enhanced(bucket_df, "Priority-ResearcherOwned", "Claimed", host)["AssignedGPUs"]
+                    .dropna()
+                    .unique()
+                )
+                unclaimed_gpus = len(
+                    filter_df_enhanced(bucket_df, "Priority-ResearcherOwned", "Unclaimed", host)["AssignedGPUs"]
+                    .dropna()
+                    .unique()
+                )
             elif utilization_type == "Priority-CHTCOwned":
-                claimed_gpus = len(filter_df_enhanced(bucket_df, "Priority-CHTCOwned", "Claimed", host)['AssignedGPUs'].dropna().unique())
-                unclaimed_gpus = len(filter_df_enhanced(bucket_df, "Priority-CHTCOwned", "Unclaimed", host)['AssignedGPUs'].dropna().unique())
+                claimed_gpus = len(
+                    filter_df_enhanced(bucket_df, "Priority-CHTCOwned", "Claimed", host)["AssignedGPUs"]
+                    .dropna()
+                    .unique()
+                )
+                unclaimed_gpus = len(
+                    filter_df_enhanced(bucket_df, "Priority-CHTCOwned", "Unclaimed", host)["AssignedGPUs"]
+                    .dropna()
+                    .unique()
+                )
             elif utilization_type == "Shared":
-                claimed_gpus = len(filter_df_enhanced(bucket_df, "Shared", "Claimed", host)['AssignedGPUs'].dropna().unique())
-                unclaimed_gpus = len(filter_df_enhanced(bucket_df, "Shared", "Unclaimed", host)['AssignedGPUs'].dropna().unique())
+                claimed_gpus = len(
+                    filter_df_enhanced(bucket_df, "Shared", "Claimed", host)["AssignedGPUs"].dropna().unique()
+                )
+                unclaimed_gpus = len(
+                    filter_df_enhanced(bucket_df, "Shared", "Unclaimed", host)["AssignedGPUs"].dropna().unique()
+                )
             elif utilization_type == "Backfill-CHTCOwned":
-                claimed_gpus = len(filter_df_enhanced(bucket_df, "Backfill-CHTCOwned", "Claimed", host)['AssignedGPUs'].dropna().unique())
-                unclaimed_gpus = len(filter_df_enhanced(bucket_df, "Backfill-CHTCOwned", "Unclaimed", host)['AssignedGPUs'].dropna().unique())
+                claimed_gpus = len(
+                    filter_df_enhanced(bucket_df, "Backfill-CHTCOwned", "Claimed", host)["AssignedGPUs"]
+                    .dropna()
+                    .unique()
+                )
+                unclaimed_gpus = len(
+                    filter_df_enhanced(bucket_df, "Backfill-CHTCOwned", "Unclaimed", host)["AssignedGPUs"]
+                    .dropna()
+                    .unique()
+                )
             elif utilization_type == "Backfill-ResearcherOwned":
-                claimed_gpus = len(filter_df_enhanced(bucket_df, "Backfill-ResearcherOwned", "Claimed", host)['AssignedGPUs'].dropna().unique())
-                unclaimed_gpus = len(filter_df_enhanced(bucket_df, "Backfill-ResearcherOwned", "Unclaimed", host)['AssignedGPUs'].dropna().unique())
+                claimed_gpus = len(
+                    filter_df_enhanced(bucket_df, "Backfill-ResearcherOwned", "Claimed", host)["AssignedGPUs"]
+                    .dropna()
+                    .unique()
+                )
+                unclaimed_gpus = len(
+                    filter_df_enhanced(bucket_df, "Backfill-ResearcherOwned", "Unclaimed", host)["AssignedGPUs"]
+                    .dropna()
+                    .unique()
+                )
             elif utilization_type == "Backfill-OpenCapacity":
-                claimed_gpus = len(filter_df_enhanced(bucket_df, "Backfill-OpenCapacity", "Claimed", host)['AssignedGPUs'].dropna().unique())
-                unclaimed_gpus = len(filter_df_enhanced(bucket_df, "Backfill-OpenCapacity", "Unclaimed", host)['AssignedGPUs'].dropna().unique())
+                claimed_gpus = len(
+                    filter_df_enhanced(bucket_df, "Backfill-OpenCapacity", "Claimed", host)["AssignedGPUs"]
+                    .dropna()
+                    .unique()
+                )
+                unclaimed_gpus = len(
+                    filter_df_enhanced(bucket_df, "Backfill-OpenCapacity", "Unclaimed", host)["AssignedGPUs"]
+                    .dropna()
+                    .unique()
+                )
 
             total_gpus_this_interval = claimed_gpus + unclaimed_gpus
 
@@ -431,24 +483,28 @@ def calculate_allocation_usage_enhanced(df: pd.DataFrame, host: str = "") -> dic
                 total_available_gpus += total_gpus_this_interval
 
         # Calculate average usage percentage across all intervals
-        avg_usage_percentage = sum(interval_usage_percentages) / len(interval_usage_percentages) if interval_usage_percentages else 0
+        avg_usage_percentage = (
+            sum(interval_usage_percentages) / len(interval_usage_percentages) if interval_usage_percentages else 0
+        )
 
         # Calculate average GPU counts across intervals
-        num_intervals = len(df['15min_bucket'].unique())
+        num_intervals = len(df["15min_bucket"].unique())
         avg_claimed = total_claimed_gpus / num_intervals if num_intervals > 0 else 0
         avg_total = total_available_gpus / num_intervals if num_intervals > 0 else 0
 
         stats[utilization_type] = {
-            'avg_claimed': avg_claimed,
-            'avg_total_available': avg_total,
-            'allocation_usage_percent': avg_usage_percentage,
-            'num_intervals': num_intervals
+            "avg_claimed": avg_claimed,
+            "avg_total_available": avg_total,
+            "allocation_usage_percent": avg_usage_percentage,
+            "num_intervals": num_intervals,
         }
 
     return stats
 
 
-def calculate_allocation_usage_by_device_enhanced(df: pd.DataFrame, host: str = "", include_all_devices: bool = True) -> dict:
+def calculate_allocation_usage_by_device_enhanced(
+    df: pd.DataFrame, host: str = "", include_all_devices: bool = True
+) -> dict:
     """
     Calculate allocation-based usage grouped by device type with enhanced backfill categories.
 
@@ -466,7 +522,7 @@ def calculate_allocation_usage_by_device_enhanced(df: pd.DataFrame, host: str = 
     df = get_preprocessed_dataframe(df, cache_key)
 
     # Get unique device types
-    device_types = df['GPUs_DeviceName'].dropna().unique()
+    device_types = df["GPUs_DeviceName"].dropna().unique()
 
     stats = {}
 
@@ -477,7 +533,7 @@ def calculate_allocation_usage_by_device_enhanced(df: pd.DataFrame, host: str = 
         "Shared",
         "Backfill-CHTCOwned",
         "Backfill-ResearcherOwned",
-        "Backfill-OpenCapacity"
+        "Backfill-OpenCapacity",
     ]
 
     # Pre-filter data by utilization type and device type to avoid repeated filtering
@@ -486,7 +542,9 @@ def calculate_allocation_usage_by_device_enhanced(df: pd.DataFrame, host: str = 
         filtered_data[utilization_type] = {}
         for device_type in device_types:
             # Skip old/uncommon GPU types for cleaner output (unless requested to include all)
-            if not include_all_devices and any(old_gpu in device_type for old_gpu in ["GTX 1080", "P100", "Quadro", "A30", "A40"]):
+            if not include_all_devices and any(
+                old_gpu in device_type for old_gpu in ["GTX 1080", "P100", "Quadro", "A30", "A40"]
+            ):
                 continue
 
             # Create cache key for this specific filter combination - include all parameters
@@ -495,11 +553,9 @@ def calculate_allocation_usage_by_device_enhanced(df: pd.DataFrame, host: str = 
             # Get filtered dataset (cached if available) - correct parameter order
             # filter_df_enhanced(df, utilization, state, host)
             # We need to filter by device type separately since filter_df_enhanced doesn't take device_type
-            device_df = df[df['GPUs_DeviceName'] == device_type]
+            device_df = df[df["GPUs_DeviceName"] == device_type]
             filtered_df = get_cached_filtered_dataframe(
-                device_df, filter_df_enhanced,
-                (utilization_type, "", host),
-                filter_cache_key
+                device_df, filter_df_enhanced, (utilization_type, "", host), filter_cache_key
             )
             filtered_data[utilization_type][device_type] = filtered_df
 
@@ -508,7 +564,9 @@ def calculate_allocation_usage_by_device_enhanced(df: pd.DataFrame, host: str = 
 
         for device_type in device_types:
             # Skip old/uncommon GPU types for cleaner output (unless requested to include all)
-            if not include_all_devices and any(old_gpu in device_type for old_gpu in ["GTX 1080", "P100", "Quadro", "A30", "A40"]):
+            if not include_all_devices and any(
+                old_gpu in device_type for old_gpu in ["GTX 1080", "P100", "Quadro", "A30", "A40"]
+            ):
                 continue
 
             # Use pre-filtered data instead of calling filter_df_enhanced repeatedly
@@ -521,20 +579,20 @@ def calculate_allocation_usage_by_device_enhanced(df: pd.DataFrame, host: str = 
             total_available_gpus = 0
 
             # For each 15-minute interval, count unique GPUs using pre-filtered data
-            for bucket in sorted(df['15min_bucket'].unique()):
+            for bucket in sorted(df["15min_bucket"].unique()):
                 # Use pre-filtered data for this bucket
-                bucket_filtered_df = device_utilization_df[device_utilization_df['15min_bucket'] == bucket]
+                bucket_filtered_df = device_utilization_df[device_utilization_df["15min_bucket"] == bucket]
 
                 if bucket_filtered_df.empty:
                     continue
 
                 # Count unique GPUs (total available for this utilization type)
-                unique_gpu_ids = set(bucket_filtered_df['AssignedGPUs'].dropna().unique())
+                unique_gpu_ids = set(bucket_filtered_df["AssignedGPUs"].dropna().unique())
                 total_gpus_this_interval = len(unique_gpu_ids)
 
                 # Count how many of these unique GPUs are currently claimed
-                claimed_gpus_df = bucket_filtered_df[bucket_filtered_df['State'] == 'Claimed']
-                claimed_unique_gpu_ids = set(claimed_gpus_df['AssignedGPUs'].dropna().unique())
+                claimed_gpus_df = bucket_filtered_df[bucket_filtered_df["State"] == "Claimed"]
+                claimed_unique_gpu_ids = set(claimed_gpus_df["AssignedGPUs"].dropna().unique())
                 claimed_gpus = len(claimed_unique_gpu_ids)
 
                 if total_gpus_this_interval > 0:
@@ -549,15 +607,15 @@ def calculate_allocation_usage_by_device_enhanced(df: pd.DataFrame, host: str = 
 
                 # Calculate average GPU counts across ALL intervals (including those with 0 usage)
                 # This matches the user breakdown method and gives consistent results
-                total_intervals = len(df['15min_bucket'].unique())
+                total_intervals = len(df["15min_bucket"].unique())
                 avg_claimed = total_claimed_gpus / total_intervals if total_intervals > 0 else 0
                 avg_total = total_available_gpus / total_intervals if total_intervals > 0 else 0
 
                 stats[utilization_type][device_type] = {
-                    'avg_claimed': avg_claimed,
-                    'avg_total_available': avg_total,
-                    'allocation_usage_percent': avg_usage_percentage,
-                    'num_intervals': total_intervals
+                    "avg_claimed": avg_claimed,
+                    "avg_total_available": avg_total,
+                    "allocation_usage_percent": avg_usage_percentage,
+                    "num_intervals": total_intervals,
                 }
 
     return stats
@@ -581,34 +639,27 @@ def calculate_performance_usage(df: pd.DataFrame, host: str = "") -> dict:
         filtered_df = filter_df(df, utilization_type, "Claimed", host)
 
         # Only consider records with valid utilization data
-        util_df = filtered_df[
-            (filtered_df['GPUsAverageUsage'].notna()) &
-            (filtered_df['GPUsAverageUsage'] >= 0)
-        ]
+        util_df = filtered_df[(filtered_df["GPUsAverageUsage"].notna()) & (filtered_df["GPUsAverageUsage"] >= 0)]
 
         if len(util_df) > 0:
-            avg_utilization = util_df['GPUsAverageUsage'].mean() * 100  # Convert to percentage
+            avg_utilization = util_df["GPUsAverageUsage"].mean() * 100  # Convert to percentage
             total_records = len(util_df)
-            unique_gpus = util_df['AssignedGPUs'].nunique()
+            unique_gpus = util_df["AssignedGPUs"].nunique()
         else:
             avg_utilization = 0
             total_records = 0
             unique_gpus = 0
 
         stats[utilization_type] = {
-            'avg_gpu_utilization_percent': avg_utilization,
-            'records_with_utilization': total_records,
-            'unique_gpus_used': unique_gpus
+            "avg_gpu_utilization_percent": avg_utilization,
+            "records_with_utilization": total_records,
+            "unique_gpus_used": unique_gpus,
         }
 
     return stats
 
 
-def calculate_time_series_usage(
-    df: pd.DataFrame,
-    bucket_minutes: int = 15,
-    host: str = ""
-) -> pd.DataFrame:
+def calculate_time_series_usage(df: pd.DataFrame, bucket_minutes: int = 15, host: str = "") -> pd.DataFrame:
     """
     Calculate usage over time in buckets, counting unique GPUs per interval.
 
@@ -622,33 +673,39 @@ def calculate_time_series_usage(
     """
     # Create time buckets
     df = df.copy()
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
-    df[f'{bucket_minutes}min_bucket'] = df['timestamp'].dt.floor(f'{bucket_minutes}min')
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    df[f"{bucket_minutes}min_bucket"] = df["timestamp"].dt.floor(f"{bucket_minutes}min")
 
     time_series_data = []
 
-    for bucket in sorted(df[f'{bucket_minutes}min_bucket'].unique()):
-        bucket_df = df[df[f'{bucket_minutes}min_bucket'] == bucket]
-        bucket_stats = {'timestamp': bucket}
+    for bucket in sorted(df[f"{bucket_minutes}min_bucket"].unique()):
+        bucket_df = df[df[f"{bucket_minutes}min_bucket"] == bucket]
+        bucket_stats = {"timestamp": bucket}
 
         for utilization_type in UTILIZATION_TYPES:
             # Count unique GPUs for this utilization type in this interval
             if utilization_type == "Priority":
-                claimed_gpus = len(filter_df(bucket_df, "Priority", "Claimed", host)['AssignedGPUs'].dropna().unique())
-                unclaimed_gpus = len(filter_df(bucket_df, "Priority", "Unclaimed", host)['AssignedGPUs'].dropna().unique())
+                claimed_gpus = len(filter_df(bucket_df, "Priority", "Claimed", host)["AssignedGPUs"].dropna().unique())
+                unclaimed_gpus = len(
+                    filter_df(bucket_df, "Priority", "Unclaimed", host)["AssignedGPUs"].dropna().unique()
+                )
             elif utilization_type == "Shared":
-                claimed_gpus = len(filter_df(bucket_df, "Shared", "Claimed", host)['AssignedGPUs'].dropna().unique())
-                unclaimed_gpus = len(filter_df(bucket_df, "Shared", "Unclaimed", host)['AssignedGPUs'].dropna().unique())
+                claimed_gpus = len(filter_df(bucket_df, "Shared", "Claimed", host)["AssignedGPUs"].dropna().unique())
+                unclaimed_gpus = len(
+                    filter_df(bucket_df, "Shared", "Unclaimed", host)["AssignedGPUs"].dropna().unique()
+                )
             elif utilization_type == "Backfill":
-                claimed_gpus = len(filter_df(bucket_df, "Backfill", "Claimed", host)['AssignedGPUs'].dropna().unique())
-                unclaimed_gpus = len(filter_df(bucket_df, "Backfill", "Unclaimed", host)['AssignedGPUs'].dropna().unique())
+                claimed_gpus = len(filter_df(bucket_df, "Backfill", "Claimed", host)["AssignedGPUs"].dropna().unique())
+                unclaimed_gpus = len(
+                    filter_df(bucket_df, "Backfill", "Unclaimed", host)["AssignedGPUs"].dropna().unique()
+                )
 
             total_gpus = claimed_gpus + unclaimed_gpus
             usage_percent = (claimed_gpus / total_gpus * 100) if total_gpus > 0 else 0
 
-            bucket_stats[f'{utilization_type.lower()}_claimed'] = claimed_gpus
-            bucket_stats[f'{utilization_type.lower()}_total'] = total_gpus
-            bucket_stats[f'{utilization_type.lower()}_usage_percent'] = usage_percent
+            bucket_stats[f"{utilization_type.lower()}_claimed"] = claimed_gpus
+            bucket_stats[f"{utilization_type.lower()}_total"] = total_gpus
+            bucket_stats[f"{utilization_type.lower()}_usage_percent"] = usage_percent
 
         time_series_data.append(bucket_stats)
 
@@ -669,11 +726,11 @@ def calculate_allocation_usage_by_device(df: pd.DataFrame, host: str = "", inclu
     """
     # Create 15-minute time buckets
     df = df.copy()
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
-    df['15min_bucket'] = df['timestamp'].dt.floor('15min')
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    df["15min_bucket"] = df["timestamp"].dt.floor("15min")
 
     # Get unique device types
-    device_types = df['GPUs_DeviceName'].dropna().unique()
+    device_types = df["GPUs_DeviceName"].dropna().unique()
 
     stats = {}
 
@@ -682,7 +739,9 @@ def calculate_allocation_usage_by_device(df: pd.DataFrame, host: str = "", inclu
 
         for device_type in device_types:
             # Skip old/uncommon GPU types for cleaner output (unless requested to include all)
-            if not include_all_devices and any(old_gpu in device_type for old_gpu in ["GTX 1080", "P100", "Quadro", "A30", "A40"]):
+            if not include_all_devices and any(
+                old_gpu in device_type for old_gpu in ["GTX 1080", "P100", "Quadro", "A30", "A40"]
+            ):
                 continue
 
             interval_usage_percentages = []
@@ -690,11 +749,11 @@ def calculate_allocation_usage_by_device(df: pd.DataFrame, host: str = "", inclu
             total_available_gpus = 0
 
             # For each 15-minute interval, count unique GPUs of this device type
-            for bucket in sorted(df['15min_bucket'].unique()):
-                bucket_df = df[df['15min_bucket'] == bucket]
+            for bucket in sorted(df["15min_bucket"].unique()):
+                bucket_df = df[df["15min_bucket"] == bucket]
 
                 # Filter by device type
-                device_df = bucket_df[bucket_df['GPUs_DeviceName'] == device_type]
+                device_df = bucket_df[bucket_df["GPUs_DeviceName"] == device_type]
 
                 if device_df.empty:
                     continue
@@ -709,12 +768,12 @@ def calculate_allocation_usage_by_device(df: pd.DataFrame, host: str = "", inclu
                     all_gpus_df = filter_df(device_df, "Backfill", "", host)
 
                 # Count unique GPUs (total available for this utilization type)
-                unique_gpu_ids = set(all_gpus_df['AssignedGPUs'].dropna().unique())
+                unique_gpu_ids = set(all_gpus_df["AssignedGPUs"].dropna().unique())
                 total_gpus_this_interval = len(unique_gpu_ids)
 
                 # Count how many of these unique GPUs are currently claimed
-                claimed_gpus_df = all_gpus_df[all_gpus_df['State'] == 'Claimed']
-                claimed_unique_gpu_ids = set(claimed_gpus_df['AssignedGPUs'].dropna().unique())
+                claimed_gpus_df = all_gpus_df[all_gpus_df["State"] == "Claimed"]
+                claimed_unique_gpu_ids = set(claimed_gpus_df["AssignedGPUs"].dropna().unique())
                 claimed_gpus = len(claimed_unique_gpu_ids)
 
                 if total_gpus_this_interval > 0:
@@ -729,15 +788,15 @@ def calculate_allocation_usage_by_device(df: pd.DataFrame, host: str = "", inclu
 
                 # Calculate average GPU counts across ALL intervals (including those with 0 usage)
                 # This matches the user breakdown method and gives consistent results
-                total_intervals = len(df['15min_bucket'].unique())
+                total_intervals = len(df["15min_bucket"].unique())
                 avg_claimed = total_claimed_gpus / total_intervals if total_intervals > 0 else 0
                 avg_total = total_available_gpus / total_intervals if total_intervals > 0 else 0
 
                 stats[utilization_type][device_type] = {
-                    'avg_claimed': avg_claimed,
-                    'avg_total_available': avg_total,
-                    'allocation_usage_percent': avg_usage_percentage,
-                    'num_intervals': total_intervals
+                    "avg_claimed": avg_claimed,
+                    "avg_total_available": avg_total,
+                    "allocation_usage_percent": avg_usage_percentage,
+                    "num_intervals": total_intervals,
                 }
 
     return stats
@@ -760,10 +819,10 @@ def calculate_allocation_usage_by_memory(df: pd.DataFrame, host: str = "", inclu
     df = get_preprocessed_dataframe(df, cache_key)
 
     # Add memory category column based on GPUs_GlobalMemoryMb
-    df['memory_category'] = df['GPUs_GlobalMemoryMb'].apply(get_memory_category_from_mb)
+    df["memory_category"] = df["GPUs_GlobalMemoryMb"].apply(get_memory_category_from_mb)
 
     # Get unique memory categories
-    memory_categories = df['memory_category'].dropna().unique()
+    memory_categories = df["memory_category"].dropna().unique()
 
     stats = {}
 
@@ -779,14 +838,12 @@ def calculate_allocation_usage_by_memory(df: pd.DataFrame, host: str = "", inclu
             filter_cache_key = f"memory_{class_name}_{memory_cat}_{len(df)}_{hash(str(df['timestamp'].iloc[0])) if len(df) > 0 else 'empty'}"
 
             # Filter by memory category first, then by class
-            memory_cat_df = df[df['memory_category'] == memory_cat]
+            memory_cat_df = df[df["memory_category"] == memory_cat]
             if not memory_cat_df.empty:
                 # Get filtered dataset (cached if available)
                 # filter_df_enhanced(df, utilization, state, host)
                 filtered_df = get_cached_filtered_dataframe(
-                    memory_cat_df, filter_df_enhanced,
-                    (class_name, "", host),
-                    filter_cache_key
+                    memory_cat_df, filter_df_enhanced, (class_name, "", host), filter_cache_key
                 )
                 filtered_memory_data[memory_cat][class_name] = filtered_df
 
@@ -796,7 +853,7 @@ def calculate_allocation_usage_by_memory(df: pd.DataFrame, host: str = "", inclu
         num_intervals_with_data = 0
 
         # Get unique time buckets
-        unique_buckets = df['15min_bucket'].unique()
+        unique_buckets = df["15min_bucket"].unique()
 
         for bucket_time in unique_buckets:
             bucket_claimed = 0
@@ -811,17 +868,17 @@ def calculate_allocation_usage_by_memory(df: pd.DataFrame, host: str = "", inclu
                 class_filtered_df = filtered_memory_data[memory_cat][class_name]
 
                 # Filter by bucket time
-                bucket_class_df = class_filtered_df[class_filtered_df['15min_bucket'] == bucket_time]
+                bucket_class_df = class_filtered_df[class_filtered_df["15min_bucket"] == bucket_time]
 
                 if not bucket_class_df.empty:
                     # Count unique GPUs for this class and memory category (like device calculation)
                     # Total unique GPUs available for this class
-                    unique_gpu_ids = set(bucket_class_df['AssignedGPUs'].dropna().unique())
+                    unique_gpu_ids = set(bucket_class_df["AssignedGPUs"].dropna().unique())
                     total_count = len(unique_gpu_ids)
 
                     # Count unique claimed GPUs
-                    claimed_gpus_df = bucket_class_df[bucket_class_df['State'] == 'Claimed']
-                    claimed_unique_gpu_ids = set(claimed_gpus_df['AssignedGPUs'].dropna().unique())
+                    claimed_gpus_df = bucket_class_df[bucket_class_df["State"] == "Claimed"]
+                    claimed_unique_gpu_ids = set(claimed_gpus_df["AssignedGPUs"].dropna().unique())
                     allocated_count = len(claimed_unique_gpu_ids)
 
                     bucket_claimed += allocated_count
@@ -839,10 +896,10 @@ def calculate_allocation_usage_by_memory(df: pd.DataFrame, host: str = "", inclu
             avg_usage_percentage = (avg_claimed / avg_total * 100) if avg_total > 0 else 0
 
             stats[memory_cat] = {
-                'avg_claimed': avg_claimed,
-                'avg_total_available': avg_total,
-                'allocation_usage_percent': avg_usage_percentage,
-                'num_intervals': num_intervals_with_data
+                "avg_claimed": avg_claimed,
+                "avg_total_available": avg_total,
+                "allocation_usage_percent": avg_usage_percentage,
+                "num_intervals": num_intervals_with_data,
             }
 
     return stats
@@ -861,19 +918,21 @@ def calculate_h200_user_breakdown(df: pd.DataFrame, host: str = "", hours_back: 
         Dictionary with H200 usage statistics by user and slot type
     """
     # Filter for H200 GPUs only
-    h200_df = df[df['GPUs_DeviceName'] == 'NVIDIA H200'].copy()
+    h200_df = df[df["GPUs_DeviceName"] == "NVIDIA H200"].copy()
 
     if h200_df.empty:
         return {}
 
     # Use cached preprocessing for H200 data
     # Generate unified cache key based on DataFrame identity
-    cache_key = f"preprocessed_{len(h200_df)}_{hash(str(h200_df['timestamp'].iloc[0])) if len(h200_df) > 0 else 'empty'}"
+    cache_key = (
+        f"preprocessed_{len(h200_df)}_{hash(str(h200_df['timestamp'].iloc[0])) if len(h200_df) > 0 else 'empty'}"
+    )
     h200_df = get_preprocessed_dataframe(h200_df, cache_key)
 
     # Apply host filter if specified
     if host:
-        h200_df = h200_df[h200_df['Machine'].str.contains(host, case=False, na=False)]
+        h200_df = h200_df[h200_df["Machine"].str.contains(host, case=False, na=False)]
 
     # Use the actual lookback period to match the device allocation method
     # (Device allocation uses averages across buckets multiplied by lookback period)
@@ -891,7 +950,7 @@ def calculate_h200_user_breakdown(df: pd.DataFrame, host: str = "", hours_back: 
             continue
 
         # Only look at claimed slots (where jobs are running)
-        claimed_df = filtered_df[filtered_df['State'] == 'Claimed']
+        claimed_df = filtered_df[filtered_df["State"] == "Claimed"]
 
         if claimed_df.empty:
             continue
@@ -901,19 +960,19 @@ def calculate_h200_user_breakdown(df: pd.DataFrame, host: str = "", hours_back: 
 
         # Get all possible buckets for this slot type (from the entire H200 dataset)
         # This ensures we count all time intervals, including those where user has 0 GPUs
-        all_buckets = sorted(h200_df['15min_bucket'].unique())
+        all_buckets = sorted(h200_df["15min_bucket"].unique())
         num_buckets = len(all_buckets)
 
         for bucket in all_buckets:
-            bucket_df = claimed_df[claimed_df['15min_bucket'] == bucket]
+            bucket_df = claimed_df[claimed_df["15min_bucket"] == bucket]
 
             if not bucket_df.empty:
                 # Group by user within this time bucket
-                user_gpu_counts = bucket_df.groupby('RemoteOwner')['AssignedGPUs'].nunique()
+                user_gpu_counts = bucket_df.groupby("RemoteOwner")["AssignedGPUs"].nunique()
 
                 for user, gpu_count in user_gpu_counts.items():
-                    if pd.isna(user) or user == '' or user is None:
-                        user = 'Unknown'
+                    if pd.isna(user) or user == "" or user is None:
+                        user = "Unknown"
 
                     if user not in user_bucket_totals:
                         user_bucket_totals[user] = 0
@@ -927,12 +986,12 @@ def calculate_h200_user_breakdown(df: pd.DataFrame, host: str = "", hours_back: 
 
             if user not in user_stats:
                 user_stats[user] = {
-                    'Priority-ResearcherOwned': 0,
-                    'Priority-CHTCOwned': 0,
-                    'Shared': 0,
-                    'Backfill-ResearcherOwned': 0,
-                    'Backfill-CHTCOwned': 0,
-                    'Backfill-OpenCapacity': 0
+                    "Priority-ResearcherOwned": 0,
+                    "Priority-CHTCOwned": 0,
+                    "Shared": 0,
+                    "Backfill-ResearcherOwned": 0,
+                    "Backfill-CHTCOwned": 0,
+                    "Backfill-OpenCapacity": 0,
                 }
 
             user_stats[user][slot_type] = gpu_hours
@@ -943,23 +1002,22 @@ def calculate_h200_user_breakdown(df: pd.DataFrame, host: str = "", hours_back: 
         total_gpu_hours = sum(gpu_hours for gpu_hours in slot_data.values())
 
         if total_gpu_hours > 0:
-            final_stats[user] = {
-                'total_gpu_hours': total_gpu_hours,
-                'slot_breakdown': {}
-            }
+            final_stats[user] = {"total_gpu_hours": total_gpu_hours, "slot_breakdown": {}}
 
             # Add breakdown by slot type (only include non-zero usage)
             for slot_type, gpu_hours in slot_data.items():
                 if gpu_hours > 0:
-                    final_stats[user]['slot_breakdown'][slot_type] = {
-                        'gpu_hours': gpu_hours,
-                        'percentage': (gpu_hours / total_gpu_hours) * 100
+                    final_stats[user]["slot_breakdown"][slot_type] = {
+                        "gpu_hours": gpu_hours,
+                        "percentage": (gpu_hours / total_gpu_hours) * 100,
                     }
 
     return final_stats
 
 
-def calculate_backfill_usage_by_user(df: pd.DataFrame, host: str = "", hours_back: int = 1, include_all_devices: bool = False) -> dict:
+def calculate_backfill_usage_by_user(
+    df: pd.DataFrame, host: str = "", hours_back: int = 1, include_all_devices: bool = False
+) -> dict:
     """
     Calculate backfill slot usage breakdown by user and slot type.
 
@@ -977,7 +1035,7 @@ def calculate_backfill_usage_by_user(df: pd.DataFrame, host: str = "", hours_bac
     # Filter out old/uncommon GPU types for consistency with allocation calculations
     if not include_all_devices:
         old_gpu_types = ["GTX 1080", "P100", "Quadro", "A30", "A40"]
-        mask = ~df['GPUs_DeviceName'].str.contains('|'.join(old_gpu_types), case=False, na=False)
+        mask = ~df["GPUs_DeviceName"].str.contains("|".join(old_gpu_types), case=False, na=False)
         df = df[mask]
 
         if df.empty:
@@ -989,7 +1047,7 @@ def calculate_backfill_usage_by_user(df: pd.DataFrame, host: str = "", hours_bac
 
     # Apply host filter if specified
     if host:
-        df = df[df['Machine'].str.contains(host, case=False, na=False)]
+        df = df[df["Machine"].str.contains(host, case=False, na=False)]
 
     actual_duration_hours = hours_back
     user_stats = {}
@@ -1005,7 +1063,7 @@ def calculate_backfill_usage_by_user(df: pd.DataFrame, host: str = "", hours_bac
             continue
 
         # Only look at claimed slots (where jobs are running)
-        claimed_df = filtered_df[filtered_df['State'] == 'Claimed']
+        claimed_df = filtered_df[filtered_df["State"] == "Claimed"]
         if claimed_df.empty:
             continue
 
@@ -1013,17 +1071,17 @@ def calculate_backfill_usage_by_user(df: pd.DataFrame, host: str = "", hours_bac
         user_bucket_totals = {}
 
         # Get all possible buckets for this slot type
-        all_buckets = sorted(df['15min_bucket'].unique())
+        all_buckets = sorted(df["15min_bucket"].unique())
         num_buckets = len(all_buckets)
 
         for bucket in all_buckets:
-            bucket_df = claimed_df[claimed_df['15min_bucket'] == bucket]
+            bucket_df = claimed_df[claimed_df["15min_bucket"] == bucket]
             if not bucket_df.empty:
                 # Group by user within this time bucket
-                user_gpu_counts = bucket_df.groupby('RemoteOwner')['AssignedGPUs'].nunique()
+                user_gpu_counts = bucket_df.groupby("RemoteOwner")["AssignedGPUs"].nunique()
                 for user, gpu_count in user_gpu_counts.items():
-                    if pd.isna(user) or user == '' or user is None:
-                        user = 'Unknown'
+                    if pd.isna(user) or user == "" or user is None:
+                        user = "Unknown"
                     if user not in user_bucket_totals:
                         user_bucket_totals[user] = 0
                     user_bucket_totals[user] += gpu_count
@@ -1034,11 +1092,7 @@ def calculate_backfill_usage_by_user(df: pd.DataFrame, host: str = "", hours_bac
             gpu_hours = avg_gpus * actual_duration_hours
 
             if user not in user_stats:
-                user_stats[user] = {
-                    'Backfill-ResearcherOwned': 0,
-                    'Backfill-CHTCOwned': 0,
-                    'Backfill-OpenCapacity': 0
-                }
+                user_stats[user] = {"Backfill-ResearcherOwned": 0, "Backfill-CHTCOwned": 0, "Backfill-OpenCapacity": 0}
             user_stats[user][slot_type] = gpu_hours
 
     # Calculate final statistics
@@ -1046,16 +1100,13 @@ def calculate_backfill_usage_by_user(df: pd.DataFrame, host: str = "", hours_bac
     for user, slot_data in user_stats.items():
         total_gpu_hours = sum(gpu_hours for gpu_hours in slot_data.values())
         if total_gpu_hours > 0:
-            final_stats[user] = {
-                'total_gpu_hours': total_gpu_hours,
-                'slot_breakdown': {}
-            }
+            final_stats[user] = {"total_gpu_hours": total_gpu_hours, "slot_breakdown": {}}
             # Add breakdown by slot type (only include non-zero usage)
             for slot_type, gpu_hours in slot_data.items():
                 if gpu_hours > 0:
-                    final_stats[user]['slot_breakdown'][slot_type] = {
-                        'gpu_hours': gpu_hours,
-                        'percentage': (gpu_hours / total_gpu_hours) * 100
+                    final_stats[user]["slot_breakdown"][slot_type] = {
+                        "gpu_hours": gpu_hours,
+                        "percentage": (gpu_hours / total_gpu_hours) * 100,
                     }
 
     return final_stats
@@ -1080,16 +1131,16 @@ def calculate_unique_cluster_totals_from_raw_data(df: pd.DataFrame, host: str = 
     """
     # Create 15-minute time buckets like in the main calculation
     df = df.copy()
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
-    df['15min_bucket'] = df['timestamp'].dt.floor('15min')
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    df["15min_bucket"] = df["timestamp"].dt.floor("15min")
 
     total_claimed_across_intervals = 0
     total_available_across_intervals = 0
     num_intervals = 0
 
     # For each 15-minute interval, count unique GPUs across all categories
-    for bucket in sorted(df['15min_bucket'].unique()):
-        bucket_df = df[df['15min_bucket'] == bucket]
+    for bucket in sorted(df["15min_bucket"].unique()):
+        bucket_df = df[df["15min_bucket"] == bucket]
 
         if bucket_df.empty:
             continue
@@ -1105,8 +1156,8 @@ def calculate_unique_cluster_totals_from_raw_data(df: pd.DataFrame, host: str = 
             unclaimed_df = filter_df(bucket_df, utilization_type, "Unclaimed", host)
 
             # Add unique GPUs from this category
-            claimed_gpus = set(claimed_df['AssignedGPUs'].dropna().unique())
-            unclaimed_gpus = set(unclaimed_df['AssignedGPUs'].dropna().unique())
+            claimed_gpus = set(claimed_df["AssignedGPUs"].dropna().unique())
+            unclaimed_gpus = set(unclaimed_df["AssignedGPUs"].dropna().unique())
 
             all_claimed_gpus.update(claimed_gpus)
             all_available_gpus.update(claimed_gpus)  # claimed GPUs are part of available
@@ -1120,12 +1171,7 @@ def calculate_unique_cluster_totals_from_raw_data(df: pd.DataFrame, host: str = 
     avg_claimed = total_claimed_across_intervals / num_intervals if num_intervals > 0 else 0
     avg_available = total_available_across_intervals / num_intervals if num_intervals > 0 else 0
 
-    return {
-        'claimed': avg_claimed,
-        'total': avg_available
-    }
-
-
+    return {"claimed": avg_claimed, "total": avg_available}
 
 
 def run_analysis(
@@ -1134,12 +1180,12 @@ def run_analysis(
     host: str = "",
     analysis_type: str = "allocation",
     bucket_minutes: int = 15,
-    end_time: Optional[datetime.datetime] = None,
+    end_time: datetime.datetime | None = None,
     group_by_device: bool = False,
     all_devices: bool = False,
-    exclude_hosts: Optional[str] = None,
-    exclude_hosts_yaml: Optional[str] = None,
-    use_enhanced_classification: bool = True
+    exclude_hosts: str | None = None,
+    exclude_hosts_yaml: str | None = None,
+    use_enhanced_classification: bool = True,
 ) -> dict:
     """
     Core analysis function that can be called programmatically.
@@ -1153,6 +1199,7 @@ def run_analysis(
         Dictionary containing analysis results and metadata
     """
     import time
+
     analysis_start_time = time.time()
     analysis_start_datetime = datetime.datetime.now()
 
@@ -1168,19 +1215,19 @@ def run_analysis(
 
     # Calculate time buckets for interval counting
     df_temp = df.copy()
-    df_temp['timestamp'] = pd.to_datetime(df_temp['timestamp'])
-    df_temp['15min_bucket'] = df_temp['timestamp'].dt.floor('15min')
-    num_intervals = df_temp['15min_bucket'].nunique()
+    df_temp["timestamp"] = pd.to_datetime(df_temp["timestamp"])
+    df_temp["15min_bucket"] = df_temp["timestamp"].dt.floor("15min")
+    num_intervals = df_temp["15min_bucket"].nunique()
 
     result = {
         "metadata": {
-            "start_time": df['timestamp'].min(),
-            "end_time": df['timestamp'].max(),
+            "start_time": df["timestamp"].min(),
+            "end_time": df["timestamp"].max(),
             "num_intervals": num_intervals,
             "total_records": len(df),
             "hours_back": hours_back,
             "excluded_hosts": gpu_utils.HOST_EXCLUSIONS,
-            "filtered_hosts_info": gpu_utils.FILTERED_HOSTS_INFO
+            "filtered_hosts_info": gpu_utils.FILTERED_HOSTS_INFO,
         }
     }
 
@@ -1212,7 +1259,7 @@ def run_analysis(
     return result
 
 
-def calculate_monthly_summary(db_path: str, end_time: Optional[datetime.datetime] = None) -> dict:
+def calculate_monthly_summary(db_path: str, end_time: datetime.datetime | None = None) -> dict:
     """
     Calculate complete monthly GPU usage summary for the previous month.
 
@@ -1223,12 +1270,12 @@ def calculate_monthly_summary(db_path: str, end_time: Optional[datetime.datetime
     Returns:
         Dictionary containing monthly usage statistics
     """
-    from pathlib import Path
     import calendar
+    from pathlib import Path
 
     # Get base directory from the provided db_path
     db_path_obj = Path(db_path)
-    base_dir = str(db_path_obj.parent) if db_path_obj.parent != Path('.') else "."
+    base_dir = str(db_path_obj.parent) if db_path_obj.parent != Path(".") else "."
 
     # If end_time is not provided, use the latest timestamp from the most recent database
     if end_time is None:
@@ -1255,10 +1302,10 @@ def calculate_monthly_summary(db_path: str, end_time: Optional[datetime.datetime
     if df.empty:
         return {
             "error": f"No data found for {prev_month_start.strftime('%B %Y')}",
-            "month": prev_month_start.strftime('%B %Y'),
+            "month": prev_month_start.strftime("%B %Y"),
             "start_date": prev_month_start,
             "end_date": prev_month_end,
-            "total_hours": total_hours
+            "total_hours": total_hours,
         }
 
     # Calculate statistics for the month
@@ -1267,7 +1314,7 @@ def calculate_monthly_summary(db_path: str, end_time: Optional[datetime.datetime
     h200_stats = calculate_h200_user_breakdown(df, "", total_hours)
 
     return {
-        "month": prev_month_start.strftime('%B %Y'),
+        "month": prev_month_start.strftime("%B %Y"),
         "start_date": prev_month_start,
         "end_date": prev_month_end,
         "total_hours": total_hours,
@@ -1275,19 +1322,15 @@ def calculate_monthly_summary(db_path: str, end_time: Optional[datetime.datetime
         "memory_stats": memory_stats,
         "h200_user_stats": h200_stats,
         "data_coverage": {
-            "start_time": df['timestamp'].min(),
-            "end_time": df['timestamp'].max(),
+            "start_time": df["timestamp"].min(),
+            "end_time": df["timestamp"].max(),
             "total_records": len(df),
-            "unique_intervals": len(df['15min_bucket'].unique()) if '15min_bucket' in df.columns else 0
-        }
+            "unique_intervals": len(df["15min_bucket"].unique()) if "15min_bucket" in df.columns else 0,
+        },
     }
 
 
-def get_gpu_models_at_time(
-    db_path: str,
-    target_time: datetime.datetime,
-    window_minutes: int = 5
-) -> list:
+def get_gpu_models_at_time(db_path: str, target_time: datetime.datetime, window_minutes: int = 5) -> list:
     """
     Get all GPU models available at a specific time.
 
@@ -1316,14 +1359,11 @@ def get_gpu_models_at_time(
     df = pd.read_sql_query(query, conn, params=[start_time, end_time])
     conn.close()
 
-    return df['GPUs_DeviceName'].tolist()
+    return df["GPUs_DeviceName"].tolist()
 
 
 def get_gpu_model_activity_at_time(
-    db_path: str,
-    gpu_model: str,
-    target_time: datetime.datetime,
-    window_minutes: int = 5
+    db_path: str, gpu_model: str, target_time: datetime.datetime, window_minutes: int = 5
 ) -> pd.DataFrame:
     """
     Get detailed activity for a specific GPU model at a specific time.
@@ -1357,16 +1397,13 @@ def get_gpu_model_activity_at_time(
     conn.close()
 
     if len(df) > 0:
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
 
     return df
 
 
 def analyze_gpu_model_at_time(
-    db_path: str,
-    gpu_model: str,
-    target_time: datetime.datetime,
-    window_minutes: int = 5
+    db_path: str, gpu_model: str, target_time: datetime.datetime, window_minutes: int = 5
 ) -> dict:
     """
     Analyze what's happening with a specific GPU model at a specific time.
@@ -1383,25 +1420,24 @@ def analyze_gpu_model_at_time(
     df = get_gpu_model_activity_at_time(db_path, gpu_model, target_time, window_minutes)
 
     if len(df) == 0:
-        return {
-            "error": f"No data found for {gpu_model} around {target_time.strftime('%Y-%m-%d %H:%M:%S')}"
-        }
+        return {"error": f"No data found for {gpu_model} around {target_time.strftime('%Y-%m-%d %H:%M:%S')}"}
 
     # Get the closest timestamp to target
-    df['time_diff'] = abs(df['timestamp'] - target_time)
-    closest_time = df.loc[df['time_diff'].idxmin(), 'timestamp']
+    df["time_diff"] = abs(df["timestamp"] - target_time)
+    closest_time = df.loc[df["time_diff"].idxmin(), "timestamp"]
 
     # Filter to records from the closest timestamp
-    snapshot_df = df[df['timestamp'] == closest_time]
+    snapshot_df = df[df["timestamp"] == closest_time]
 
     # Analyze the snapshot - count unique GPUs only
-    unique_gpus = snapshot_df['AssignedGPUs'].dropna().nunique()
+    unique_gpus = snapshot_df["AssignedGPUs"].dropna().nunique()
 
     # Count active GPUs (those actually running jobs with RemoteOwner)
-    active_gpus_count = snapshot_df[
-        (snapshot_df['State'] == 'Claimed') &
-        (snapshot_df['RemoteOwner'].notna())
-    ]['AssignedGPUs'].dropna().nunique()
+    active_gpus_count = (
+        snapshot_df[(snapshot_df["State"] == "Claimed") & (snapshot_df["RemoteOwner"].notna())]["AssignedGPUs"]
+        .dropna()
+        .nunique()
+    )
 
     # Count idle GPUs (those not running jobs)
     idle_gpus_count = unique_gpus - active_gpus_count
@@ -1416,38 +1452,34 @@ def analyze_gpu_model_at_time(
     backfill_gpus = filter_df(snapshot_df, "Backfill", "", "")
 
     # Get unique machines
-    machines = snapshot_df['Machine'].unique()
+    machines = snapshot_df["Machine"].unique()
 
     # Calculate utilization stats
-    claimed_with_usage = snapshot_df[
-        (snapshot_df['State'] == 'Claimed') &
-        (snapshot_df['GPUsAverageUsage'].notna())
-    ]
+    claimed_with_usage = snapshot_df[(snapshot_df["State"] == "Claimed") & (snapshot_df["GPUsAverageUsage"].notna())]
 
-    avg_utilization = claimed_with_usage['GPUsAverageUsage'].mean() if len(claimed_with_usage) > 0 else 0
+    avg_utilization = claimed_with_usage["GPUsAverageUsage"].mean() if len(claimed_with_usage) > 0 else 0
 
     # Get job information - ensure unique GPU IDs
-    active_jobs_df = snapshot_df[
-        (snapshot_df['State'] == 'Claimed') &
-        (snapshot_df['RemoteOwner'].notna())
-    ][['RemoteOwner', 'GlobalJobId', 'AssignedGPUs', 'Machine']].copy()
+    active_jobs_df = snapshot_df[(snapshot_df["State"] == "Claimed") & (snapshot_df["RemoteOwner"].notna())][
+        ["RemoteOwner", "GlobalJobId", "AssignedGPUs", "Machine"]
+    ].copy()
 
     # Remove duplicates based on AssignedGPUs, keeping first occurrence
-    active_jobs = active_jobs_df.drop_duplicates(subset=['AssignedGPUs'], keep='first')
+    active_jobs = active_jobs_df.drop_duplicates(subset=["AssignedGPUs"], keep="first")
 
     # Get inactive GPUs - ensure unique GPU IDs and exclude ones that appear in active jobs
-    inactive_gpus_df = snapshot_df[
-        snapshot_df['State'] == 'Unclaimed'
-    ][['AssignedGPUs', 'Machine', 'PrioritizedProjects']].copy()
+    inactive_gpus_df = snapshot_df[snapshot_df["State"] == "Unclaimed"][
+        ["AssignedGPUs", "Machine", "PrioritizedProjects"]
+    ].copy()
 
     # Remove duplicates based on AssignedGPUs, keeping first occurrence
-    inactive_gpus_unique = inactive_gpus_df.drop_duplicates(subset=['AssignedGPUs'], keep='first')
+    inactive_gpus_unique = inactive_gpus_df.drop_duplicates(subset=["AssignedGPUs"], keep="first")
 
     # Get list of GPU IDs that are active (have jobs running)
-    active_gpu_ids = set(active_jobs['AssignedGPUs'].dropna().tolist())
+    active_gpu_ids = set(active_jobs["AssignedGPUs"].dropna().tolist())
 
     # Filter out GPUs that appear in active jobs list
-    inactive_gpus = inactive_gpus_unique[~inactive_gpus_unique['AssignedGPUs'].isin(active_gpu_ids)]
+    inactive_gpus = inactive_gpus_unique[~inactive_gpus_unique["AssignedGPUs"].isin(active_gpu_ids)]
 
     return {
         "gpu_model": gpu_model,
@@ -1460,26 +1492,26 @@ def analyze_gpu_model_at_time(
             "unclaimed_gpus": unclaimed_gpus,  # This is now idle_gpus_count
             "utilization_percent": (claimed_gpus / total_gpus * 100) if total_gpus > 0 else 0,
             "avg_gpu_usage_percent": avg_utilization * 100 if avg_utilization else 0,
-            "num_machines": len(machines)
+            "num_machines": len(machines),
         },
         "by_class": {
             "Priority": {
-                "total": priority_gpus['AssignedGPUs'].dropna().nunique(),
-                "claimed": priority_gpus[priority_gpus['State'] == 'Claimed']['AssignedGPUs'].dropna().nunique()
+                "total": priority_gpus["AssignedGPUs"].dropna().nunique(),
+                "claimed": priority_gpus[priority_gpus["State"] == "Claimed"]["AssignedGPUs"].dropna().nunique(),
             },
             "Shared": {
-                "total": shared_gpus['AssignedGPUs'].dropna().nunique(),
-                "claimed": shared_gpus[shared_gpus['State'] == 'Claimed']['AssignedGPUs'].dropna().nunique()
+                "total": shared_gpus["AssignedGPUs"].dropna().nunique(),
+                "claimed": shared_gpus[shared_gpus["State"] == "Claimed"]["AssignedGPUs"].dropna().nunique(),
             },
             "Backfill": {
-                "total": backfill_gpus['AssignedGPUs'].dropna().nunique(),
-                "claimed": backfill_gpus[backfill_gpus['State'] == 'Claimed']['AssignedGPUs'].dropna().nunique()
-            }
+                "total": backfill_gpus["AssignedGPUs"].dropna().nunique(),
+                "claimed": backfill_gpus[backfill_gpus["State"] == "Claimed"]["AssignedGPUs"].dropna().nunique(),
+            },
         },
         "machines": list(machines),
-        "active_jobs": active_jobs.to_dict('records') if len(active_jobs) > 0 else [],
-        "inactive_gpus": inactive_gpus.to_dict('records') if len(inactive_gpus) > 0 else [],
-        "raw_data": snapshot_df
+        "active_jobs": active_jobs.to_dict("records") if len(active_jobs) > 0 else [],
+        "inactive_gpus": inactive_gpus.to_dict("records") if len(inactive_gpus) > 0 else [],
+        "raw_data": snapshot_df,
     }
 
 
@@ -1514,17 +1546,21 @@ def print_gpu_model_analysis(analysis: dict):
     print(f"Machines: {summary['num_machines']}")
 
     # Separate real slots (Priority + Shared) from backfill slots
-    real_slot_classes = ['Priority', 'Shared']
-    backfill_slot_classes = ['Backfill']
+    real_slot_classes = ["Priority", "Shared"]
+    backfill_slot_classes = ["Backfill"]
 
     # Calculate totals for real slots
-    real_total = sum(by_class[class_name]['total'] for class_name in real_slot_classes if class_name in by_class)
-    real_claimed = sum(by_class[class_name]['claimed'] for class_name in real_slot_classes if class_name in by_class)
+    real_total = sum(by_class[class_name]["total"] for class_name in real_slot_classes if class_name in by_class)
+    real_claimed = sum(by_class[class_name]["claimed"] for class_name in real_slot_classes if class_name in by_class)
     real_usage_pct = (real_claimed / real_total * 100) if real_total > 0 else 0
 
     # Calculate totals for backfill slots
-    backfill_total = sum(by_class[class_name]['total'] for class_name in backfill_slot_classes if class_name in by_class)
-    backfill_claimed = sum(by_class[class_name]['claimed'] for class_name in backfill_slot_classes if class_name in by_class)
+    backfill_total = sum(
+        by_class[class_name]["total"] for class_name in backfill_slot_classes if class_name in by_class
+    )
+    backfill_claimed = sum(
+        by_class[class_name]["claimed"] for class_name in backfill_slot_classes if class_name in by_class
+    )
     backfill_usage_pct = (backfill_claimed / backfill_total * 100) if backfill_total > 0 else 0
 
     print("\nREAL SLOTS:")
@@ -1532,20 +1568,19 @@ def print_gpu_model_analysis(analysis: dict):
     print(f"  TOTAL: {real_claimed}/{real_total} ({real_usage_pct:.1f}%)")
     print(f"{'-'*40}")
     for class_name in real_slot_classes:
-        if class_name in by_class and by_class[class_name]['total'] > 0:
+        if class_name in by_class and by_class[class_name]["total"] > 0:
             stats = by_class[class_name]
-            usage_pct = (stats['claimed'] / stats['total'] * 100) if stats['total'] > 0 else 0
+            usage_pct = (stats["claimed"] / stats["total"] * 100) if stats["total"] > 0 else 0
             print(f"  {class_name}: {stats['claimed']}/{stats['total']} ({usage_pct:.1f}%)")
-
 
     print("\nBACKFILL SLOTS:")
     print(f"{'-'*40}")
     print(f"  TOTAL: {backfill_claimed}/{backfill_total} ({backfill_usage_pct:.1f}%)")
     print(f"{'-'*40}")
     for class_name in backfill_slot_classes:
-        if class_name in by_class and by_class[class_name]['total'] > 0:
+        if class_name in by_class and by_class[class_name]["total"] > 0:
             stats = by_class[class_name]
-            usage_pct = (stats['claimed'] / stats['total'] * 100) if stats['total'] > 0 else 0
+            usage_pct = (stats["claimed"] / stats["total"] * 100) if stats["total"] > 0 else 0
             print(f"  {class_name}: {stats['claimed']}/{stats['total']} ({usage_pct:.1f}%)")
 
     print(f"\nMACHINES ({len(machines)}):")
@@ -1559,10 +1594,10 @@ def print_gpu_model_analysis(analysis: dict):
         print("  User                | Job ID          | GPU ID      | Machine")
         print(f"{'-'*60}")
         for job in active_jobs:
-            user = (job.get('RemoteOwner') or 'N/A')[:19]
-            job_id = (job.get('GlobalJobId') or 'N/A')[:14]
-            gpu_id = (job.get('AssignedGPUs') or 'N/A')[:11]
-            machine = (job.get('Machine') or 'N/A')[:19]
+            user = (job.get("RemoteOwner") or "N/A")[:19]
+            job_id = (job.get("GlobalJobId") or "N/A")[:14]
+            gpu_id = (job.get("AssignedGPUs") or "N/A")[:11]
+            machine = (job.get("Machine") or "N/A")[:19]
             print(f"  {user:<18} | {job_id:<15} | {gpu_id:<11} | {machine}")
     else:
         print("\nNo active jobs found.")
@@ -1573,9 +1608,9 @@ def print_gpu_model_analysis(analysis: dict):
         print("  GPU ID      | Machine             | Priority Projects")
         print(f"{'-'*60}")
         for gpu in inactive_gpus:
-            gpu_id = (gpu.get('AssignedGPUs') or 'N/A')[:11]
-            machine = (gpu.get('Machine') or 'N/A')[:19]
-            priority_projects = (gpu.get('PrioritizedProjects') or 'None')[:29]
+            gpu_id = (gpu.get("AssignedGPUs") or "N/A")[:11]
+            machine = (gpu.get("Machine") or "N/A")[:19]
+            priority_projects = (gpu.get("PrioritizedProjects") or "None")[:29]
             print(f"  {gpu_id:<11} | {machine:<19} | {priority_projects}")
     else:
         print("\nNo inactive GPUs found.")
@@ -1594,14 +1629,14 @@ def send_email_report(
     smtp_server: str = "smtp.wiscmail.wisc.edu",
     smtp_port: int = 25,
     subject_prefix: str = "CHTC GPU Allocation",
-    usage_percentages: Optional[Dict[str, float]] = None,
-    lookback_hours: Optional[int] = None,
+    usage_percentages: dict[str, float] | None = None,
+    lookback_hours: int | None = None,
     use_auth: bool = False,
     timeout: int = 30,
     debug: bool = False,
-    device_stats: Optional[Dict] = None,
-    analysis_type = None,
-    month = None
+    device_stats: dict | None = None,
+    analysis_type=None,
+    month=None,
 ) -> bool:
     """
     Send HTML report via email using SMTP, matching mailx behavior.
@@ -1624,15 +1659,15 @@ def send_email_report(
     """
     try:
         # Parse comma-separated email addresses
-        recipients = [email.strip() for email in to_email.split(',') if email.strip()]
+        recipients = [email.strip() for email in to_email.split(",") if email.strip()]
 
         if not recipients:
             print("Error: No valid email addresses provided")
             return False
 
         # Create message
-        msg = MIMEMultipart('alternative')
-        today = datetime.datetime.now().strftime('%Y-%m-%d')
+        msg = MIMEMultipart("alternative")
+        today = datetime.datetime.now().strftime("%Y-%m-%d")
 
         # Build subject with lookback period and usage percentages
         subject = f"{subject_prefix} {today}"
@@ -1660,7 +1695,7 @@ def send_email_report(
                 "Priority-ResearcherOwned",  # Prioritized (Researcher Owned)
                 "Priority-CHTCOwned",  # Prioritized (CHTC Owned)
                 "Shared",  # Open Capacity
-                "Backfill"  # Backfill (all types combined)
+                "Backfill",  # Backfill (all types combined)
             ]
             usage_parts = []
             for class_name in class_order:
@@ -1678,8 +1713,10 @@ def send_email_report(
                             if backfill_type in device_stats:
                                 device_data = device_stats[backfill_type]
                                 if device_data:
-                                    total_claimed += sum(stats['avg_claimed'] for stats in device_data.values())
-                                    total_available += sum(stats['avg_total_available'] for stats in device_data.values())
+                                    total_claimed += sum(stats["avg_claimed"] for stats in device_data.values())
+                                    total_available += sum(
+                                        stats["avg_total_available"] for stats in device_data.values()
+                                    )
 
                         if total_available > 0:
                             combined_percentage = (total_claimed / total_available) * 100
@@ -1688,14 +1725,14 @@ def send_email_report(
             if usage_parts:
                 subject += f" ({' | '.join(usage_parts)})"
 
-        msg['Subject'] = subject
+        msg["Subject"] = subject
         if debug:
             print(f"DEBUG: Email subject would be: {subject}")
-        msg['From'] = from_email
-        msg['To'] = ', '.join(recipients)
+        msg["From"] = from_email
+        msg["To"] = ", ".join(recipients)
 
         # Attach HTML content
-        html_part = MIMEText(html_content, 'html')
+        html_part = MIMEText(html_content, "html")
         msg.attach(html_part)
 
         # Try multiple ports if connection fails (common university SMTP setup)
@@ -1753,7 +1790,7 @@ def send_email_report(
 
 def simple_markdown_to_html(markdown_text: str) -> str:
     """Convert simple markdown to HTML. Supports headers, bold, lists, and paragraphs."""
-    lines = markdown_text.split('\n')
+    lines = markdown_text.split("\n")
     html_lines = []
     in_list = False
 
@@ -1767,30 +1804,30 @@ def simple_markdown_to_html(markdown_text: str) -> str:
             continue
 
         # Headers
-        if line.startswith('# '):
+        if line.startswith("# "):
             if in_list:
                 html_lines.append("</ul>")
                 in_list = False
             html_lines.append(f"<h2>{line[2:]}</h2>")
         # Bold text and convert **text:** to <strong>text:</strong>
-        elif '**' in line:
+        elif "**" in line:
             # Handle list items
-            if line.startswith('- '):
+            if line.startswith("- "):
                 if not in_list:
                     html_lines.append("<ul>")
                     in_list = True
                 line = line[2:]  # Remove "- "
-                line = line.replace('**', '<strong>', 1).replace('**', '</strong>', 1)
+                line = line.replace("**", "<strong>", 1).replace("**", "</strong>", 1)
                 html_lines.append(f"<li>{line}</li>")
             else:
                 # Regular paragraph with bold
                 if in_list:
                     html_lines.append("</ul>")
                     in_list = False
-                line = line.replace('**', '<strong>', 1).replace('**', '</strong>', 1)
+                line = line.replace("**", "<strong>", 1).replace("**", "</strong>", 1)
                 html_lines.append(f"<p>{line}</p>")
         # Regular list items
-        elif line.startswith('- '):
+        elif line.startswith("- "):
             if not in_list:
                 html_lines.append("<ul>")
                 in_list = True
@@ -1805,13 +1842,14 @@ def simple_markdown_to_html(markdown_text: str) -> str:
     if in_list:
         html_lines.append("</ul>")
 
-    return '\n'.join(html_lines)
+    return "\n".join(html_lines)
+
 
 def load_methodology() -> str:
     """Load methodology from external markdown file and convert to HTML."""
     methodology_path = Path(__file__).parent / "methodology.md"
     try:
-        with open(methodology_path, 'r', encoding='utf-8') as f:
+        with open(methodology_path, encoding="utf-8") as f:
             markdown_content = f.read()
         return simple_markdown_to_html(markdown_content)
     except FileNotFoundError:
@@ -1820,7 +1858,7 @@ def load_methodology() -> str:
         return f"<p><em>Error loading methodology: {e}</em></p>"
 
 
-def generate_html_report(results: dict, output_file: Optional[str] = None) -> str:
+def generate_html_report(results: dict, output_file: str | None = None) -> str:
     """
     Generate a simple HTML report with tables from analysis results.
 
@@ -1849,7 +1887,7 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
                 "num_intervals": monthly_stats["data_coverage"].get("unique_intervals", 0),
                 "total_records": monthly_stats["data_coverage"].get("total_records", 0),
                 "excluded_hosts": {},
-                "filtered_hosts_info": {}
+                "filtered_hosts_info": {},
             }
         }
 
@@ -1869,14 +1907,14 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
         html_content = generate_html_report(regular_results, output_file)
 
         # Update the title to indicate it's a monthly report
-        start_date_str = monthly_stats['start_date'].strftime('%B %Y') if hasattr(monthly_stats['start_date'], 'strftime') else str(monthly_stats['month'])
-        html_content = html_content.replace(
-            "<title>CHTC GPU Allocation Report</title>",
-            f"<title>CHTC Monthly GPU Report - {start_date_str}</title>"
-        ).replace(
-            "<h1>CHTC GPU ALLOCATION REPORT</h1>",
-            f"<h1>CHTC MONTHLY GPU REPORT - {start_date_str.upper()}</h1>"
+        start_date_str = (
+            monthly_stats["start_date"].strftime("%B %Y")
+            if hasattr(monthly_stats["start_date"], "strftime")
+            else str(monthly_stats["month"])
         )
+        html_content = html_content.replace(
+            "<title>CHTC GPU Allocation Report</title>", f"<title>CHTC Monthly GPU Report - {start_date_str}</title>"
+        ).replace("<h1>CHTC GPU ALLOCATION REPORT</h1>", f"<h1>CHTC MONTHLY GPU REPORT - {start_date_str.upper()}</h1>")
 
         return html_content
 
@@ -1894,7 +1932,7 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
     # Header
     html_parts.append("<h1>CHTC GPU ALLOCATION REPORT</h1>")
     # Simplified period format: just the lookback hours
-    hours_back = metadata.get('hours_back', 24)
+    hours_back = metadata.get("hours_back", 24)
     hours_str = str(int(hours_back)) if hours_back == int(hours_back) else str(hours_back)
     hour_word = "hour" if hours_back == 1 else "hours"
     period_str = f"{hours_str} {hour_word}"
@@ -1911,15 +1949,15 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
             if device_data:
                 total_claimed = 0
                 total_available = 0
-                for device_type, stats in device_data.items():
-                    total_claimed += stats['avg_claimed']
-                    total_available += stats['avg_total_available']
+                for _device_type, stats in device_data.items():
+                    total_claimed += stats["avg_claimed"]
+                    total_available += stats["avg_total_available"]
 
                 if total_available > 0:
                     class_totals[class_name] = {
-                        'claimed': total_claimed,
-                        'total': total_available,
-                        'percent': (total_claimed / total_available) * 100
+                        "claimed": total_claimed,
+                        "total": total_available,
+                        "percent": (total_claimed / total_available) * 100,
                     }
 
     # Cluster summary at the top with real slots and backfill slots separated
@@ -1929,13 +1967,13 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
         backfill_slot_classes = ["Backfill-ResearcherOwned", "Backfill-CHTCOwned", "Backfill-OpenCapacity"]
 
         # Calculate totals for real slots
-        real_claimed = sum(class_totals[c]['claimed'] for c in real_slot_classes if c in class_totals)
-        real_total = sum(class_totals[c]['total'] for c in real_slot_classes if c in class_totals)
+        real_claimed = sum(class_totals[c]["claimed"] for c in real_slot_classes if c in class_totals)
+        real_total = sum(class_totals[c]["total"] for c in real_slot_classes if c in class_totals)
         real_percent = (real_claimed / real_total * 100) if real_total > 0 else 0
 
         # Calculate totals for backfill slots
-        backfill_claimed = sum(class_totals[c]['claimed'] for c in backfill_slot_classes if c in class_totals)
-        backfill_total = sum(class_totals[c]['total'] for c in backfill_slot_classes if c in class_totals)
+        backfill_claimed = sum(class_totals[c]["claimed"] for c in backfill_slot_classes if c in class_totals)
+        backfill_total = sum(class_totals[c]["total"] for c in backfill_slot_classes if c in class_totals)
         backfill_percent = (backfill_claimed / backfill_total * 100) if backfill_total > 0 else 0
 
         # Calculate Open Capacity breakdown by performance tier (Flagship vs Standard)
@@ -1944,24 +1982,28 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
             shared_device_data = device_stats["Shared"]
             for device_type, stats in shared_device_data.items():
                 tier = get_gpu_performance_tier(device_type)
-                open_capacity_tiers[tier]["claimed"] += stats['avg_claimed']
-                open_capacity_tiers[tier]["total"] += stats['avg_total_available']
+                open_capacity_tiers[tier]["claimed"] += stats["avg_claimed"]
+                open_capacity_tiers[tier]["total"] += stats["avg_total_available"]
 
         # Calculate percentages for each tier
         for tier in open_capacity_tiers:
             if open_capacity_tiers[tier]["total"] > 0:
-                open_capacity_tiers[tier]["percent"] = (open_capacity_tiers[tier]["claimed"] / open_capacity_tiers[tier]["total"]) * 100
+                open_capacity_tiers[tier]["percent"] = (
+                    open_capacity_tiers[tier]["claimed"] / open_capacity_tiers[tier]["total"]
+                ) * 100
             else:
                 open_capacity_tiers[tier]["percent"] = 0
 
         # Real Slots Table
         html_parts.append("<h2>Real Slots</h2>")
         html_parts.append("<table border='1' style='margin-top: 20px;'>")
-        html_parts.append("<tr style='background-color: #e0e0e0;'><th>Class</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>")
+        html_parts.append(
+            "<tr style='background-color: #e0e0e0;'><th>Class</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>"
+        )
 
         # Total row for real slots
         html_parts.append("<tr style='background-color: #d0d0d0; font-weight: bold;'>")
-        html_parts.append(f"<td style='font-weight: bold;'>TOTAL</td>")
+        html_parts.append("<td style='font-weight: bold;'>TOTAL</td>")
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{real_percent:.1f}%</td>")
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{real_claimed:.1f}</td>")
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{real_total:.1f}</td>")
@@ -1977,15 +2019,23 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
                         if tier_data["total"] > 0:
                             html_parts.append("<tr>")
                             html_parts.append(f"<td style='font-weight: bold;'>Open Capacity ({tier})</td>")
-                            html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{tier_data['percent']:.1f}%</td>")
-                            html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{tier_data['claimed']:.1f}</td>")
-                            html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{tier_data['total']:.1f}</td>")
+                            html_parts.append(
+                                f"<td style='text-align: right; font-weight: bold;'>{tier_data['percent']:.1f}%</td>"
+                            )
+                            html_parts.append(
+                                f"<td style='text-align: right; font-weight: bold;'>{tier_data['claimed']:.1f}</td>"
+                            )
+                            html_parts.append(
+                                f"<td style='text-align: right; font-weight: bold;'>{tier_data['total']:.1f}</td>"
+                            )
                             html_parts.append("</tr>")
                 else:
                     totals = class_totals[class_name]
                     html_parts.append("<tr>")
                     html_parts.append(f"<td style='font-weight: bold;'>{get_display_name(class_name)}</td>")
-                    html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{totals['percent']:.1f}%</td>")
+                    html_parts.append(
+                        f"<td style='text-align: right; font-weight: bold;'>{totals['percent']:.1f}%</td>"
+                    )
                     html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{totals['claimed']:.1f}</td>")
                     html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{totals['total']:.1f}</td>")
                     html_parts.append("</tr>")
@@ -1995,7 +2045,7 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
 
         # Backfill section header
         html_parts.append("<tr style='background-color: #d0d0d0; font-weight: bold;'>")
-        html_parts.append(f"<td style='font-weight: bold;'>BACKFILL TOTAL</td>")
+        html_parts.append("<td style='font-weight: bold;'>BACKFILL TOTAL</td>")
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{backfill_percent:.1f}%</td>")
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{backfill_claimed:.1f}</td>")
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{backfill_total:.1f}</td>")
@@ -2020,19 +2070,25 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
             if memory_stats:
                 html_parts.append("<h2>Real Slots by Memory Category (filtered)</h2>")
                 html_parts.append("<table border='1' style='margin-top: 20px;'>")
-                html_parts.append("<tr style='background-color: #e0e0e0;'><th>Memory Category</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>")
+                html_parts.append(
+                    "<tr style='background-color: #e0e0e0;'><th>Memory Category</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>"
+                )
 
                 # Calculate totals for memory categories
-                memory_total_claimed = sum(stats['avg_claimed'] for stats in memory_stats.values())
-                memory_total_available = sum(stats['avg_total_available'] for stats in memory_stats.values())
-                memory_total_percent = (memory_total_claimed / memory_total_available * 100) if memory_total_available > 0 else 0
+                memory_total_claimed = sum(stats["avg_claimed"] for stats in memory_stats.values())
+                memory_total_available = sum(stats["avg_total_available"] for stats in memory_stats.values())
+                memory_total_percent = (
+                    (memory_total_claimed / memory_total_available * 100) if memory_total_available > 0 else 0
+                )
 
                 # Total row for memory categories
                 html_parts.append("<tr style='background-color: #d0d0d0; font-weight: bold;'>")
-                html_parts.append(f"<td style='font-weight: bold;'>TOTAL</td>")
+                html_parts.append("<td style='font-weight: bold;'>TOTAL</td>")
                 html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{memory_total_percent:.1f}%</td>")
                 html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{memory_total_claimed:.1f}</td>")
-                html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{memory_total_available:.1f}</td>")
+                html_parts.append(
+                    f"<td style='text-align: right; font-weight: bold;'>{memory_total_available:.1f}</td>"
+                )
                 html_parts.append("</tr>")
 
                 # Sort memory categories by numerical value
@@ -2056,6 +2112,7 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
                                 return float(cat[:-2])  # Remove "GB" suffix
                         else:
                             return 0  # Fallback
+
                     return sorted(categories, key=get_sort_key)
 
                 # Individual memory categories (sorted by memory size)
@@ -2064,9 +2121,15 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
                     stats = memory_stats[memory_cat]
                     html_parts.append("<tr>")
                     html_parts.append(f"<td style='font-weight: bold;'>{memory_cat}</td>")
-                    html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{stats['allocation_usage_percent']:.1f}%</td>")
-                    html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{stats['avg_claimed']:.1f}</td>")
-                    html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{stats['avg_total_available']:.1f}</td>")
+                    html_parts.append(
+                        f"<td style='text-align: right; font-weight: bold;'>{stats['allocation_usage_percent']:.1f}%</td>"
+                    )
+                    html_parts.append(
+                        f"<td style='text-align: right; font-weight: bold;'>{stats['avg_claimed']:.1f}</td>"
+                    )
+                    html_parts.append(
+                        f"<td style='text-align: right; font-weight: bold;'>{stats['avg_total_available']:.1f}</td>"
+                    )
                     html_parts.append("</tr>")
 
                 html_parts.append("</table>")
@@ -2074,7 +2137,9 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
     if "allocation_stats" in results:
         html_parts.append("<h2>Allocation Summary</h2>")
         html_parts.append("<table border='1'>")
-        html_parts.append("<tr><th>Class</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>")
+        html_parts.append(
+            "<tr><th>Class</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>"
+        )
 
         allocation_stats = results["allocation_stats"]
 
@@ -2102,24 +2167,24 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
                 slot_type_users = {}
 
                 for user, user_data in h200_stats.items():
-                    for slot_type, slot_data in user_data['slot_breakdown'].items():
+                    for slot_type, slot_data in user_data["slot_breakdown"].items():
                         if slot_type not in slot_type_totals:
                             slot_type_totals[slot_type] = 0
                             slot_type_users[slot_type] = []
 
-                        slot_type_totals[slot_type] += slot_data['gpu_hours']
-                        slot_type_users[slot_type].append({
-                            'user': user,
-                            'gpu_hours': slot_data['gpu_hours'],
-                            'percentage': slot_data['percentage']
-                        })
+                        slot_type_totals[slot_type] += slot_data["gpu_hours"]
+                        slot_type_users[slot_type].append(
+                            {"user": user, "gpu_hours": slot_data["gpu_hours"], "percentage": slot_data["percentage"]}
+                        )
 
                 # Sort slot types by total GPU hours (descending)
                 sorted_slot_types = sorted(slot_type_totals.items(), key=lambda x: x[1], reverse=True)
 
                 # Single table with slot type totals and user breakdowns
                 html_parts.append("<table border='1' style='margin-top: 20px;'>")
-                html_parts.append("<tr style='background-color: #e0e0e0;'><th>Slot Type / User</th><th>GPU-Hours</th><th>% of Total</th></tr>")
+                html_parts.append(
+                    "<tr style='background-color: #e0e0e0;'><th>Slot Type / User</th><th>GPU-Hours</th><th>% of Total</th></tr>"
+                )
 
                 total_gpu_hours = sum(slot_type_totals.values())
 
@@ -2137,11 +2202,11 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
 
                     # User breakdown rows beneath the slot type total
                     users = slot_type_users[slot_type]
-                    users.sort(key=lambda x: x['gpu_hours'], reverse=True)
+                    users.sort(key=lambda x: x["gpu_hours"], reverse=True)
 
                     for user_info in users:
-                        user = user_info['user']
-                        gpu_hours = user_info['gpu_hours']
+                        user = user_info["user"]
+                        gpu_hours = user_info["gpu_hours"]
                         user_total_percentage = (gpu_hours / total_gpu_hours * 100) if total_gpu_hours > 0 else 0
 
                         html_parts.append("<tr>")
@@ -2163,23 +2228,23 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
                 slot_type_users = {}
 
                 for user, user_data in backfill_stats.items():
-                    for slot_type, slot_data in user_data['slot_breakdown'].items():
+                    for slot_type, slot_data in user_data["slot_breakdown"].items():
                         if slot_type not in slot_type_totals:
                             slot_type_totals[slot_type] = 0
                             slot_type_users[slot_type] = []
-                        slot_type_totals[slot_type] += slot_data['gpu_hours']
-                        slot_type_users[slot_type].append({
-                            'user': user,
-                            'gpu_hours': slot_data['gpu_hours'],
-                            'percentage': slot_data['percentage']
-                        })
+                        slot_type_totals[slot_type] += slot_data["gpu_hours"]
+                        slot_type_users[slot_type].append(
+                            {"user": user, "gpu_hours": slot_data["gpu_hours"], "percentage": slot_data["percentage"]}
+                        )
 
                 # Sort slot types by total GPU hours (descending)
                 sorted_slot_types = sorted(slot_type_totals.items(), key=lambda x: x[1], reverse=True)
 
                 # Single table with slot type totals and user breakdowns
                 html_parts.append("<table border='1' style='margin-top: 20px;'>")
-                html_parts.append("<tr style='background-color: #e0e0e0;'><th>Slot Type / User</th><th>GPU-Hours</th><th>% of Total</th></tr>")
+                html_parts.append(
+                    "<tr style='background-color: #e0e0e0;'><th>Slot Type / User</th><th>GPU-Hours</th><th>% of Total</th></tr>"
+                )
 
                 total_gpu_hours = sum(slot_type_totals.values())
                 for slot_type, total_hours in sorted_slot_types:
@@ -2196,10 +2261,10 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
 
                     # User breakdown rows beneath the slot type total
                     users = slot_type_users[slot_type]
-                    users.sort(key=lambda x: x['gpu_hours'], reverse=True)
+                    users.sort(key=lambda x: x["gpu_hours"], reverse=True)
                     for user_info in users:
-                        user = user_info['user']
-                        gpu_hours = user_info['gpu_hours']
+                        user = user_info["user"]
+                        gpu_hours = user_info["gpu_hours"]
                         user_total_percentage = (gpu_hours / total_gpu_hours * 100) if total_gpu_hours > 0 else 0
                         html_parts.append("<tr>")
                         html_parts.append(f"<td style='padding-left: 30px;'>{user}</td>")
@@ -2216,14 +2281,16 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
             if device_data:
                 html_parts.append(f"<h3>{get_display_name(class_name)}</h3>")
                 html_parts.append("<table border='1'>")
-                html_parts.append("<tr><th>Device Type</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>")
+                html_parts.append(
+                    "<tr><th>Device Type</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>"
+                )
 
                 # Calculate totals first
                 total_claimed = 0
                 total_available = 0
-                for device_type, stats in sorted(device_data.items()):
-                    total_claimed += stats['avg_claimed']
-                    total_available += stats['avg_total_available']
+                for _device_type, stats in sorted(device_data.items()):
+                    total_claimed += stats["avg_claimed"]
+                    total_available += stats["avg_total_available"]
 
                 # Add total row first
                 if total_available > 0:
@@ -2236,9 +2303,9 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
                     html_parts.append("</tr>")
 
                     class_totals[class_name] = {
-                        'claimed': total_claimed,
-                        'total': total_available,
-                        'percent': total_percent
+                        "claimed": total_claimed,
+                        "total": total_available,
+                        "percent": total_percent,
                     }
 
                 # Add individual device rows (sorted alphabetically)
@@ -2271,7 +2338,6 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
 
                     html_parts.append("</table>")
 
-
     # Device stats tables
     elif "device_stats" in results:
         html_parts.append("<h2>Usage by Device Type (filtered)</h2>")
@@ -2287,14 +2353,16 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
             if device_data:
                 html_parts.append(f"<h3>{get_display_name(class_name)}</h3>")
                 html_parts.append("<table border='1'>")
-                html_parts.append("<tr><th>Device Type</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>")
+                html_parts.append(
+                    "<tr><th>Device Type</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>"
+                )
 
                 # Calculate totals first
                 total_claimed = 0
                 total_available = 0
-                for device_type, stats in sorted(device_data.items()):
-                    total_claimed += stats['avg_claimed']
-                    total_available += stats['avg_total_available']
+                for _device_type, stats in sorted(device_data.items()):
+                    total_claimed += stats["avg_claimed"]
+                    total_available += stats["avg_total_available"]
 
                 # Add total row first
                 if total_available > 0:
@@ -2307,9 +2375,9 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
                     html_parts.append("</tr>")
 
                     class_totals[class_name] = {
-                        'claimed': total_claimed,
-                        'total': total_available,
-                        'percent': total_percent
+                        "claimed": total_claimed,
+                        "total": total_available,
+                        "percent": total_percent,
                     }
 
                 # Add individual device rows (sorted alphabetically)
@@ -2324,7 +2392,6 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
 
                 html_parts.append("</table>")
 
-
         # Cluster summary with real slots and backfill slots separated
         if class_totals:
             # Separate real slots from backfill slots (using simplified class names)
@@ -2332,19 +2399,21 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
             backfill_slot_classes = ["Backfill"]
 
             # Calculate totals for real slots
-            real_claimed = sum(class_totals[c]['claimed'] for c in real_slot_classes if c in class_totals)
-            real_total = sum(class_totals[c]['total'] for c in real_slot_classes if c in class_totals)
+            real_claimed = sum(class_totals[c]["claimed"] for c in real_slot_classes if c in class_totals)
+            real_total = sum(class_totals[c]["total"] for c in real_slot_classes if c in class_totals)
             real_percent = (real_claimed / real_total * 100) if real_total > 0 else 0
 
             # Calculate totals for backfill slots
-            backfill_claimed = sum(class_totals[c]['claimed'] for c in backfill_slot_classes if c in class_totals)
-            backfill_total = sum(class_totals[c]['total'] for c in backfill_slot_classes if c in class_totals)
+            backfill_claimed = sum(class_totals[c]["claimed"] for c in backfill_slot_classes if c in class_totals)
+            backfill_total = sum(class_totals[c]["total"] for c in backfill_slot_classes if c in class_totals)
             backfill_percent = (backfill_claimed / backfill_total * 100) if backfill_total > 0 else 0
 
             # Real Slots Table
             html_parts.append("<h2>Real Slots</h2>")
             html_parts.append("<table border='1'>")
-            html_parts.append("<tr><th>Class</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>")
+            html_parts.append(
+                "<tr><th>Class</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>"
+            )
 
             # Total row for real slots
             html_parts.append("<tr style='font-weight: bold; background-color: #f0f0f0;'>")
@@ -2372,12 +2441,16 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
                 if memory_stats:
                     html_parts.append("<h2>Real Slots by Memory Category (filtered)</h2>")
                     html_parts.append("<table border='1'>")
-                    html_parts.append("<tr><th>Memory Category</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>")
+                    html_parts.append(
+                        "<tr><th>Memory Category</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>"
+                    )
 
                     # Calculate totals for memory categories
-                    memory_total_claimed = sum(stats['avg_claimed'] for stats in memory_stats.values())
-                    memory_total_available = sum(stats['avg_total_available'] for stats in memory_stats.values())
-                    memory_total_percent = (memory_total_claimed / memory_total_available * 100) if memory_total_available > 0 else 0
+                    memory_total_claimed = sum(stats["avg_claimed"] for stats in memory_stats.values())
+                    memory_total_available = sum(stats["avg_total_available"] for stats in memory_stats.values())
+                    memory_total_percent = (
+                        (memory_total_claimed / memory_total_available * 100) if memory_total_available > 0 else 0
+                    )
 
                     # Total row for memory categories
                     html_parts.append("<tr style='font-weight: bold; background-color: #f0f0f0;'>")
@@ -2402,6 +2475,7 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
                                     return float(cat[:-2])  # Remove "GB" suffix
                             else:
                                 return 0  # Fallback
+
                         return sorted(categories, key=get_sort_key)
 
                     # Individual memory categories (sorted by memory size)
@@ -2410,18 +2484,21 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
                         stats = memory_stats[memory_cat]
                         html_parts.append("<tr>")
                         html_parts.append(f"<td>{memory_cat}</td>")
-                        html_parts.append(f"<td style='text-align: right'>{stats['allocation_usage_percent']:.1f}%</td>")
+                        html_parts.append(
+                            f"<td style='text-align: right'>{stats['allocation_usage_percent']:.1f}%</td>"
+                        )
                         html_parts.append(f"<td style='text-align: right'>{stats['avg_claimed']:.1f}</td>")
                         html_parts.append(f"<td style='text-align: right'>{stats['avg_total_available']:.1f}</td>")
                         html_parts.append("</tr>")
 
                     html_parts.append("</table>")
 
-
             # Backfill Slots Table
             html_parts.append("<h2>Backfill Slots</h2>")
             html_parts.append("<table border='1'>")
-            html_parts.append("<tr><th>Class</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>")
+            html_parts.append(
+                "<tr><th>Class</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>"
+            )
 
             # Total row for backfill slots
             html_parts.append("<tr style='font-weight: bold; background-color: #f0f0f0;'>")
@@ -2443,9 +2520,8 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
                     html_parts.append("</tr>")
             html_parts.append("</table>")
 
-
     # Excluded hosts
-    excluded_hosts = metadata.get('excluded_hosts', {})
+    excluded_hosts = metadata.get("excluded_hosts", {})
     if excluded_hosts:
         html_parts.append("<h2>Excluded Hosts</h2>")
         html_parts.append("<table border='1'>")
@@ -2459,14 +2535,14 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
     # if filtered_info:
     #     total_original = sum(info['original_count'] for info in filtered_info)
     #     total_filtered = sum(info['filtered_count'] for info in filtered_info)
-        #records_excluded = total_original - total_filtered
-        # if records_excluded > 0:
-        #     html_parts.append("<h2>Filtering Impact</h2>")
-        #     html_parts.append("<table border='1'>")
-        #     html_parts.append("<tr><th>Metric</th><th>Count</th></tr>")
-        #     html_parts.append(f"<tr><td>Records excluded</td><td>{records_excluded:,}</td></tr>")
-        #     html_parts.append(f"<tr><td>Records analyzed</td><td>{total_filtered:,}</td></tr>")
-        #     html_parts.append("</table>")
+    # records_excluded = total_original - total_filtered
+    # if records_excluded > 0:
+    #     html_parts.append("<h2>Filtering Impact</h2>")
+    #     html_parts.append("<table border='1'>")
+    #     html_parts.append("<tr><th>Metric</th><th>Count</th></tr>")
+    #     html_parts.append(f"<tr><td>Records excluded</td><td>{records_excluded:,}</td></tr>")
+    #     html_parts.append(f"<tr><td>Records analyzed</td><td>{total_filtered:,}</td></tr>")
+    #     html_parts.append("</table>")
 
     # Add methodology section from external file
     methodology_html = load_methodology()
@@ -2475,7 +2551,9 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
     html_parts.append("</div>")
 
     # Add time range information at the end
-    html_parts.append("<div style='background-color: #f0f0f0; padding: 10px; margin-top: 20px; text-align: center; font-style: italic; color: #666;'>")
+    html_parts.append(
+        "<div style='background-color: #f0f0f0; padding: 10px; margin-top: 20px; text-align: center; font-style: italic; color: #666;'>"
+    )
     if metadata.get("is_monthly", False):
         # For monthly reports, show the month
         monthly_period = metadata.get("monthly_period", "Unknown Period")
@@ -2486,12 +2564,12 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
         end_time = metadata.get("end_time")
         if start_time and end_time:
             # Format timestamps nicely
-            if hasattr(start_time, 'strftime'):
-                start_str = start_time.strftime('%Y-%m-%d %H:%M:%S')
+            if hasattr(start_time, "strftime"):
+                start_str = start_time.strftime("%Y-%m-%d %H:%M:%S")
             else:
                 start_str = str(start_time)
-            if hasattr(end_time, 'strftime'):
-                end_str = end_time.strftime('%Y-%m-%d %H:%M:%S')
+            if hasattr(end_time, "strftime"):
+                end_str = end_time.strftime("%Y-%m-%d %H:%M:%S")
             else:
                 end_str = str(end_time)
             html_parts.append(f"<strong>Data Period:</strong> {start_str} to {end_str}")
@@ -2520,13 +2598,11 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
         if "analysis_end_datetime" in metadata:
             end_time = metadata["analysis_end_datetime"]
             # Parse ISO format and format for display
-            try:
-                from datetime import datetime as dt_parser
-                dt = dt_parser.fromisoformat(end_time.replace('Z', '+00:00'))
-                time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
-                html_parts.append(f" | Generated: {time_str}")
-            except:
-                pass
+            from datetime import datetime as dt_parser
+
+            dt = dt_parser.fromisoformat(end_time.replace("Z", "+00:00"))
+            time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+            html_parts.append(f" | Generated: {time_str}")
 
     html_parts.append("</div>")
 
@@ -2538,11 +2614,12 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
     # Save to file if specified
     if output_file:
         try:
-            with open(output_file, 'w') as f:
+            with open(output_file, "w") as f:
                 f.write(html_content)
             print(f"HTML report saved to: {output_file}")
         except Exception as e:
             import sys
+
             print(f"Error saving HTML report to {output_file}: {e}", file=sys.stderr)
             # Fall back to stdout
             print(html_content)
@@ -2551,7 +2628,7 @@ def generate_html_report(results: dict, output_file: Optional[str] = None) -> st
     return html_content
 
 
-def print_analysis_results(results: dict, output_format: str = "text", output_file: Optional[str] = None):
+def print_analysis_results(results: dict, output_format: str = "text", output_file: str | None = None):
     """Print analysis results in a formatted way.
 
     Args:
@@ -2586,7 +2663,7 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
                 "num_intervals": monthly_stats["data_coverage"].get("unique_intervals", 0),
                 "total_records": monthly_stats["data_coverage"].get("total_records", 0),
                 "excluded_hosts": {},
-                "filtered_hosts_info": {}
+                "filtered_hosts_info": {},
             }
         }
 
@@ -2607,7 +2684,11 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
 
         # Mark as monthly for different header formatting
         results["metadata"]["is_monthly"] = True
-        results["metadata"]["monthly_period"] = monthly_stats['start_date'].strftime('%B %Y') if hasattr(monthly_stats['start_date'], 'strftime') else str(monthly_stats['month'])
+        results["metadata"]["monthly_period"] = (
+            monthly_stats["start_date"].strftime("%B %Y")
+            if hasattr(monthly_stats["start_date"], "strftime")
+            else str(monthly_stats["month"])
+        )
 
     metadata = results["metadata"]
 
@@ -2623,7 +2704,7 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
         print(f"{'CHTC GPU UTILIZATION REPORT':^70}")
         print(f"{'='*70}")
         # Simplified period format for console: just the lookback hours
-        hours_back = metadata.get('hours_back', 24)
+        hours_back = metadata.get("hours_back", 24)
         hours_str = str(int(hours_back)) if hours_back == int(hours_back) else str(hours_back)
         hour_word = "hour" if hours_back == 1 else "hours"
         period_str = f"{hours_str} {hour_word}"
@@ -2641,15 +2722,15 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
             if device_data:
                 total_claimed = 0
                 total_available = 0
-                for device_type, stats in device_data.items():
-                    total_claimed += stats['avg_claimed']
-                    total_available += stats['avg_total_available']
+                for _device_type, stats in device_data.items():
+                    total_claimed += stats["avg_claimed"]
+                    total_available += stats["avg_total_available"]
 
                 if total_available > 0:
                     grand_totals[class_name] = {
-                        'claimed': total_claimed,
-                        'total': total_available,
-                        'percent': (total_claimed / total_available) * 100
+                        "claimed": total_claimed,
+                        "total": total_available,
+                        "percent": (total_claimed / total_available) * 100,
                     }
 
     # Show cluster summary at the top with real slots and backfill slots separated
@@ -2659,36 +2740,42 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
         backfill_slot_classes = ["Backfill-ResearcherOwned", "Backfill-CHTCOwned", "Backfill-OpenCapacity"]
 
         # Calculate totals for real slots
-        real_claimed = sum(grand_totals[c]['claimed'] for c in real_slot_classes if c in grand_totals)
-        real_total = sum(grand_totals[c]['total'] for c in real_slot_classes if c in grand_totals)
+        real_claimed = sum(grand_totals[c]["claimed"] for c in real_slot_classes if c in grand_totals)
+        real_total = sum(grand_totals[c]["total"] for c in real_slot_classes if c in grand_totals)
         real_percent = (real_claimed / real_total * 100) if real_total > 0 else 0
 
         # Calculate totals for backfill slots
-        backfill_claimed = sum(grand_totals[c]['claimed'] for c in backfill_slot_classes if c in grand_totals)
-        backfill_total = sum(grand_totals[c]['total'] for c in backfill_slot_classes if c in grand_totals)
+        backfill_claimed = sum(grand_totals[c]["claimed"] for c in backfill_slot_classes if c in grand_totals)
+        backfill_total = sum(grand_totals[c]["total"] for c in backfill_slot_classes if c in grand_totals)
         backfill_percent = (backfill_claimed / backfill_total * 100) if backfill_total > 0 else 0
 
-        print(f"\nREAL SLOTS:")
+        print("\nREAL SLOTS:")
         print(f"{'-'*70}")
         print(f"  TOTAL: {real_percent:.1f}% ({real_claimed:.1f}/{real_total:.1f} GPUs)")
         print(f"{'-'*70}")
         for class_name in real_slot_classes:
             if class_name in grand_totals:
                 totals = grand_totals[class_name]
-                print(f"  {get_display_name(class_name)}: {totals['percent']:.1f}% "
-                      f"({totals['claimed']:.1f}/{totals['total']:.1f} GPUs)")
+                print(
+                    f"  {get_display_name(class_name)}: {totals['percent']:.1f}% "
+                    f"({totals['claimed']:.1f}/{totals['total']:.1f} GPUs)"
+                )
 
         # Real Slots by Memory Category
         if "memory_stats" in results:
             memory_stats = results["memory_stats"]
             if memory_stats:
-                memory_total_claimed = sum(stats['avg_claimed'] for stats in memory_stats.values())
-                memory_total_available = sum(stats['avg_total_available'] for stats in memory_stats.values())
-                memory_total_percent = (memory_total_claimed / memory_total_available * 100) if memory_total_available > 0 else 0
+                memory_total_claimed = sum(stats["avg_claimed"] for stats in memory_stats.values())
+                memory_total_available = sum(stats["avg_total_available"] for stats in memory_stats.values())
+                memory_total_percent = (
+                    (memory_total_claimed / memory_total_available * 100) if memory_total_available > 0 else 0
+                )
 
-                print(f"\nREAL SLOTS BY MEMORY CATEGORY (filtered):")
+                print("\nREAL SLOTS BY MEMORY CATEGORY (filtered):")
                 print(f"{'-'*80}")
-                print(f"  TOTAL: {memory_total_percent:.1f}% ({memory_total_claimed:.1f}/{memory_total_available:.1f} GPUs)")
+                print(
+                    f"  TOTAL: {memory_total_percent:.1f}% ({memory_total_claimed:.1f}/{memory_total_available:.1f} GPUs)"
+                )
                 print(f"{'-'*80}")
 
                 # Sort memory categories by numerical value
@@ -2712,30 +2799,35 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
                                 return float(cat[:-2])  # Remove "GB" suffix
                         else:
                             return 0  # Fallback
+
                     return sorted(categories, key=get_sort_key)
 
                 # Individual memory categories (sorted by memory size)
                 sorted_memory_cats = sort_memory_categories(memory_stats.keys())
                 for memory_cat in sorted_memory_cats:
                     stats = memory_stats[memory_cat]
-                    print(f"  {memory_cat}: {stats['allocation_usage_percent']:.1f}% "
-                          f"({stats['avg_claimed']:.1f}/{stats['avg_total_available']:.1f} GPUs)")
+                    print(
+                        f"  {memory_cat}: {stats['allocation_usage_percent']:.1f}% "
+                        f"({stats['avg_claimed']:.1f}/{stats['avg_total_available']:.1f} GPUs)"
+                    )
 
-        print(f"\nBACKFILL SLOTS:")
+        print("\nBACKFILL SLOTS:")
         print(f"{'-'*70}")
         print(f"  TOTAL: {backfill_percent:.1f}% ({backfill_claimed:.1f}/{backfill_total:.1f} GPUs)")
         print(f"{'-'*70}")
         for class_name in backfill_slot_classes:
             if class_name in grand_totals:
                 totals = grand_totals[class_name]
-                print(f"  {get_display_name(class_name)}: {totals['percent']:.1f}% "
-                      f"({totals['claimed']:.1f}/{totals['total']:.1f} GPUs)")
+                print(
+                    f"  {get_display_name(class_name)}: {totals['percent']:.1f}% "
+                    f"({totals['claimed']:.1f}/{totals['total']:.1f} GPUs)"
+                )
 
         # H200 Usage by Slot Type
         if "h200_user_stats" in results:
             h200_stats = results["h200_user_stats"]
             if h200_stats:
-                print(f"\nH200 USAGE BY SLOT TYPE:")
+                print("\nH200 USAGE BY SLOT TYPE:")
                 print(f"{'-'*80}")
 
                 # Aggregate data by slot type (same logic as HTML)
@@ -2743,16 +2835,13 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
                 slot_type_users = {}
 
                 for user, user_data in h200_stats.items():
-                    for slot_type, slot_data in user_data['slot_breakdown'].items():
+                    for slot_type, slot_data in user_data["slot_breakdown"].items():
                         if slot_type not in slot_type_totals:
                             slot_type_totals[slot_type] = 0
                             slot_type_users[slot_type] = []
 
-                        slot_type_totals[slot_type] += slot_data['gpu_hours']
-                        slot_type_users[slot_type].append({
-                            'user': user,
-                            'gpu_hours': slot_data['gpu_hours']
-                        })
+                        slot_type_totals[slot_type] += slot_data["gpu_hours"]
+                        slot_type_users[slot_type].append({"user": user, "gpu_hours": slot_data["gpu_hours"]})
 
                 # Sort slot types by total GPU hours (descending)
                 sorted_slot_types = sorted(slot_type_totals.items(), key=lambda x: x[1], reverse=True)
@@ -2769,11 +2858,11 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
 
                     # User breakdown beneath the slot type total
                     users = slot_type_users[slot_type]
-                    users.sort(key=lambda x: x['gpu_hours'], reverse=True)
+                    users.sort(key=lambda x: x["gpu_hours"], reverse=True)
 
                     for user_info in users:
-                        user = user_info['user']
-                        gpu_hours = user_info['gpu_hours']
+                        user = user_info["user"]
+                        gpu_hours = user_info["gpu_hours"]
                         user_total_percentage = (gpu_hours / total_gpu_hours * 100) if total_gpu_hours > 0 else 0
                         print(f"    {user}: {gpu_hours:.1f} hrs ({user_total_percentage:.1f}%)")
 
@@ -2781,7 +2870,7 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
         if "backfill_user_stats" in results:
             backfill_stats = results["backfill_user_stats"]
             if backfill_stats:
-                print(f"\nBACKFILL USAGE BY SLOT TYPE (filtered):")
+                print("\nBACKFILL USAGE BY SLOT TYPE (filtered):")
                 print(f"{'-'*80}")
 
                 # Aggregate data by slot type (same logic as HTML)
@@ -2789,16 +2878,13 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
                 slot_type_users = {}
 
                 for user, user_data in backfill_stats.items():
-                    for slot_type, slot_data in user_data['slot_breakdown'].items():
+                    for slot_type, slot_data in user_data["slot_breakdown"].items():
                         if slot_type not in slot_type_totals:
                             slot_type_totals[slot_type] = 0
                             slot_type_users[slot_type] = []
 
-                        slot_type_totals[slot_type] += slot_data['gpu_hours']
-                        slot_type_users[slot_type].append({
-                            'user': user,
-                            'gpu_hours': slot_data['gpu_hours']
-                        })
+                        slot_type_totals[slot_type] += slot_data["gpu_hours"]
+                        slot_type_users[slot_type].append({"user": user, "gpu_hours": slot_data["gpu_hours"]})
 
                 # Sort slot types by total GPU hours (descending)
                 sorted_slot_types = sorted(slot_type_totals.items(), key=lambda x: x[1], reverse=True)
@@ -2815,10 +2901,10 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
 
                     # User breakdown beneath the slot type total
                     users = slot_type_users[slot_type]
-                    users.sort(key=lambda x: x['gpu_hours'], reverse=True)
+                    users.sort(key=lambda x: x["gpu_hours"], reverse=True)
                     for user_info in users:
-                        user = user_info['user']
-                        gpu_hours = user_info['gpu_hours']
+                        user = user_info["user"]
+                        gpu_hours = user_info["gpu_hours"]
                         user_total_percentage = (gpu_hours / total_gpu_hours * 100) if total_gpu_hours > 0 else 0
                         print(f"    {user}: {gpu_hours:.1f} hrs ({user_total_percentage:.1f}%)")
 
@@ -2830,12 +2916,13 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
         # Order with hosted capacity emphasis (enhanced format is now default)
         class_order = CLASS_ORDER
 
-
         for class_name in class_order:
             if class_name in allocation_stats:
                 stats = allocation_stats[class_name]
-                print(f"  {get_display_name(class_name)}: {stats['allocation_usage_percent']:.1f}% "
-                      f"({stats['avg_claimed']:.1f}/{stats['avg_total_available']:.1f} GPUs)")
+                print(
+                    f"  {get_display_name(class_name)}: {stats['allocation_usage_percent']:.1f}% "
+                    f"({stats['avg_claimed']:.1f}/{stats['avg_total_available']:.1f} GPUs)"
+                )
 
     elif "device_stats" in results:
         print("\nUsage by Device Type (filtered):")
@@ -2852,17 +2939,19 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
 
                 for device_type, stats in sorted(device_data.items()):
                     short_name = get_human_readable_device_name(device_type)
-                    print(f"    {short_name}: {stats['allocation_usage_percent']:.1f}% "
-                          f"(avg {stats['avg_claimed']:.1f}/{stats['avg_total_available']:.1f} GPUs)")
+                    print(
+                        f"    {short_name}: {stats['allocation_usage_percent']:.1f}% "
+                        f"(avg {stats['avg_claimed']:.1f}/{stats['avg_total_available']:.1f} GPUs)"
+                    )
 
                 # Show class total using pre-calculated data
                 if class_name in grand_totals:
                     totals = grand_totals[class_name]
                     print(f"    {'-'*30}")
-                    print(f"    TOTAL {get_display_name(class_name)}: {totals['percent']:.1f}% "
-                          f"(avg {totals['claimed']:.1f}/{totals['total']:.1f} GPUs)")
-
-
+                    print(
+                        f"    TOTAL {get_display_name(class_name)}: {totals['percent']:.1f}% "
+                        f"(avg {totals['claimed']:.1f}/{totals['total']:.1f} GPUs)"
+                    )
 
     elif "timeseries_data" in results:
         print("\nTime Series Analysis:")
@@ -2879,24 +2968,25 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
                 avg_usage = ts_df[usage_col].mean()
                 avg_claimed = ts_df[claimed_col].mean()
                 avg_total = ts_df[total_col].mean()
-                print(f"  {class_name.title()}: {avg_usage:.1f}% "
-                      f"({avg_claimed:.1f}/{avg_total:.1f} GPUs)")
+                print(f"  {class_name.title()}: {avg_usage:.1f}% " f"({avg_claimed:.1f}/{avg_total:.1f} GPUs)")
 
         # Show recent trend
         print("\nRecent Trend:")
         print(f"{'-'*70}")
         recent_df = ts_df.tail(5)
         for _, row in recent_df.iterrows():
-            print(f"  {row['timestamp'].strftime('%m-%d %H:%M')}: "
-                  f"Priority {row['priority_usage_percent']:.1f}% "
-                  f"({int(row['priority_claimed'])}/{int(row['priority_total'])}), "
-                  f"Shared {row['shared_usage_percent']:.1f}% "
-                  f"({int(row['shared_claimed'])}/{int(row['shared_total'])}), "
-                  f"Backfill {row['backfill_usage_percent']:.1f}% "
-                  f"({int(row['backfill_claimed'])}/{int(row['backfill_total'])})")
+            print(
+                f"  {row['timestamp'].strftime('%m-%d %H:%M')}: "
+                f"Priority {row['priority_usage_percent']:.1f}% "
+                f"({int(row['priority_claimed'])}/{int(row['priority_total'])}), "
+                f"Shared {row['shared_usage_percent']:.1f}% "
+                f"({int(row['shared_claimed'])}/{int(row['shared_total'])}), "
+                f"Backfill {row['backfill_usage_percent']:.1f}% "
+                f"({int(row['backfill_claimed'])}/{int(row['backfill_total'])})"
+            )
 
     # Show host exclusion information at the bottom
-    excluded_hosts = metadata.get('excluded_hosts', {})
+    excluded_hosts = metadata.get("excluded_hosts", {})
     if excluded_hosts:
         print(f"\n{'='*70}")
         print("EXCLUDED HOSTS:")
@@ -2904,10 +2994,10 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
             print(f"  {host}: {reason}")
 
     # Show filtering impact at the bottom
-    filtered_info = metadata.get('filtered_hosts_info', [])
+    filtered_info = metadata.get("filtered_hosts_info", [])
     if filtered_info:
-        total_original = sum(info['original_count'] for info in filtered_info)
-        total_filtered = sum(info['filtered_count'] for info in filtered_info)
+        total_original = sum(info["original_count"] for info in filtered_info)
+        total_filtered = sum(info["filtered_count"] for info in filtered_info)
         records_excluded = total_original - total_filtered
         if records_excluded > 0:
             if not excluded_hosts:  # Only print separator if excluded hosts wasn't shown
@@ -2928,12 +3018,12 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
         end_time = metadata.get("end_time")
         if start_time and end_time:
             # Format timestamps nicely
-            if hasattr(start_time, 'strftime'):
-                start_str = start_time.strftime('%Y-%m-%d %H:%M:%S')
+            if hasattr(start_time, "strftime"):
+                start_str = start_time.strftime("%Y-%m-%d %H:%M:%S")
             else:
                 start_str = str(start_time)
-            if hasattr(end_time, 'strftime'):
-                end_str = end_time.strftime('%Y-%m-%d %H:%M:%S')
+            if hasattr(end_time, "strftime"):
+                end_str = end_time.strftime("%Y-%m-%d %H:%M:%S")
             else:
                 end_str = str(end_time)
             print(f"Data Period: {start_str} to {end_str}")
@@ -2947,28 +3037,34 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
 def main(
     hours_back: int = typer.Option(24, help="Number of hours to analyze (default: 24)"),
     host: str = typer.Option("", help="Host name to filter results"),
-    db_path: Optional[str] = typer.Option(None, help="Path to SQLite database (defaults to current month)"),
+    db_path: str | None = typer.Option(None, help="Path to SQLite database (defaults to current month)"),
     analysis_type: str = typer.Option(
-        "allocation",
-        help="Type of analysis: allocation (% GPUs claimed), timeseries, gpu_model_snapshot, or monthly"
+        "allocation", help="Type of analysis: allocation (% GPUs claimed), timeseries, gpu_model_snapshot, or monthly"
     ),
     bucket_minutes: int = typer.Option(15, help="Time bucket size in minutes for timeseries analysis"),
-    end_time: Optional[str] = typer.Option(None, help="End time for analysis (YYYY-MM-DD HH:MM:SS), defaults to latest in DB"),
+    end_time: str | None = typer.Option(
+        None, help="End time for analysis (YYYY-MM-DD HH:MM:SS), defaults to latest in DB"
+    ),
     group_by_device: bool = typer.Option(True, help="Group results by GPU device type"),
     all_devices: bool = typer.Option(False, help="Include all device types (if False, filters out older GPUs)"),
-    gpu_model: Optional[str] = typer.Option(None, help="GPU model for snapshot analysis (e.g., 'NVIDIA A100-SXM4-80GB')"),
-    snapshot_time: Optional[str] = typer.Option(None, help="Specific time for GPU model snapshot (YYYY-MM-DD HH:MM:SS)"),
+    gpu_model: str | None = typer.Option(None, help="GPU model for snapshot analysis (e.g., 'NVIDIA A100-SXM4-80GB')"),
+    snapshot_time: str | None = typer.Option(None, help="Specific time for GPU model snapshot (YYYY-MM-DD HH:MM:SS)"),
     window_minutes: int = typer.Option(5, help="Time window in minutes for snapshot search"),
-    exclude_hosts: Optional[str] = typer.Option(None, help="JSON string of hosts to exclude from analysis with reasons, e.g., '{\"host1\": \"misconfigured\", \"host2\": \"maintenance\"}'"),
-    exclude_hosts_yaml: Optional[str] = typer.Option("masked_hosts.yaml", help="Path to YAML file containing host exclusions in format: hostname1: reason1"),
+    exclude_hosts: str | None = typer.Option(
+        None,
+        help='JSON string of hosts to exclude from analysis with reasons, e.g., \'{"host1": "misconfigured", "host2": "maintenance"}\'',
+    ),
+    exclude_hosts_yaml: str | None = typer.Option(
+        "masked_hosts.yaml", help="Path to YAML file containing host exclusions in format: hostname1: reason1"
+    ),
     output_format: str = typer.Option("text", help="Output format: 'text' or 'html'"),
-    output_file: Optional[str] = typer.Option(None, help="Output file path (optional)"),
-    email_to: Optional[str] = typer.Option(None, help="Email address(es) to send HTML report to (comma-separated)"),
+    output_file: str | None = typer.Option(None, help="Output file path (optional)"),
+    email_to: str | None = typer.Option(None, help="Email address(es) to send HTML report to (comma-separated)"),
     email_from: str = typer.Option("iaross@wisc.edu", help="Sender email address"),
     smtp_server: str = typer.Option("smtp.wiscmail.wisc.edu", help="SMTP server hostname"),
     smtp_port: int = typer.Option(25, help="SMTP server port (25 for standard SMTP, 587 for submission)"),
     email_timeout: int = typer.Option(30, help="SMTP connection timeout in seconds"),
-    email_debug: bool = typer.Option(False, help="Enable SMTP debug output")
+    email_debug: bool = typer.Option(False, help="Enable SMTP debug output"),
 ):
     """
     Calculate GPU usage statistics for Priority, Shared, and Backfill classes.
@@ -2997,6 +3093,7 @@ def main(
         else:
             # Fall back to most recent database file
             import glob
+
             db_files = glob.glob("gpu_state_*.db")
             if db_files:
                 # Sort by filename (which includes date) to get most recent
@@ -3040,12 +3137,12 @@ def main(
                 return
 
             print(f"\nAvailable GPU models at {parsed_snapshot_time.strftime('%Y-%m-%d %H:%M:%S')}:")
-            print("="*60)
+            print("=" * 60)
             for i, model in enumerate(available_models, 1):
                 print(f"  {i}. {model}")
 
             print("\nTo analyze a specific model, use:")
-            print(f"  --analysis-type gpu_model_snapshot --gpu-model \"<model_name>\" --snapshot-time \"{snapshot_time}\"")
+            print(f'  --analysis-type gpu_model_snapshot --gpu-model "<model_name>" --snapshot-time "{snapshot_time}"')
         return
 
     # Run the standard analysis
@@ -3060,7 +3157,7 @@ def main(
             group_by_device=group_by_device,
             all_devices=all_devices,
             exclude_hosts=exclude_hosts,
-            exclude_hosts_yaml=exclude_hosts_yaml
+            exclude_hosts_yaml=exclude_hosts_yaml,
         )
     except ValueError as e:
         print(f"Error: {e}")
@@ -3084,14 +3181,14 @@ def main(
             for class_name, device_data in device_stats.items():
                 if device_data:
                     # Calculate total percentage for this class
-                    total_claimed = sum(stats['avg_claimed'] for stats in device_data.values())
-                    total_available = sum(stats['avg_total_available'] for stats in device_data.values())
+                    total_claimed = sum(stats["avg_claimed"] for stats in device_data.values())
+                    total_available = sum(stats["avg_total_available"] for stats in device_data.values())
                     if total_available > 0:
                         usage_percentages[class_name] = (total_claimed / total_available) * 100
         elif "allocation_stats" in results:
             allocation_stats = results["allocation_stats"]
             for class_name, stats in allocation_stats.items():
-                usage_percentages[class_name] = stats['allocation_usage_percent']
+                usage_percentages[class_name] = stats["allocation_usage_percent"]
 
         # Send email
         success = send_email_report(
@@ -3106,7 +3203,9 @@ def main(
             debug=email_debug,
             device_stats=results.get("device_stats"),
             analysis_type=analysis_type,
-            month=results.get("monthly_stats", {}).get("month") if analysis_type == "monthly" else (results.get("metadata", {}).get("monthly_period"))
+            month=results.get("monthly_stats", {}).get("month")
+            if analysis_type == "monthly"
+            else (results.get("metadata", {}).get("monthly_period")),
         )
 
         if not success:
