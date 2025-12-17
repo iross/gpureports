@@ -595,36 +595,50 @@ def calculate_allocation_usage_by_memory(df: pl.DataFrame, host: str = "", inclu
     # Only calculate for Real slot classes
     real_slot_classes = ["Priority-ResearcherOwned", "Priority-CHTCOwned", "Shared"]
 
+    # Pre-filter data by class and memory category to match pandas behavior
+    # This ensures duplicate cleanup happens on class-filtered data, not on all classes together
+    filtered_memory_data = {}
+    for memory_cat in memory_categories:
+        filtered_memory_data[memory_cat] = {}
+        for class_name in real_slot_classes:
+            # Filter by memory category first
+            memory_cat_df = df.filter(pl.col("memory_category") == memory_cat)
+
+            if len(memory_cat_df) > 0:
+                # Then filter by class - this ensures duplicate cleanup sees only one class at a time
+                filtered_df = filter_df_enhanced(memory_cat_df, class_name, "", host)
+                if len(filtered_df) > 0:
+                    filtered_memory_data[memory_cat][class_name] = filtered_df
+
     for memory_cat in memory_categories:
         total_claimed_across_intervals = 0
         total_available_across_intervals = 0
         num_intervals_with_data = 0
 
-        # Filter by memory category once
-        memory_df = df.filter(pl.col("memory_category") == memory_cat)
-
-        # For each bucket, aggregate across all real slot classes
+        # For each bucket, aggregate across all real slot classes using pre-filtered data
         for bucket_time in all_buckets:
-            bucket_df = memory_df.filter(pl.col("15min_bucket") == bucket_time)
-
-            if len(bucket_df) == 0:
-                continue
-
             bucket_claimed = 0
             bucket_total = 0
 
             # Sum across all Real slot classes for this memory category
             for class_name in real_slot_classes:
-                class_filtered_df = filter_df_enhanced(bucket_df, class_name, "", host)
+                # Use pre-filtered data for this memory category and class
+                if class_name not in filtered_memory_data[memory_cat]:
+                    continue
 
-                if len(class_filtered_df) == 0:
+                class_filtered_df = filtered_memory_data[memory_cat][class_name]
+
+                # Filter by bucket time
+                bucket_class_df = class_filtered_df.filter(pl.col("15min_bucket") == bucket_time)
+
+                if len(bucket_class_df) == 0:
                     continue
 
                 # Count unique GPUs (total available for this class)
-                total_count = class_filtered_df.filter(pl.col("AssignedGPUs").is_not_null())["AssignedGPUs"].n_unique()
+                total_count = bucket_class_df.filter(pl.col("AssignedGPUs").is_not_null())["AssignedGPUs"].n_unique()
 
                 # Count unique claimed GPUs
-                claimed_count = class_filtered_df.filter(
+                claimed_count = bucket_class_df.filter(
                     (pl.col("State") == "Claimed") & (pl.col("AssignedGPUs").is_not_null())
                 )["AssignedGPUs"].n_unique()
 
