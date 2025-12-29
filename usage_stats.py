@@ -575,7 +575,9 @@ def calculate_allocation_usage_by_device_enhanced(
             device_utilization_df = filtered_data[utilization_type][device_type]
 
             interval_usage_percentages = []
+            interval_drained_percentages = []
             total_claimed_gpus = 0
+            total_drained_gpus = 0
             total_available_gpus = 0
 
             # For each 15-minute interval, count unique GPUs using pre-filtered data
@@ -595,26 +597,46 @@ def calculate_allocation_usage_by_device_enhanced(
                 claimed_unique_gpu_ids = set(claimed_gpus_df["AssignedGPUs"].dropna().unique())
                 claimed_gpus = len(claimed_unique_gpu_ids)
 
+                # Count how many of these unique GPUs are currently drained
+                drained_gpus_df = bucket_filtered_df[bucket_filtered_df["State"] == "Drained"]
+                drained_unique_gpu_ids = set(drained_gpus_df["AssignedGPUs"].dropna().unique())
+                drained_gpus = len(drained_unique_gpu_ids)
+
                 if total_gpus_this_interval > 0:
                     interval_usage = (claimed_gpus / total_gpus_this_interval) * 100
                     interval_usage_percentages.append(interval_usage)
+
+                    interval_drained = (drained_gpus / total_gpus_this_interval) * 100
+                    interval_drained_percentages.append(interval_drained)
+
                     total_claimed_gpus += claimed_gpus
+                    total_drained_gpus += drained_gpus
                     total_available_gpus += total_gpus_this_interval
 
             if interval_usage_percentages:
                 # Calculate average usage percentage across all intervals
                 avg_usage_percentage = sum(interval_usage_percentages) / len(interval_usage_percentages)
 
+                # Calculate average drained percentage across all intervals
+                avg_drained_percentage = (
+                    sum(interval_drained_percentages) / len(interval_drained_percentages)
+                    if interval_drained_percentages
+                    else 0.0
+                )
+
                 # Calculate average GPU counts across ALL intervals (including those with 0 usage)
                 # This matches the user breakdown method and gives consistent results
                 total_intervals = len(df["15min_bucket"].unique())
                 avg_claimed = total_claimed_gpus / total_intervals if total_intervals > 0 else 0
+                avg_drained = total_drained_gpus / total_intervals if total_intervals > 0 else 0
                 avg_total = total_available_gpus / total_intervals if total_intervals > 0 else 0
 
                 stats[utilization_type][device_type] = {
                     "avg_claimed": avg_claimed,
+                    "avg_drained": avg_drained,
                     "avg_total_available": avg_total,
                     "allocation_usage_percent": avg_usage_percentage,
+                    "drained_percent": avg_drained_percentage,
                     "num_intervals": total_intervals,
                 }
 
@@ -745,7 +767,9 @@ def calculate_allocation_usage_by_device(df: pd.DataFrame, host: str = "", inclu
                 continue
 
             interval_usage_percentages = []
+            interval_drained_percentages = []
             total_claimed_gpus = 0
+            total_drained_gpus = 0
             total_available_gpus = 0
 
             # For each 15-minute interval, count unique GPUs of this device type
@@ -776,26 +800,46 @@ def calculate_allocation_usage_by_device(df: pd.DataFrame, host: str = "", inclu
                 claimed_unique_gpu_ids = set(claimed_gpus_df["AssignedGPUs"].dropna().unique())
                 claimed_gpus = len(claimed_unique_gpu_ids)
 
+                # Count how many of these unique GPUs are currently drained
+                drained_gpus_df = all_gpus_df[all_gpus_df["State"] == "Drained"]
+                drained_unique_gpu_ids = set(drained_gpus_df["AssignedGPUs"].dropna().unique())
+                drained_gpus = len(drained_unique_gpu_ids)
+
                 if total_gpus_this_interval > 0:
                     interval_usage = (claimed_gpus / total_gpus_this_interval) * 100
                     interval_usage_percentages.append(interval_usage)
+
+                    interval_drained = (drained_gpus / total_gpus_this_interval) * 100
+                    interval_drained_percentages.append(interval_drained)
+
                     total_claimed_gpus += claimed_gpus
+                    total_drained_gpus += drained_gpus
                     total_available_gpus += total_gpus_this_interval
 
             if interval_usage_percentages:
                 # Calculate average usage percentage across all intervals
                 avg_usage_percentage = sum(interval_usage_percentages) / len(interval_usage_percentages)
 
+                # Calculate average drained percentage across all intervals
+                avg_drained_percentage = (
+                    sum(interval_drained_percentages) / len(interval_drained_percentages)
+                    if interval_drained_percentages
+                    else 0.0
+                )
+
                 # Calculate average GPU counts across ALL intervals (including those with 0 usage)
                 # This matches the user breakdown method and gives consistent results
                 total_intervals = len(df["15min_bucket"].unique())
                 avg_claimed = total_claimed_gpus / total_intervals if total_intervals > 0 else 0
+                avg_drained = total_drained_gpus / total_intervals if total_intervals > 0 else 0
                 avg_total = total_available_gpus / total_intervals if total_intervals > 0 else 0
 
                 stats[utilization_type][device_type] = {
                     "avg_claimed": avg_claimed,
+                    "avg_drained": avg_drained,
                     "avg_total_available": avg_total,
                     "allocation_usage_percent": avg_usage_percentage,
+                    "drained_percent": avg_drained_percentage,
                     "num_intervals": total_intervals,
                 }
 
@@ -849,14 +893,17 @@ def calculate_allocation_usage_by_memory(df: pd.DataFrame, host: str = "", inclu
 
     for memory_cat in memory_categories:
         total_claimed_across_intervals = 0
+        total_drained_across_intervals = 0
         total_available_across_intervals = 0
         num_intervals_with_data = 0
+        interval_drained_percentages = []
 
         # Get unique time buckets
         unique_buckets = df["15min_bucket"].unique()
 
         for bucket_time in unique_buckets:
             bucket_claimed = 0
+            bucket_drained = 0
             bucket_total = 0
 
             # Sum across all Real slot classes for this memory category using pre-filtered data
@@ -881,24 +928,43 @@ def calculate_allocation_usage_by_memory(df: pd.DataFrame, host: str = "", inclu
                     claimed_unique_gpu_ids = set(claimed_gpus_df["AssignedGPUs"].dropna().unique())
                     allocated_count = len(claimed_unique_gpu_ids)
 
+                    # Count unique drained GPUs
+                    drained_gpus_df = bucket_class_df[bucket_class_df["State"] == "Drained"]
+                    drained_unique_gpu_ids = set(drained_gpus_df["AssignedGPUs"].dropna().unique())
+                    drained_count = len(drained_unique_gpu_ids)
+
                     bucket_claimed += allocated_count
+                    bucket_drained += drained_count
                     bucket_total += total_count
 
             if bucket_total > 0:
                 total_claimed_across_intervals += bucket_claimed
+                total_drained_across_intervals += bucket_drained
                 total_available_across_intervals += bucket_total
                 num_intervals_with_data += 1
+
+                # Track drained percentage for this interval
+                interval_drained_pct = (bucket_drained / bucket_total * 100) if bucket_total > 0 else 0
+                interval_drained_percentages.append(interval_drained_pct)
 
         # Calculate averages
         if num_intervals_with_data > 0:
             avg_claimed = total_claimed_across_intervals / num_intervals_with_data
+            avg_drained = total_drained_across_intervals / num_intervals_with_data
             avg_total = total_available_across_intervals / num_intervals_with_data
             avg_usage_percentage = (avg_claimed / avg_total * 100) if avg_total > 0 else 0
+            avg_drained_percentage = (
+                sum(interval_drained_percentages) / len(interval_drained_percentages)
+                if interval_drained_percentages
+                else 0.0
+            )
 
             stats[memory_cat] = {
                 "avg_claimed": avg_claimed,
+                "avg_drained": avg_drained,
                 "avg_total_available": avg_total,
                 "allocation_usage_percent": avg_usage_percentage,
+                "drained_percent": avg_drained_percentage,
                 "num_intervals": num_intervals_with_data,
             }
 
@@ -2281,22 +2347,38 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
             if device_data:
                 html_parts.append(f"<h3>{get_display_name(class_name)}</h3>")
                 html_parts.append("<table border='1'>")
-                html_parts.append(
-                    "<tr><th>Device Type</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>"
-                )
+
+                # Only show drained columns for Open Capacity (Shared)
+                if class_name == "Shared":
+                    html_parts.append(
+                        "<tr><th>Device Type</th><th>Drained %</th><th>Drained (avg.)</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>"
+                    )
+                else:
+                    html_parts.append(
+                        "<tr><th>Device Type</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>"
+                    )
 
                 # Calculate totals first
                 total_claimed = 0
                 total_available = 0
+                total_drained = 0
                 for _device_type, stats in sorted(device_data.items()):
                     total_claimed += stats["avg_claimed"]
                     total_available += stats["avg_total_available"]
+                    total_drained += stats.get("avg_drained", 0.0)
 
                 # Add total row first
                 if total_available > 0:
                     total_percent = (total_claimed / total_available) * 100
+                    total_drained_pct = (total_drained / total_available) * 100
                     html_parts.append("<tr style='font-weight: bold; background-color: #f0f0f0;'>")
                     html_parts.append("<td>TOTAL</td>")
+
+                    # Only show drained columns for Open Capacity (Shared)
+                    if class_name == "Shared":
+                        html_parts.append(f"<td style='text-align: right'>{total_drained_pct:.1f}%</td>")
+                        html_parts.append(f"<td style='text-align: right'>{total_drained:.1f}</td>")
+
                     html_parts.append(f"<td style='text-align: right'>{total_percent:.1f}%</td>")
                     html_parts.append(f"<td style='text-align: right'>{total_claimed:.1f}</td>")
                     html_parts.append(f"<td style='text-align: right'>{total_available:.1f}</td>")
@@ -2311,8 +2393,16 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
                 # Add individual device rows (sorted alphabetically)
                 for device_type, stats in sorted(device_data.items()):
                     short_name = get_human_readable_device_name(device_type)
+                    drained_pct = stats.get("drained_percent", 0.0)
+                    drained_avg = stats.get("avg_drained", 0.0)
                     html_parts.append("<tr>")
                     html_parts.append(f"<td>{short_name}</td>")
+
+                    # Only show drained columns for Open Capacity (Shared)
+                    if class_name == "Shared":
+                        html_parts.append(f"<td style='text-align: right'>{drained_pct:.1f}%</td>")
+                        html_parts.append(f"<td style='text-align: right'>{drained_avg:.1f}</td>")
+
                     html_parts.append(f"<td style='text-align: right'>{stats['allocation_usage_percent']:.1f}%</td>")
                     html_parts.append(f"<td style='text-align: right'>{stats['avg_claimed']:.1f}</td>")
                     html_parts.append(f"<td style='text-align: right'>{stats['avg_total_available']:.1f}</td>")
@@ -2354,21 +2444,30 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
                 html_parts.append(f"<h3>{get_display_name(class_name)}</h3>")
                 html_parts.append("<table border='1'>")
                 html_parts.append(
-                    "<tr><th>Device Type</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>"
+                    "<tr><th>Device Type</th><th>Drained %</th><th>Drained (avg.)</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>"
                 )
 
                 # Calculate totals first
                 total_claimed = 0
                 total_available = 0
+                total_drained = 0
                 for _device_type, stats in sorted(device_data.items()):
                     total_claimed += stats["avg_claimed"]
                     total_available += stats["avg_total_available"]
+                    total_drained += stats.get("avg_drained", 0.0)
 
                 # Add total row first
                 if total_available > 0:
                     total_percent = (total_claimed / total_available) * 100
+                    total_drained_pct = (total_drained / total_available) * 100
                     html_parts.append("<tr style='font-weight: bold; background-color: #f0f0f0;'>")
                     html_parts.append("<td>TOTAL</td>")
+
+                    # Only show drained columns for Open Capacity (Shared)
+                    if class_name == "Shared":
+                        html_parts.append(f"<td style='text-align: right'>{total_drained_pct:.1f}%</td>")
+                        html_parts.append(f"<td style='text-align: right'>{total_drained:.1f}</td>")
+
                     html_parts.append(f"<td style='text-align: right'>{total_percent:.1f}%</td>")
                     html_parts.append(f"<td style='text-align: right'>{total_claimed:.1f}</td>")
                     html_parts.append(f"<td style='text-align: right'>{total_available:.1f}</td>")
@@ -2383,8 +2482,16 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
                 # Add individual device rows (sorted alphabetically)
                 for device_type, stats in sorted(device_data.items()):
                     short_name = get_human_readable_device_name(device_type)
+                    drained_pct = stats.get("drained_percent", 0.0)
+                    drained_avg = stats.get("avg_drained", 0.0)
                     html_parts.append("<tr>")
                     html_parts.append(f"<td>{short_name}</td>")
+
+                    # Only show drained columns for Open Capacity (Shared)
+                    if class_name == "Shared":
+                        html_parts.append(f"<td style='text-align: right'>{drained_pct:.1f}%</td>")
+                        html_parts.append(f"<td style='text-align: right'>{drained_avg:.1f}</td>")
+
                     html_parts.append(f"<td style='text-align: right'>{stats['allocation_usage_percent']:.1f}%</td>")
                     html_parts.append(f"<td style='text-align: right'>{stats['avg_claimed']:.1f}</td>")
                     html_parts.append(f"<td style='text-align: right'>{stats['avg_total_available']:.1f}</td>")
@@ -2939,10 +3046,21 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
 
                 for device_type, stats in sorted(device_data.items()):
                     short_name = get_human_readable_device_name(device_type)
-                    print(
-                        f"    {short_name}: {stats['allocation_usage_percent']:.1f}% "
-                        f"(avg {stats['avg_claimed']:.1f}/{stats['avg_total_available']:.1f} GPUs)"
-                    )
+
+                    # Only show drained info for Open Capacity (Shared)
+                    if class_name == "Shared":
+                        drained_pct = stats.get("drained_percent", 0.0)
+                        drained_avg = stats.get("avg_drained", 0.0)
+                        print(
+                            f"    {short_name}: {drained_pct:.1f}% drained (avg {drained_avg:.1f}), "
+                            f"{stats['allocation_usage_percent']:.1f}% allocated "
+                            f"(avg {stats['avg_claimed']:.1f}/{stats['avg_total_available']:.1f} GPUs)"
+                        )
+                    else:
+                        print(
+                            f"    {short_name}: {stats['allocation_usage_percent']:.1f}% "
+                            f"(avg {stats['avg_claimed']:.1f}/{stats['avg_total_available']:.1f} GPUs)"
+                        )
 
                 # Show class total using pre-calculated data
                 if class_name in grand_totals:

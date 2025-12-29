@@ -515,18 +515,26 @@ def calculate_allocation_usage_by_device_enhanced(
                 pl.col("AssignedGPUs").drop_nulls().n_unique().alias("gpu_count")
             )
 
-            # Pivot to get claimed vs total
+            # Pivot to get claimed, drained, and total
             claimed_by_bucket = (
                 agg_df.filter(pl.col("State") == "Claimed")
                 .select(["15min_bucket", "gpu_count"])
                 .rename({"gpu_count": "claimed"})
             )
 
+            drained_by_bucket = (
+                agg_df.filter(pl.col("State") == "Drained")
+                .select(["15min_bucket", "gpu_count"])
+                .rename({"gpu_count": "drained"})
+            )
+
             total_by_bucket = agg_df.group_by("15min_bucket").agg(pl.col("gpu_count").sum().alias("total"))
 
-            # Join to get claimed and total per bucket
-            bucket_stats = total_by_bucket.join(claimed_by_bucket, on="15min_bucket", how="left").with_columns(
-                pl.col("claimed").fill_null(0)
+            # Join to get claimed, drained, and total per bucket
+            bucket_stats = (
+                total_by_bucket.join(claimed_by_bucket, on="15min_bucket", how="left")
+                .join(drained_by_bucket, on="15min_bucket", how="left")
+                .with_columns([pl.col("claimed").fill_null(0), pl.col("drained").fill_null(0)])
             )
 
             if len(bucket_stats) == 0:
@@ -534,20 +542,28 @@ def calculate_allocation_usage_by_device_enhanced(
 
             # Calculate statistics
             total_claimed = bucket_stats["claimed"].sum()
+            total_drained = bucket_stats["drained"].sum()
             total_available = bucket_stats["total"].sum()
 
             # Calculate average usage percentage (only for intervals with data)
             bucket_stats = bucket_stats.with_columns((pl.col("claimed") / pl.col("total") * 100).alias("usage_pct"))
             avg_usage_percentage = bucket_stats["usage_pct"].mean()
 
+            # Calculate drained percentage (only for intervals with data)
+            bucket_stats = bucket_stats.with_columns((pl.col("drained") / pl.col("total") * 100).alias("drained_pct"))
+            avg_drained_percentage = bucket_stats["drained_pct"].mean()
+
             # Average across ALL intervals (including zeros)
             avg_claimed = total_claimed / total_intervals if total_intervals > 0 else 0
+            avg_drained = total_drained / total_intervals if total_intervals > 0 else 0
             avg_total = total_available / total_intervals if total_intervals > 0 else 0
 
             stats[utilization_type][device_type] = {
                 "avg_claimed": avg_claimed,
+                "avg_drained": avg_drained,
                 "avg_total_available": avg_total,
                 "allocation_usage_percent": avg_usage_percentage,
+                "drained_percent": avg_drained_percentage,
                 "num_intervals": total_intervals,
             }
 
