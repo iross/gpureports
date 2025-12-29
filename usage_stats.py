@@ -598,8 +598,10 @@ def calculate_allocation_usage_by_device_enhanced(
                 claimed_gpus = len(claimed_unique_gpu_ids)
 
                 # Count how many of these unique GPUs are currently drained
+                # EXCLUDE GPUs that are already claimed (prefer Claimed over Drained)
                 drained_gpus_df = bucket_filtered_df[bucket_filtered_df["State"] == "Drained"]
                 drained_unique_gpu_ids = set(drained_gpus_df["AssignedGPUs"].dropna().unique())
+                drained_unique_gpu_ids -= claimed_unique_gpu_ids  # Remove GPUs already counted as claimed
                 drained_gpus = len(drained_unique_gpu_ids)
 
                 if total_gpus_this_interval > 0:
@@ -614,10 +616,10 @@ def calculate_allocation_usage_by_device_enhanced(
                     total_available_gpus += total_gpus_this_interval
 
             if interval_usage_percentages:
-                # Calculate average usage percentage across all intervals
+                # Average percentages across intervals (correct approach when GPUs can change state)
+                # Averaging counts then calculating % is wrong because the same GPU counted as
+                # Claimed in one interval and Drained in another adds to both totals
                 avg_usage_percentage = sum(interval_usage_percentages) / len(interval_usage_percentages)
-
-                # Calculate average drained percentage across all intervals
                 avg_drained_percentage = (
                     sum(interval_drained_percentages) / len(interval_drained_percentages)
                     if interval_drained_percentages
@@ -817,10 +819,10 @@ def calculate_allocation_usage_by_device(df: pd.DataFrame, host: str = "", inclu
                     total_available_gpus += total_gpus_this_interval
 
             if interval_usage_percentages:
-                # Calculate average usage percentage across all intervals
+                # Average percentages across intervals (correct approach when GPUs can change state)
+                # Averaging counts then calculating % is wrong because the same GPU counted as
+                # Claimed in one interval and Drained in another adds to both totals
                 avg_usage_percentage = sum(interval_usage_percentages) / len(interval_usage_percentages)
-
-                # Calculate average drained percentage across all intervals
                 avg_drained_percentage = (
                     sum(interval_drained_percentages) / len(interval_drained_percentages)
                     if interval_drained_percentages
@@ -896,17 +898,19 @@ def calculate_allocation_usage_by_memory(df: pd.DataFrame, host: str = "", inclu
         total_drained_across_intervals = 0
         total_available_across_intervals = 0
         num_intervals_with_data = 0
+        interval_usage_percentages = []
         interval_drained_percentages = []
 
         # Get unique time buckets
         unique_buckets = df["15min_bucket"].unique()
 
         for bucket_time in unique_buckets:
-            bucket_claimed = 0
-            bucket_drained = 0
-            bucket_total = 0
+            bucket_claimed_ids = set()
+            bucket_drained_ids = set()
+            bucket_total_ids = set()
 
-            # Sum across all Real slot classes for this memory category using pre-filtered data
+            # Collect GPU IDs across all Real slot classes for this memory category
+            # First pass: collect all claimed and total GPUs
             for class_name in real_slot_classes:
                 # Use pre-filtered data for this memory category and class
                 if class_name not in filtered_memory_data[memory_cat]:
@@ -918,24 +922,26 @@ def calculate_allocation_usage_by_memory(df: pd.DataFrame, host: str = "", inclu
                 bucket_class_df = class_filtered_df[class_filtered_df["15min_bucket"] == bucket_time]
 
                 if not bucket_class_df.empty:
-                    # Count unique GPUs for this class and memory category (like device calculation)
-                    # Total unique GPUs available for this class
+                    # Collect unique GPU IDs for this class
                     unique_gpu_ids = set(bucket_class_df["AssignedGPUs"].dropna().unique())
-                    total_count = len(unique_gpu_ids)
+                    bucket_total_ids.update(unique_gpu_ids)
 
-                    # Count unique claimed GPUs
+                    # Collect unique claimed GPUs
                     claimed_gpus_df = bucket_class_df[bucket_class_df["State"] == "Claimed"]
                     claimed_unique_gpu_ids = set(claimed_gpus_df["AssignedGPUs"].dropna().unique())
-                    allocated_count = len(claimed_unique_gpu_ids)
+                    bucket_claimed_ids.update(claimed_unique_gpu_ids)
 
-                    # Count unique drained GPUs
+                    # Collect unique drained GPUs (will deduplicate later)
                     drained_gpus_df = bucket_class_df[bucket_class_df["State"] == "Drained"]
                     drained_unique_gpu_ids = set(drained_gpus_df["AssignedGPUs"].dropna().unique())
-                    drained_count = len(drained_unique_gpu_ids)
+                    bucket_drained_ids.update(drained_unique_gpu_ids)
 
-                    bucket_claimed += allocated_count
-                    bucket_drained += drained_count
-                    bucket_total += total_count
+            # Deduplicate: remove GPUs counted as claimed from drained
+            bucket_drained_ids -= bucket_claimed_ids
+
+            bucket_claimed = len(bucket_claimed_ids)
+            bucket_drained = len(bucket_drained_ids)
+            bucket_total = len(bucket_total_ids)
 
             if bucket_total > 0:
                 total_claimed_across_intervals += bucket_claimed
@@ -943,21 +949,25 @@ def calculate_allocation_usage_by_memory(df: pd.DataFrame, host: str = "", inclu
                 total_available_across_intervals += bucket_total
                 num_intervals_with_data += 1
 
-                # Track drained percentage for this interval
+                # Track percentages for this interval
+                interval_usage_pct = (bucket_claimed / bucket_total * 100) if bucket_total > 0 else 0
                 interval_drained_pct = (bucket_drained / bucket_total * 100) if bucket_total > 0 else 0
+                interval_usage_percentages.append(interval_usage_pct)
                 interval_drained_percentages.append(interval_drained_pct)
 
         # Calculate averages
         if num_intervals_with_data > 0:
-            avg_claimed = total_claimed_across_intervals / num_intervals_with_data
-            avg_drained = total_drained_across_intervals / num_intervals_with_data
-            avg_total = total_available_across_intervals / num_intervals_with_data
-            avg_usage_percentage = (avg_claimed / avg_total * 100) if avg_total > 0 else 0
+            # Average percentages across intervals (correct approach when GPUs can change state)
+            avg_usage_percentage = sum(interval_usage_percentages) / len(interval_usage_percentages)
             avg_drained_percentage = (
                 sum(interval_drained_percentages) / len(interval_drained_percentages)
                 if interval_drained_percentages
                 else 0.0
             )
+
+            avg_claimed = total_claimed_across_intervals / num_intervals_with_data
+            avg_drained = total_drained_across_intervals / num_intervals_with_data
+            avg_total = total_available_across_intervals / num_intervals_with_data
 
             stats[memory_cat] = {
                 "avg_claimed": avg_claimed,
@@ -1596,15 +1606,15 @@ def print_gpu_model_analysis(analysis: dict):
     active_jobs = analysis["active_jobs"]
     inactive_gpus = analysis["inactive_gpus"]
 
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print(f"GPU MODEL ACTIVITY REPORT: {gpu_model}")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
     print(f"Target Time: {target_time.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"Snapshot Time: {snapshot_time.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"Time Difference: {abs((snapshot_time - target_time).total_seconds())} seconds")
 
     print("\nSUMMARY:")
-    print(f"{'-'*40}")
+    print(f"{'-' * 40}")
     print(f"Total GPUs: {summary['total_gpus']}")
     print(f"Active (with jobs): {summary['claimed_gpus']} ({summary['utilization_percent']:.1f}%)")
     print(f"Idle (no jobs): {summary['unclaimed_gpus']}")
@@ -1630,9 +1640,9 @@ def print_gpu_model_analysis(analysis: dict):
     backfill_usage_pct = (backfill_claimed / backfill_total * 100) if backfill_total > 0 else 0
 
     print("\nREAL SLOTS:")
-    print(f"{'-'*40}")
+    print(f"{'-' * 40}")
     print(f"  TOTAL: {real_claimed}/{real_total} ({real_usage_pct:.1f}%)")
-    print(f"{'-'*40}")
+    print(f"{'-' * 40}")
     for class_name in real_slot_classes:
         if class_name in by_class and by_class[class_name]["total"] > 0:
             stats = by_class[class_name]
@@ -1640,9 +1650,9 @@ def print_gpu_model_analysis(analysis: dict):
             print(f"  {class_name}: {stats['claimed']}/{stats['total']} ({usage_pct:.1f}%)")
 
     print("\nBACKFILL SLOTS:")
-    print(f"{'-'*40}")
+    print(f"{'-' * 40}")
     print(f"  TOTAL: {backfill_claimed}/{backfill_total} ({backfill_usage_pct:.1f}%)")
-    print(f"{'-'*40}")
+    print(f"{'-' * 40}")
     for class_name in backfill_slot_classes:
         if class_name in by_class and by_class[class_name]["total"] > 0:
             stats = by_class[class_name]
@@ -1650,15 +1660,15 @@ def print_gpu_model_analysis(analysis: dict):
             print(f"  {class_name}: {stats['claimed']}/{stats['total']} ({usage_pct:.1f}%)")
 
     print(f"\nMACHINES ({len(machines)}):")
-    print(f"{'-'*40}")
+    print(f"{'-' * 40}")
     for machine in sorted(machines):
         print(f"  {machine}")
 
     if active_jobs:
         print(f"\nACTIVE JOBS ({len(active_jobs)}):")
-        print(f"{'-'*60}")
+        print(f"{'-' * 60}")
         print("  User                | Job ID          | GPU ID      | Machine")
-        print(f"{'-'*60}")
+        print(f"{'-' * 60}")
         for job in active_jobs:
             user = (job.get("RemoteOwner") or "N/A")[:19]
             job_id = (job.get("GlobalJobId") or "N/A")[:14]
@@ -1670,9 +1680,9 @@ def print_gpu_model_analysis(analysis: dict):
 
     if inactive_gpus:
         print(f"\nINACTIVE GPUs ({len(inactive_gpus)}):")
-        print(f"{'-'*60}")
+        print(f"{'-' * 60}")
         print("  GPU ID      | Machine             | Priority Projects")
-        print(f"{'-'*60}")
+        print(f"{'-' * 60}")
         for gpu in inactive_gpus:
             gpu_id = (gpu.get("AssignedGPUs") or "N/A")[:11]
             machine = (gpu.get("Machine") or "N/A")[:19]
@@ -2801,22 +2811,22 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
 
     # Print appropriate header based on type
     if metadata.get("is_monthly", False):
-        print(f"\n{'='*70}")
+        print(f"\n{'=' * 70}")
         print(f"{'CHTC MONTHLY GPU REPORT - ' + metadata['monthly_period'].upper():^70}")
-        print(f"{'='*70}")
+        print(f"{'=' * 70}")
         print(f"Period: {metadata['monthly_period']}")
-        print(f"{'='*70}")
+        print(f"{'=' * 70}")
     else:
-        print(f"\n{'='*70}")
+        print(f"\n{'=' * 70}")
         print(f"{'CHTC GPU UTILIZATION REPORT':^70}")
-        print(f"{'='*70}")
+        print(f"{'=' * 70}")
         # Simplified period format for console: just the lookback hours
         hours_back = metadata.get("hours_back", 24)
         hours_str = str(int(hours_back)) if hours_back == int(hours_back) else str(hours_back)
         hour_word = "hour" if hours_back == 1 else "hours"
         period_str = f"{hours_str} {hour_word}"
         print(f"Period: {period_str}")
-        print(f"{'='*70}")
+        print(f"{'=' * 70}")
 
     # Calculate cluster summary first if we have device stats
     grand_totals = {}
@@ -2857,9 +2867,9 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
         backfill_percent = (backfill_claimed / backfill_total * 100) if backfill_total > 0 else 0
 
         print("\nREAL SLOTS:")
-        print(f"{'-'*70}")
+        print(f"{'-' * 70}")
         print(f"  TOTAL: {real_percent:.1f}% ({real_claimed:.1f}/{real_total:.1f} GPUs)")
-        print(f"{'-'*70}")
+        print(f"{'-' * 70}")
         for class_name in real_slot_classes:
             if class_name in grand_totals:
                 totals = grand_totals[class_name]
@@ -2879,11 +2889,11 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
                 )
 
                 print("\nREAL SLOTS BY MEMORY CATEGORY (filtered):")
-                print(f"{'-'*80}")
+                print(f"{'-' * 80}")
                 print(
                     f"  TOTAL: {memory_total_percent:.1f}% ({memory_total_claimed:.1f}/{memory_total_available:.1f} GPUs)"
                 )
-                print(f"{'-'*80}")
+                print(f"{'-' * 80}")
 
                 # Sort memory categories by numerical value
                 def sort_memory_categories(categories):
@@ -2919,9 +2929,9 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
                     )
 
         print("\nBACKFILL SLOTS:")
-        print(f"{'-'*70}")
+        print(f"{'-' * 70}")
         print(f"  TOTAL: {backfill_percent:.1f}% ({backfill_claimed:.1f}/{backfill_total:.1f} GPUs)")
-        print(f"{'-'*70}")
+        print(f"{'-' * 70}")
         for class_name in backfill_slot_classes:
             if class_name in grand_totals:
                 totals = grand_totals[class_name]
@@ -2935,7 +2945,7 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
             h200_stats = results["h200_user_stats"]
             if h200_stats:
                 print("\nH200 USAGE BY SLOT TYPE:")
-                print(f"{'-'*80}")
+                print(f"{'-' * 80}")
 
                 # Aggregate data by slot type (same logic as HTML)
                 slot_type_totals = {}
@@ -2961,7 +2971,7 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
                     percentage = (total_hours / total_gpu_hours * 100) if total_gpu_hours > 0 else 0
 
                     print(f"\n  {display_name} ({user_count} users): {total_hours:.1f} GPU-hours ({percentage:.1f}%)")
-                    print(f"  {'-'*60}")
+                    print(f"  {'-' * 60}")
 
                     # User breakdown beneath the slot type total
                     users = slot_type_users[slot_type]
@@ -2978,7 +2988,7 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
             backfill_stats = results["backfill_user_stats"]
             if backfill_stats:
                 print("\nBACKFILL USAGE BY SLOT TYPE (filtered):")
-                print(f"{'-'*80}")
+                print(f"{'-' * 80}")
 
                 # Aggregate data by slot type (same logic as HTML)
                 slot_type_totals = {}
@@ -3004,7 +3014,7 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
                     percentage = (total_hours / total_gpu_hours * 100) if total_gpu_hours > 0 else 0
 
                     print(f"\n  {display_name} ({user_count} users): {total_hours:.1f} GPU-hours ({percentage:.1f}%)")
-                    print(f"  {'-'*60}")
+                    print(f"  {'-' * 60}")
 
                     # User breakdown beneath the slot type total
                     users = slot_type_users[slot_type]
@@ -3017,7 +3027,7 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
 
     if "allocation_stats" in results:
         print("\nAllocation Summary:")
-        print(f"{'-'*70}")
+        print(f"{'-' * 70}")
         allocation_stats = results["allocation_stats"]
 
         # Order with hosted capacity emphasis (enhanced format is now default)
@@ -3033,7 +3043,7 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
 
     elif "device_stats" in results:
         print("\nUsage by Device Type (filtered):")
-        print(f"{'-'*70}")
+        print(f"{'-' * 70}")
 
         # Use the pre-calculated grand_totals and device_stats
         class_order = CLASS_ORDER
@@ -3042,7 +3052,7 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
             device_data = device_stats.get(class_name, {})
             if device_data:  # Only show classes that have data
                 print(f"\n{get_display_name(class_name)}:")
-                print(f"{'-'*50}")
+                print(f"{'-' * 50}")
 
                 for device_type, stats in sorted(device_data.items()):
                     short_name = get_human_readable_device_name(device_type)
@@ -3065,7 +3075,7 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
                 # Show class total using pre-calculated data
                 if class_name in grand_totals:
                     totals = grand_totals[class_name]
-                    print(f"    {'-'*30}")
+                    print(f"    {'-' * 30}")
                     print(
                         f"    TOTAL {get_display_name(class_name)}: {totals['percent']:.1f}% "
                         f"(avg {totals['claimed']:.1f}/{totals['total']:.1f} GPUs)"
@@ -3073,7 +3083,7 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
 
     elif "timeseries_data" in results:
         print("\nTime Series Analysis:")
-        print(f"{'-'*70}")
+        print(f"{'-' * 70}")
         ts_df = results["timeseries_data"]
 
         # Calculate and display averages
@@ -3086,11 +3096,11 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
                 avg_usage = ts_df[usage_col].mean()
                 avg_claimed = ts_df[claimed_col].mean()
                 avg_total = ts_df[total_col].mean()
-                print(f"  {class_name.title()}: {avg_usage:.1f}% " f"({avg_claimed:.1f}/{avg_total:.1f} GPUs)")
+                print(f"  {class_name.title()}: {avg_usage:.1f}% ({avg_claimed:.1f}/{avg_total:.1f} GPUs)")
 
         # Show recent trend
         print("\nRecent Trend:")
-        print(f"{'-'*70}")
+        print(f"{'-' * 70}")
         recent_df = ts_df.tail(5)
         for _, row in recent_df.iterrows():
             print(
@@ -3106,7 +3116,7 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
     # Show host exclusion information at the bottom
     excluded_hosts = metadata.get("excluded_hosts", {})
     if excluded_hosts:
-        print(f"\n{'='*70}")
+        print(f"\n{'=' * 70}")
         print("EXCLUDED HOSTS:")
         for host, reason in excluded_hosts.items():
             print(f"  {host}: {reason}")
@@ -3119,13 +3129,13 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
         records_excluded = total_original - total_filtered
         if records_excluded > 0:
             if not excluded_hosts:  # Only print separator if excluded hosts wasn't shown
-                print(f"\n{'='*70}")
+                print(f"\n{'=' * 70}")
             print("FILTERING IMPACT:")
             print(f"  Records excluded: {records_excluded:,}")
             print(f"  Records analyzed: {total_filtered:,}")
 
     # Add time range information at the very end
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     if metadata.get("is_monthly", False):
         # For monthly reports, show the month
         monthly_period = metadata.get("monthly_period", "Unknown Period")
@@ -3149,7 +3159,7 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
             # Fallback to hours_back if timestamps not available
             hours_back = metadata.get("hours_back", 24)
             print(f"Data Period: Last {hours_back} hours")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
 
 
 def main(

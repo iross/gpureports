@@ -509,9 +509,22 @@ def calculate_allocation_usage_by_device_enhanced(
             if len(filtered_df) == 0:
                 continue
 
-            # OPTIMIZATION: Use groupby to count unique GPUs per bucket and state
-            # This is MUCH faster than looping through buckets
-            agg_df = filtered_df.group_by(["15min_bucket", "State"]).agg(
+            # OPTIMIZATION: Deduplicate GPUs that appear in multiple states per bucket
+            # Prefer Claimed over Drained when a GPU appears in both states
+            # For each (bucket, GPU) pair, keep only the highest priority state
+            state_priority = (
+                pl.when(pl.col("State") == "Claimed").then(1).when(pl.col("State") == "Drained").then(2).otherwise(3)
+            )
+
+            # Add priority column and keep only the highest priority state per (bucket, GPU)
+            deduped_df = (
+                filtered_df.with_columns(state_priority.alias("state_priority"))
+                .sort(["15min_bucket", "AssignedGPUs", "state_priority"])
+                .unique(subset=["15min_bucket", "AssignedGPUs"], keep="first")
+            )
+
+            # Now count unique GPUs per bucket and state (after deduplication)
+            agg_df = deduped_df.group_by(["15min_bucket", "State"]).agg(
                 pl.col("AssignedGPUs").drop_nulls().n_unique().alias("gpu_count")
             )
 
@@ -528,7 +541,9 @@ def calculate_allocation_usage_by_device_enhanced(
                 .rename({"gpu_count": "drained"})
             )
 
-            total_by_bucket = agg_df.group_by("15min_bucket").agg(pl.col("gpu_count").sum().alias("total"))
+            total_by_bucket = deduped_df.group_by("15min_bucket").agg(
+                pl.col("AssignedGPUs").drop_nulls().n_unique().alias("total")
+            )
 
             # Join to get claimed, drained, and total per bucket
             bucket_stats = (
@@ -545,12 +560,12 @@ def calculate_allocation_usage_by_device_enhanced(
             total_drained = bucket_stats["drained"].sum()
             total_available = bucket_stats["total"].sum()
 
-            # Calculate average usage percentage (only for intervals with data)
+            # Average percentages across intervals (correct approach when GPUs can change state)
+            # Averaging counts then calculating % is wrong because the same GPU counted as
+            # Claimed in one interval and Drained in another adds to both totals
             bucket_stats = bucket_stats.with_columns((pl.col("claimed") / pl.col("total") * 100).alias("usage_pct"))
-            avg_usage_percentage = bucket_stats["usage_pct"].mean()
-
-            # Calculate drained percentage (only for intervals with data)
             bucket_stats = bucket_stats.with_columns((pl.col("drained") / pl.col("total") * 100).alias("drained_pct"))
+            avg_usage_percentage = bucket_stats["usage_pct"].mean()
             avg_drained_percentage = bucket_stats["drained_pct"].mean()
 
             # Average across ALL intervals (including zeros)
@@ -628,15 +643,19 @@ def calculate_allocation_usage_by_memory(df: pl.DataFrame, host: str = "", inclu
 
     for memory_cat in memory_categories:
         total_claimed_across_intervals = 0
+        total_drained_across_intervals = 0
         total_available_across_intervals = 0
         num_intervals_with_data = 0
+        interval_usage_percentages = []
+        interval_drained_percentages = []
 
         # For each bucket, aggregate across all real slot classes using pre-filtered data
         for bucket_time in all_buckets:
-            bucket_claimed = 0
-            bucket_total = 0
+            bucket_claimed_ids = set()
+            bucket_drained_ids = set()
+            bucket_total_ids = set()
 
-            # Sum across all Real slot classes for this memory category
+            # Collect GPU IDs across all Real slot classes for this memory category
             for class_name in real_slot_classes:
                 # Use pre-filtered data for this memory category and class
                 if class_name not in filtered_memory_data[memory_cat]:
@@ -650,32 +669,65 @@ def calculate_allocation_usage_by_memory(df: pl.DataFrame, host: str = "", inclu
                 if len(bucket_class_df) == 0:
                     continue
 
-                # Count unique GPUs (total available for this class)
-                total_count = bucket_class_df.filter(pl.col("AssignedGPUs").is_not_null())["AssignedGPUs"].n_unique()
+                # Collect unique GPU IDs for this class
+                total_ids = set(bucket_class_df.filter(pl.col("AssignedGPUs").is_not_null())["AssignedGPUs"].to_list())
+                bucket_total_ids.update(total_ids)
 
-                # Count unique claimed GPUs
-                claimed_count = bucket_class_df.filter(
-                    (pl.col("State") == "Claimed") & (pl.col("AssignedGPUs").is_not_null())
-                )["AssignedGPUs"].n_unique()
+                # Collect unique claimed GPUs
+                claimed_ids = set(
+                    bucket_class_df.filter((pl.col("State") == "Claimed") & (pl.col("AssignedGPUs").is_not_null()))[
+                        "AssignedGPUs"
+                    ].to_list()
+                )
+                bucket_claimed_ids.update(claimed_ids)
 
-                bucket_claimed += claimed_count
-                bucket_total += total_count
+                # Collect unique drained GPUs (will deduplicate later)
+                drained_ids = set(
+                    bucket_class_df.filter((pl.col("State") == "Drained") & (pl.col("AssignedGPUs").is_not_null()))[
+                        "AssignedGPUs"
+                    ].to_list()
+                )
+                bucket_drained_ids.update(drained_ids)
+
+            # Deduplicate: remove GPUs counted as claimed from drained
+            bucket_drained_ids -= bucket_claimed_ids
+
+            bucket_claimed = len(bucket_claimed_ids)
+            bucket_drained = len(bucket_drained_ids)
+            bucket_total = len(bucket_total_ids)
 
             if bucket_total > 0:
                 total_claimed_across_intervals += bucket_claimed
+                total_drained_across_intervals += bucket_drained
                 total_available_across_intervals += bucket_total
                 num_intervals_with_data += 1
 
+                # Track percentages for this interval
+                interval_usage_percentages.append((bucket_claimed / bucket_total * 100) if bucket_total > 0 else 0)
+                interval_drained_percentages.append((bucket_drained / bucket_total * 100) if bucket_total > 0 else 0)
+
         # Calculate averages
         if num_intervals_with_data > 0:
+            # Average percentages across intervals (correct approach when GPUs can change state)
+            avg_usage_percentage = (
+                sum(interval_usage_percentages) / len(interval_usage_percentages) if interval_usage_percentages else 0
+            )
+            avg_drained_percentage = (
+                sum(interval_drained_percentages) / len(interval_drained_percentages)
+                if interval_drained_percentages
+                else 0
+            )
+
             avg_claimed = total_claimed_across_intervals / num_intervals_with_data
+            avg_drained = total_drained_across_intervals / num_intervals_with_data
             avg_total = total_available_across_intervals / num_intervals_with_data
-            avg_usage_percentage = (avg_claimed / avg_total * 100) if avg_total > 0 else 0
 
             stats[memory_cat] = {
                 "avg_claimed": avg_claimed,
+                "avg_drained": avg_drained,
                 "avg_total_available": avg_total,
                 "allocation_usage_percent": avg_usage_percentage,
+                "drained_percent": avg_drained_percentage,
                 "num_intervals": num_intervals_with_data,
             }
 
