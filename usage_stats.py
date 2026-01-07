@@ -1250,6 +1250,142 @@ def calculate_unique_cluster_totals_from_raw_data(df: pd.DataFrame, host: str = 
     return {"claimed": avg_claimed, "total": avg_available}
 
 
+def calculate_machines_with_zero_active_gpus(
+    df: pd.DataFrame, host: str = "", include_all_devices: bool = True
+) -> dict:
+    """
+    Calculate machines that had ZERO active (claimed) GPUs across the entire time span.
+
+    This identifies machines that had GPUs available but never had any claimed during
+    the analysis period, which may indicate underutilized or problematic hosts.
+
+    Args:
+        df: Raw DataFrame with GPU state data
+        host: Optional host filter
+        include_all_devices: Whether to include all device types or filter out older ones
+
+    Returns:
+        Dictionary with machine information for hosts with zero claimed GPUs:
+        {
+            "machines": [
+                {
+                    "machine": str,
+                    "gpu_model": str,
+                    "total_gpus": int,
+                    "total_observations": int,
+                    "prioritized_projects": set
+                },
+                ...
+            ],
+            "summary": {
+                "total_machines": int,
+                "total_gpus_idle": int
+            }
+        }
+    """
+    # Ensure timestamp is datetime and create 15-minute buckets for consistency
+    df = df.copy()
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+
+    # Apply host exclusions if configured (respects masked_hosts.yaml)
+    if gpu_utils.HOST_EXCLUSIONS:
+        for excluded_host in gpu_utils.HOST_EXCLUSIONS.keys():
+            df = df[~df["Machine"].str.contains(excluded_host, case=False, na=False)]
+
+    # Apply host filter if specified
+    if host:
+        df = df[df["Machine"] == host]
+
+    # Track per machine: total GPUs seen, claimed GPUs seen, device name, prioritized projects
+    machine_stats = {}
+
+    for machine in df["Machine"].unique():
+        machine_df = df[df["Machine"] == machine]
+
+        # Separate primary slots from backfill slots (use .copy() to avoid SettingWithCopyWarning)
+        primary_df = machine_df[~machine_df["Name"].str.contains("backfill", case=False, na=False)].copy()
+        backfill_df = machine_df[machine_df["Name"].str.contains("backfill", case=False, na=False)].copy()
+
+        # Get all unique GPUs on this machine (primary slots)
+        all_gpus = set(primary_df["AssignedGPUs"].dropna().unique())
+
+        # Get claimed GPUs on this machine (primary slots)
+        claimed_df = primary_df[primary_df["State"] == "Claimed"]
+        claimed_gpus = set(claimed_df["AssignedGPUs"].dropna().unique())
+
+        # Calculate average backfill slots in use across 15-minute intervals
+        if not backfill_df.empty:
+            backfill_df["15min_bucket"] = backfill_df["timestamp"].dt.floor("15min")
+            total_backfill_claimed = 0
+            num_intervals = 0
+
+            for bucket in sorted(backfill_df["15min_bucket"].unique()):
+                bucket_df = backfill_df[backfill_df["15min_bucket"] == bucket]
+                claimed_backfill = bucket_df[bucket_df["State"] == "Claimed"]
+                total_backfill_claimed += len(claimed_backfill["AssignedGPUs"].dropna().unique())
+                num_intervals += 1
+
+            avg_backfill = total_backfill_claimed / num_intervals if num_intervals > 0 else 0
+        else:
+            avg_backfill = 0
+
+        # Get GPU device name (most common one)
+        gpu_models = machine_df["GPUs_DeviceName"].value_counts()
+        gpu_model = gpu_models.index[0] if len(gpu_models) > 0 else "Unknown"
+
+        # Get prioritized projects
+        prioritized_projects = set()
+        for proj in machine_df["PrioritizedProjects"].dropna().unique():
+            if proj.strip():
+                prioritized_projects.add(proj.strip())
+
+        machine_stats[machine] = {
+            "all_gpus": all_gpus,
+            "claimed_gpus": claimed_gpus,
+            "gpu_model": gpu_model,
+            "total_observations": len(machine_df),
+            "prioritized_projects": prioritized_projects,
+            "avg_backfill_claimed": avg_backfill,
+        }
+
+    # Find machines with ZERO claimed GPUs
+    machines_with_zero_active = []
+    total_gpus_idle = 0
+
+    for machine, stats in machine_stats.items():
+        if len(stats["claimed_gpus"]) == 0 and len(stats["all_gpus"]) > 0:
+            # Skip old/uncommon GPU types for cleaner output (unless requested to include all)
+            gpu_model = stats["gpu_model"]
+            if not include_all_devices and any(
+                old_gpu in gpu_model for old_gpu in ["GTX 1080", "P100", "Quadro", "A30", "A40"]
+            ):
+                continue
+
+            # This machine had GPUs but none were ever claimed
+            machines_with_zero_active.append(
+                {
+                    "machine": machine,
+                    "gpu_model": gpu_model,
+                    "total_gpus": len(stats["all_gpus"]),
+                    "total_observations": stats["total_observations"],
+                    "prioritized_projects": stats["prioritized_projects"],
+                    "avg_backfill_claimed": stats["avg_backfill_claimed"],
+                }
+            )
+            total_gpus_idle += len(stats["all_gpus"])
+
+    # Sort by machine name
+    machines_with_zero_active.sort(key=lambda x: x["machine"])
+
+    return {
+        "machines": machines_with_zero_active,
+        "summary": {
+            "total_machines": len(machines_with_zero_active),
+            "total_gpus_idle": total_gpus_idle,
+        },
+    }
+
+
 def run_analysis(
     db_path: str,
     hours_back: int = 24,
@@ -1313,6 +1449,7 @@ def run_analysis(
             result["memory_stats"] = calculate_allocation_usage_by_memory(df, host, all_devices)
             result["h200_user_stats"] = calculate_h200_user_breakdown(df, host, hours_back)
             result["backfill_user_stats"] = calculate_backfill_usage_by_user(df, host, hours_back, all_devices)
+            result["zero_active_machines"] = calculate_machines_with_zero_active_gpus(df, host, all_devices)
             result["raw_data"] = df  # Pass raw data for unique cluster totals calculation
             result["host_filter"] = host  # Pass host filter for consistency
         else:
@@ -2350,6 +2487,47 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
 
                 html_parts.append("</table>")
 
+        # Machines with Zero Active GPUs
+        if "zero_active_machines" in results:
+            zero_active_data = results["zero_active_machines"]
+            if zero_active_data and zero_active_data["machines"]:
+                html_parts.append("<h2>Machines with Zero Active Primary Slot GPUs</h2>")
+                html_parts.append(
+                    f"<p><strong>Total machines:</strong> {zero_active_data['summary']['total_machines']} | <strong>Total idle GPUs:</strong> {zero_active_data['summary']['total_gpus_idle']}</p>"
+                )
+
+                # Single table with all machines
+                html_parts.append("<table border='1'>")
+                html_parts.append(
+                    "<tr><th>Machine</th><th>GPU Type</th><th>GPUs</th><th>Avg Backfill</th><th>Prioritized Projects</th></tr>"
+                )
+
+                # Print all machines in a single table, sorted by machine name
+                for machine_info in sorted(zero_active_data["machines"], key=lambda x: x["machine"]):
+                    machine = machine_info["machine"]
+                    gpu_model = machine_info["gpu_model"]
+                    total_gpus = machine_info["total_gpus"]
+                    avg_backfill = machine_info["avg_backfill_claimed"]
+                    prioritized = machine_info["prioritized_projects"]
+
+                    # Shorten GPU model name for better display
+                    short_gpu_name = get_human_readable_device_name(gpu_model)
+
+                    if prioritized:
+                        projects_str = ", ".join(sorted(prioritized))
+                    else:
+                        projects_str = "Open Capacity"
+
+                    html_parts.append("<tr>")
+                    html_parts.append(f"<td>{machine}</td>")
+                    html_parts.append(f"<td>{short_gpu_name}</td>")
+                    html_parts.append(f"<td style='text-align: right'>{total_gpus}</td>")
+                    html_parts.append(f"<td style='text-align: right'>{avg_backfill:.1f}</td>")
+                    html_parts.append(f"<td>{projects_str}</td>")
+                    html_parts.append("</tr>")
+
+                html_parts.append("</table>")
+
         html_parts.append("<h2>Usage by Device Type (filtered)</h2>")
 
         for class_name in CLASS_ORDER:
@@ -3024,6 +3202,44 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
                         gpu_hours = user_info["gpu_hours"]
                         user_total_percentage = (gpu_hours / total_gpu_hours * 100) if total_gpu_hours > 0 else 0
                         print(f"    {user}: {gpu_hours:.1f} hrs ({user_total_percentage:.1f}%)")
+
+        # Machines with Zero Active GPUs
+        if "zero_active_machines" in results:
+            zero_active_data = results["zero_active_machines"]
+            if zero_active_data and zero_active_data["machines"]:
+                print("\nMACHINES WITH ZERO ACTIVE GPUs:")
+                print(f"{'-' * 120}")
+                print(
+                    f"Total machines: {zero_active_data['summary']['total_machines']} | Total idle GPUs: {zero_active_data['summary']['total_gpus_idle']}"
+                )
+                print(f"{'-' * 120}")
+
+                # Table header
+                print(f"{'Machine':<40} {'GPU Type':<25} {'GPUs':>5} {'Avg Backfill':>12} {'Prioritized Projects':<30}")
+                print(f"{'-' * 120}")
+
+                # Print all machines in a single table, sorted by machine name
+                for machine_info in sorted(zero_active_data["machines"], key=lambda x: x["machine"]):
+                    machine = machine_info["machine"]
+                    gpu_model = machine_info["gpu_model"]
+                    total_gpus = machine_info["total_gpus"]
+                    avg_backfill = machine_info["avg_backfill_claimed"]
+                    prioritized = machine_info["prioritized_projects"]
+
+                    # Shorten GPU model name for better display
+                    short_gpu_name = get_human_readable_device_name(gpu_model)
+
+                    if prioritized:
+                        projects_str = ", ".join(sorted(prioritized))
+                        # Truncate if too long
+                        if len(projects_str) > 28:
+                            projects_str = projects_str[:25] + "..."
+                    else:
+                        projects_str = "Open Capacity"
+
+                    print(
+                        f"{machine:<40} {short_gpu_name:<25} {total_gpus:>5} {avg_backfill:>12.1f} {projects_str:<30}"
+                    )
 
     if "allocation_stats" in results:
         print("\nAllocation Summary:")
