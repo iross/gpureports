@@ -2287,18 +2287,22 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
                     "<tr style='background-color: #e0e0e0;'><th>Memory Category</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>"
                 )
 
-                # Calculate totals for memory categories
-                memory_total_claimed = sum(stats["avg_claimed"] for stats in memory_stats.values())
+                # Calculate totals for memory categories - include drained
+                memory_total_allocated = sum(
+                    stats["avg_claimed"] + stats.get("avg_drained", 0.0) for stats in memory_stats.values()
+                )
                 memory_total_available = sum(stats["avg_total_available"] for stats in memory_stats.values())
                 memory_total_percent = (
-                    (memory_total_claimed / memory_total_available * 100) if memory_total_available > 0 else 0
+                    (memory_total_allocated / memory_total_available * 100) if memory_total_available > 0 else 0
                 )
 
                 # Total row for memory categories
                 html_parts.append("<tr style='background-color: #d0d0d0; font-weight: bold;'>")
                 html_parts.append("<td style='font-weight: bold;'>TOTAL</td>")
                 html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{memory_total_percent:.1f}%</td>")
-                html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{memory_total_claimed:.1f}</td>")
+                html_parts.append(
+                    f"<td style='text-align: right; font-weight: bold;'>{memory_total_allocated:.1f}</td>"
+                )
                 html_parts.append(
                     f"<td style='text-align: right; font-weight: bold;'>{memory_total_available:.1f}</td>"
                 )
@@ -2332,14 +2336,15 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
                 sorted_memory_cats = sort_memory_categories(memory_stats.keys())
                 for memory_cat in sorted_memory_cats:
                     stats = memory_stats[memory_cat]
+                    # Allocated = claimed + drained
+                    allocated = stats["avg_claimed"] + stats.get("avg_drained", 0.0)
+                    allocated_pct = (
+                        (allocated / stats["avg_total_available"] * 100) if stats["avg_total_available"] > 0 else 0
+                    )
                     html_parts.append("<tr>")
                     html_parts.append(f"<td style='font-weight: bold;'>{memory_cat}</td>")
-                    html_parts.append(
-                        f"<td style='text-align: right; font-weight: bold;'>{stats['allocation_usage_percent']:.1f}%</td>"
-                    )
-                    html_parts.append(
-                        f"<td style='text-align: right; font-weight: bold;'>{stats['avg_claimed']:.1f}</td>"
-                    )
+                    html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{allocated_pct:.1f}%</td>")
+                    html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{allocated:.1f}</td>")
                     html_parts.append(
                         f"<td style='text-align: right; font-weight: bold;'>{stats['avg_total_available']:.1f}</td>"
                     )
@@ -2535,45 +2540,32 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
             if device_data:
                 html_parts.append(f"<h3>{get_display_name(class_name)}</h3>")
                 html_parts.append("<table border='1'>")
+                html_parts.append(
+                    "<tr><th>Device Type</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>"
+                )
 
-                # Only show drained columns for Open Capacity (Shared)
-                if class_name == "Shared":
-                    html_parts.append(
-                        "<tr><th>Device Type</th><th>Drained %</th><th>Drained (avg.)</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>"
-                    )
-                else:
-                    html_parts.append(
-                        "<tr><th>Device Type</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>"
-                    )
-
-                # Calculate totals first
-                total_claimed = 0
+                # Calculate totals first - include drained in allocated
+                total_allocated = 0
                 total_available = 0
-                total_drained = 0
                 for _device_type, stats in sorted(device_data.items()):
-                    total_claimed += stats["avg_claimed"]
+                    # Allocated = claimed + drained
+                    allocated = stats["avg_claimed"] + stats.get("avg_drained", 0.0)
+                    total_allocated += allocated
                     total_available += stats["avg_total_available"]
-                    total_drained += stats.get("avg_drained", 0.0)
 
                 # Add total row first
                 if total_available > 0:
-                    total_percent = (total_claimed / total_available) * 100
-                    total_drained_pct = (total_drained / total_available) * 100
+                    total_percent = (total_allocated / total_available) * 100
                     html_parts.append("<tr style='font-weight: bold; background-color: #f0f0f0;'>")
                     html_parts.append("<td>TOTAL</td>")
 
-                    # Only show drained columns for Open Capacity (Shared)
-                    if class_name == "Shared":
-                        html_parts.append(f"<td style='text-align: right'>{total_drained_pct:.1f}%</td>")
-                        html_parts.append(f"<td style='text-align: right'>{total_drained:.1f}</td>")
-
                     html_parts.append(f"<td style='text-align: right'>{total_percent:.1f}%</td>")
-                    html_parts.append(f"<td style='text-align: right'>{total_claimed:.1f}</td>")
+                    html_parts.append(f"<td style='text-align: right'>{total_allocated:.1f}</td>")
                     html_parts.append(f"<td style='text-align: right'>{total_available:.1f}</td>")
                     html_parts.append("</tr>")
 
                     class_totals[class_name] = {
-                        "claimed": total_claimed,
+                        "claimed": total_allocated,
                         "total": total_available,
                         "percent": total_percent,
                     }
@@ -2581,18 +2573,16 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
                 # Add individual device rows (sorted alphabetically)
                 for device_type, stats in sorted(device_data.items()):
                     short_name = get_human_readable_device_name(device_type)
-                    drained_pct = stats.get("drained_percent", 0.0)
-                    drained_avg = stats.get("avg_drained", 0.0)
+                    # Allocated = claimed + drained
+                    allocated = stats["avg_claimed"] + stats.get("avg_drained", 0.0)
+                    allocated_pct = (
+                        (allocated / stats["avg_total_available"] * 100) if stats["avg_total_available"] > 0 else 0
+                    )
                     html_parts.append("<tr>")
                     html_parts.append(f"<td>{short_name}</td>")
 
-                    # Only show drained columns for Open Capacity (Shared)
-                    if class_name == "Shared":
-                        html_parts.append(f"<td style='text-align: right'>{drained_pct:.1f}%</td>")
-                        html_parts.append(f"<td style='text-align: right'>{drained_avg:.1f}</td>")
-
-                    html_parts.append(f"<td style='text-align: right'>{stats['allocation_usage_percent']:.1f}%</td>")
-                    html_parts.append(f"<td style='text-align: right'>{stats['avg_claimed']:.1f}</td>")
+                    html_parts.append(f"<td style='text-align: right'>{allocated_pct:.1f}%</td>")
+                    html_parts.append(f"<td style='text-align: right'>{allocated:.1f}</td>")
                     html_parts.append(f"<td style='text-align: right'>{stats['avg_total_available']:.1f}</td>")
                     html_parts.append("</tr>")
 
@@ -2632,37 +2622,31 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
                 html_parts.append(f"<h3>{get_display_name(class_name)}</h3>")
                 html_parts.append("<table border='1'>")
                 html_parts.append(
-                    "<tr><th>Device Type</th><th>Drained %</th><th>Drained (avg.)</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>"
+                    "<tr><th>Device Type</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>"
                 )
 
-                # Calculate totals first
-                total_claimed = 0
+                # Calculate totals first - include drained in allocated
+                total_allocated = 0
                 total_available = 0
-                total_drained = 0
                 for _device_type, stats in sorted(device_data.items()):
-                    total_claimed += stats["avg_claimed"]
+                    # Allocated = claimed + drained
+                    allocated = stats["avg_claimed"] + stats.get("avg_drained", 0.0)
+                    total_allocated += allocated
                     total_available += stats["avg_total_available"]
-                    total_drained += stats.get("avg_drained", 0.0)
 
                 # Add total row first
                 if total_available > 0:
-                    total_percent = (total_claimed / total_available) * 100
-                    total_drained_pct = (total_drained / total_available) * 100
+                    total_percent = (total_allocated / total_available) * 100
                     html_parts.append("<tr style='font-weight: bold; background-color: #f0f0f0;'>")
                     html_parts.append("<td>TOTAL</td>")
 
-                    # Only show drained columns for Open Capacity (Shared)
-                    if class_name == "Shared":
-                        html_parts.append(f"<td style='text-align: right'>{total_drained_pct:.1f}%</td>")
-                        html_parts.append(f"<td style='text-align: right'>{total_drained:.1f}</td>")
-
                     html_parts.append(f"<td style='text-align: right'>{total_percent:.1f}%</td>")
-                    html_parts.append(f"<td style='text-align: right'>{total_claimed:.1f}</td>")
+                    html_parts.append(f"<td style='text-align: right'>{total_allocated:.1f}</td>")
                     html_parts.append(f"<td style='text-align: right'>{total_available:.1f}</td>")
                     html_parts.append("</tr>")
 
                     class_totals[class_name] = {
-                        "claimed": total_claimed,
+                        "claimed": total_allocated,
                         "total": total_available,
                         "percent": total_percent,
                     }
@@ -2670,18 +2654,16 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
                 # Add individual device rows (sorted alphabetically)
                 for device_type, stats in sorted(device_data.items()):
                     short_name = get_human_readable_device_name(device_type)
-                    drained_pct = stats.get("drained_percent", 0.0)
-                    drained_avg = stats.get("avg_drained", 0.0)
+                    # Allocated = claimed + drained
+                    allocated = stats["avg_claimed"] + stats.get("avg_drained", 0.0)
+                    allocated_pct = (
+                        (allocated / stats["avg_total_available"] * 100) if stats["avg_total_available"] > 0 else 0
+                    )
                     html_parts.append("<tr>")
                     html_parts.append(f"<td>{short_name}</td>")
 
-                    # Only show drained columns for Open Capacity (Shared)
-                    if class_name == "Shared":
-                        html_parts.append(f"<td style='text-align: right'>{drained_pct:.1f}%</td>")
-                        html_parts.append(f"<td style='text-align: right'>{drained_avg:.1f}</td>")
-
-                    html_parts.append(f"<td style='text-align: right'>{stats['allocation_usage_percent']:.1f}%</td>")
-                    html_parts.append(f"<td style='text-align: right'>{stats['avg_claimed']:.1f}</td>")
+                    html_parts.append(f"<td style='text-align: right'>{allocated_pct:.1f}%</td>")
+                    html_parts.append(f"<td style='text-align: right'>{allocated:.1f}</td>")
                     html_parts.append(f"<td style='text-align: right'>{stats['avg_total_available']:.1f}</td>")
                     html_parts.append("</tr>")
 
@@ -2740,18 +2722,20 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
                         "<tr><th>Memory Category</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>"
                     )
 
-                    # Calculate totals for memory categories
-                    memory_total_claimed = sum(stats["avg_claimed"] for stats in memory_stats.values())
+                    # Calculate totals for memory categories - include drained
+                    memory_total_allocated = sum(
+                        stats["avg_claimed"] + stats.get("avg_drained", 0.0) for stats in memory_stats.values()
+                    )
                     memory_total_available = sum(stats["avg_total_available"] for stats in memory_stats.values())
                     memory_total_percent = (
-                        (memory_total_claimed / memory_total_available * 100) if memory_total_available > 0 else 0
+                        (memory_total_allocated / memory_total_available * 100) if memory_total_available > 0 else 0
                     )
 
                     # Total row for memory categories
                     html_parts.append("<tr style='font-weight: bold; background-color: #f0f0f0;'>")
                     html_parts.append("<td>TOTAL</td>")
                     html_parts.append(f"<td style='text-align: right'>{memory_total_percent:.1f}%</td>")
-                    html_parts.append(f"<td style='text-align: right'>{memory_total_claimed:.1f}</td>")
+                    html_parts.append(f"<td style='text-align: right'>{memory_total_allocated:.1f}</td>")
                     html_parts.append(f"<td style='text-align: right'>{memory_total_available:.1f}</td>")
                     html_parts.append("</tr>")
 
@@ -2777,12 +2761,15 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
                     sorted_memory_cats = sort_memory_categories(memory_stats.keys())
                     for memory_cat in sorted_memory_cats:
                         stats = memory_stats[memory_cat]
+                        # Allocated = claimed + drained
+                        allocated = stats["avg_claimed"] + stats.get("avg_drained", 0.0)
+                        allocated_pct = (
+                            (allocated / stats["avg_total_available"] * 100) if stats["avg_total_available"] > 0 else 0
+                        )
                         html_parts.append("<tr>")
                         html_parts.append(f"<td>{memory_cat}</td>")
-                        html_parts.append(
-                            f"<td style='text-align: right'>{stats['allocation_usage_percent']:.1f}%</td>"
-                        )
-                        html_parts.append(f"<td style='text-align: right'>{stats['avg_claimed']:.1f}</td>")
+                        html_parts.append(f"<td style='text-align: right'>{allocated_pct:.1f}%</td>")
+                        html_parts.append(f"<td style='text-align: right'>{allocated:.1f}</td>")
                         html_parts.append(f"<td style='text-align: right'>{stats['avg_total_available']:.1f}</td>")
                         html_parts.append("</tr>")
 
@@ -3060,16 +3047,19 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
         if "memory_stats" in results:
             memory_stats = results["memory_stats"]
             if memory_stats:
-                memory_total_claimed = sum(stats["avg_claimed"] for stats in memory_stats.values())
+                # Include drained in allocated
+                memory_total_allocated = sum(
+                    stats["avg_claimed"] + stats.get("avg_drained", 0.0) for stats in memory_stats.values()
+                )
                 memory_total_available = sum(stats["avg_total_available"] for stats in memory_stats.values())
                 memory_total_percent = (
-                    (memory_total_claimed / memory_total_available * 100) if memory_total_available > 0 else 0
+                    (memory_total_allocated / memory_total_available * 100) if memory_total_available > 0 else 0
                 )
 
                 print("\nREAL SLOTS BY MEMORY CATEGORY (filtered):")
                 print(f"{'-' * 80}")
                 print(
-                    f"  TOTAL: {memory_total_percent:.1f}% ({memory_total_claimed:.1f}/{memory_total_available:.1f} GPUs)"
+                    f"  TOTAL: {memory_total_percent:.1f}% ({memory_total_allocated:.1f}/{memory_total_available:.1f} GPUs)"
                 )
                 print(f"{'-' * 80}")
 
@@ -3101,9 +3091,14 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
                 sorted_memory_cats = sort_memory_categories(memory_stats.keys())
                 for memory_cat in sorted_memory_cats:
                     stats = memory_stats[memory_cat]
+                    # Allocated = claimed + drained
+                    allocated = stats["avg_claimed"] + stats.get("avg_drained", 0.0)
+                    allocated_pct = (
+                        (allocated / stats["avg_total_available"] * 100) if stats["avg_total_available"] > 0 else 0
+                    )
                     print(
-                        f"  {memory_cat}: {stats['allocation_usage_percent']:.1f}% "
-                        f"({stats['avg_claimed']:.1f}/{stats['avg_total_available']:.1f} GPUs)"
+                        f"  {memory_cat}: {allocated_pct:.1f}% "
+                        f"({allocated:.1f}/{stats['avg_total_available']:.1f} GPUs)"
                     )
 
         print("\nBACKFILL SLOTS:")
@@ -3273,20 +3268,16 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
                 for device_type, stats in sorted(device_data.items()):
                     short_name = get_human_readable_device_name(device_type)
 
-                    # Only show drained info for Open Capacity (Shared)
-                    if class_name == "Shared":
-                        drained_pct = stats.get("drained_percent", 0.0)
-                        drained_avg = stats.get("avg_drained", 0.0)
-                        print(
-                            f"    {short_name}: {drained_pct:.1f}% drained (avg {drained_avg:.1f}), "
-                            f"{stats['allocation_usage_percent']:.1f}% allocated "
-                            f"(avg {stats['avg_claimed']:.1f}/{stats['avg_total_available']:.1f} GPUs)"
-                        )
-                    else:
-                        print(
-                            f"    {short_name}: {stats['allocation_usage_percent']:.1f}% "
-                            f"(avg {stats['avg_claimed']:.1f}/{stats['avg_total_available']:.1f} GPUs)"
-                        )
+                    # Allocated = claimed + drained
+                    allocated = stats["avg_claimed"] + stats.get("avg_drained", 0.0)
+                    allocated_pct = (
+                        (allocated / stats["avg_total_available"] * 100) if stats["avg_total_available"] > 0 else 0
+                    )
+
+                    print(
+                        f"    {short_name}: {allocated_pct:.1f}% "
+                        f"(avg {allocated:.1f}/{stats['avg_total_available']:.1f} GPUs)"
+                    )
 
                 # Show class total using pre-calculated data
                 if class_name in grand_totals:
