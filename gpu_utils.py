@@ -143,13 +143,17 @@ def filter_df(df: pd.DataFrame, utilization: str = "", state: str = "", host: st
     elif utilization == "Shared":
         # Apply same duplicate cleanup logic as Priority - shared GPUs can also appear in backfill slots
         duplicated_gpus = df[~df["AssignedGPUs"].isna()]["AssignedGPUs"].duplicated(keep=False)
-        # For duplicated GPUs, we want to keep the Claimed state and drop Unclaimed
+        # For duplicated GPUs, prefer primary slots over backfill to ensure all GPUs are counted in totals.
+        # When a GPU is Unclaimed on primary but Claimed on backfill, we keep the primary entry.
         if duplicated_gpus.any():
-            # Create a temporary rank column to sort out duplicates. Prefer claimed to unclaimed and primary slots to backfill.
-            df["_rank"] = 0  # Default rank for Unclaimed
-            df.loc[(df["State"] == "Claimed") & (~df["Name"].str.contains("backfill")), "_rank"] = 3
-            df.loc[(df["State"] == "Claimed") & (df["Name"].str.contains("backfill")), "_rank"] = 2
-            df.loc[(df["State"] == "Unclaimed") & (~df["Name"].str.contains("backfill")), "_rank"] = 1
+            # Create a temporary rank column to sort out duplicates.
+            # Prefer primary slots over backfill slots to ensure accurate total counts.
+            df["_rank"] = 0  # Default rank for Backfill Unclaimed
+            df.loc[(df["State"] == "Claimed") & (~df["Name"].str.contains("backfill")), "_rank"] = 3  # Primary Claimed
+            df.loc[(df["State"] == "Unclaimed") & (~df["Name"].str.contains("backfill")), "_rank"] = (
+                2  # Primary Unclaimed
+            )
+            df.loc[(df["State"] == "Claimed") & (df["Name"].str.contains("backfill")), "_rank"] = 1  # Backfill Claimed
 
             # Sort by AssignedGPUs and rank (keeping highest rank first)
             df = df.sort_values(["AssignedGPUs", "_rank"], ascending=[True, False])
@@ -191,13 +195,17 @@ def filter_df(df: pd.DataFrame, utilization: str = "", state: str = "", host: st
     elif utilization == "Priority":
         # Do some cleanup -- primary slots still have in-use GPUs listed as Assigned, so remove them if they're in use
         duplicated_gpus = df[~df["AssignedGPUs"].isna()]["AssignedGPUs"].duplicated(keep=False)
-        # For duplicated GPUs, we want to keep the Claimed state and drop Unclaimed
+        # For duplicated GPUs, prefer primary slots over backfill to ensure all GPUs are counted in totals.
+        # When a GPU is Unclaimed on primary but Claimed on backfill, we keep the primary entry.
         if duplicated_gpus.any():
-            # Create a temporary rank column to sort out duplicates. Prefer claimed to unclaimed and primary slots to backfill.
-            df["_rank"] = 0  # Default rank for Unclaimed
-            df.loc[(df["State"] == "Claimed") & (~df["Name"].str.contains("backfill")), "_rank"] = 3
-            df.loc[(df["State"] == "Claimed") & (df["Name"].str.contains("backfill")), "_rank"] = 2
-            df.loc[(df["State"] == "Unclaimed") & (~df["Name"].str.contains("backfill")), "_rank"] = 1
+            # Create a temporary rank column to sort out duplicates.
+            # Prefer primary slots over backfill slots to ensure accurate total counts.
+            df["_rank"] = 0  # Default rank for Backfill Unclaimed
+            df.loc[(df["State"] == "Claimed") & (~df["Name"].str.contains("backfill")), "_rank"] = 3  # Primary Claimed
+            df.loc[(df["State"] == "Unclaimed") & (~df["Name"].str.contains("backfill")), "_rank"] = (
+                2  # Primary Unclaimed
+            )
+            df.loc[(df["State"] == "Claimed") & (df["Name"].str.contains("backfill")), "_rank"] = 1  # Backfill Claimed
 
             # Sort by AssignedGPUs and rank (keeping highest rank first)
             df = df.sort_values(["AssignedGPUs", "_rank"], ascending=[True, False])
@@ -382,13 +390,17 @@ def filter_df_enhanced(df: pd.DataFrame, utilization: str = "", state: str = "",
         # Priority slots on researcher owned machines (non-empty PrioritizedProjects AND not in hosted capacity)
         # Do some cleanup -- primary slots still have in-use GPUs listed as Assigned, so remove them if they're in use
         duplicated_gpus = df[~df["AssignedGPUs"].isna()]["AssignedGPUs"].duplicated(keep=False)
-        # For duplicated GPUs, we want to keep the Claimed state and drop Unclaimed
+        # For duplicated GPUs, prefer primary slots over backfill to ensure all GPUs are counted in totals.
+        # When a GPU is Unclaimed on primary but Claimed on backfill, we keep the primary entry.
         if duplicated_gpus.any():
-            # Create a temporary rank column to sort out duplicates. Prefer claimed to unclaimed and primary slots to backfill.
-            df["_rank"] = 0  # Default rank for Unclaimed
-            df.loc[(df["State"] == "Claimed") & (~df["Name"].str.contains("backfill")), "_rank"] = 3
-            df.loc[(df["State"] == "Claimed") & (df["Name"].str.contains("backfill")), "_rank"] = 2
-            df.loc[(df["State"] == "Unclaimed") & (~df["Name"].str.contains("backfill")), "_rank"] = 1
+            # Create a temporary rank column to sort out duplicates.
+            # Prefer primary slots over backfill slots to ensure accurate total counts.
+            df["_rank"] = 0  # Default rank for Backfill Unclaimed
+            df.loc[(df["State"] == "Claimed") & (~df["Name"].str.contains("backfill")), "_rank"] = 3  # Primary Claimed
+            df.loc[(df["State"] == "Unclaimed") & (~df["Name"].str.contains("backfill")), "_rank"] = (
+                2  # Primary Unclaimed
+            )
+            df.loc[(df["State"] == "Claimed") & (df["Name"].str.contains("backfill")), "_rank"] = 1  # Backfill Claimed
 
             # Sort by AssignedGPUs and rank (keeping highest rank first)
             df = df.sort_values(["AssignedGPUs", "_rank"], ascending=[True, False])
@@ -435,13 +447,17 @@ def filter_df_enhanced(df: pd.DataFrame, utilization: str = "", state: str = "",
         # Priority slots on hosted capacity machines (non-empty PrioritizedProjects AND in hosted capacity)
         # Do some cleanup -- primary slots still have in-use GPUs listed as Assigned, so remove them if they're in use
         duplicated_gpus = df[~df["AssignedGPUs"].isna()]["AssignedGPUs"].duplicated(keep=False)
-        # For duplicated GPUs, we want to keep the Claimed state and drop Unclaimed
+        # For duplicated GPUs, prefer primary slots over backfill to ensure all GPUs are counted in totals.
+        # When a GPU is Unclaimed on primary but Claimed on backfill, we keep the primary entry.
         if duplicated_gpus.any():
-            # Create a temporary rank column to sort out duplicates. Prefer claimed to unclaimed and primary slots to backfill.
-            df["_rank"] = 0  # Default rank for Unclaimed
-            df.loc[(df["State"] == "Claimed") & (~df["Name"].str.contains("backfill")), "_rank"] = 3
-            df.loc[(df["State"] == "Claimed") & (df["Name"].str.contains("backfill")), "_rank"] = 2
-            df.loc[(df["State"] == "Unclaimed") & (~df["Name"].str.contains("backfill")), "_rank"] = 1
+            # Create a temporary rank column to sort out duplicates.
+            # Prefer primary slots over backfill slots to ensure accurate total counts.
+            df["_rank"] = 0  # Default rank for Backfill Unclaimed
+            df.loc[(df["State"] == "Claimed") & (~df["Name"].str.contains("backfill")), "_rank"] = 3  # Primary Claimed
+            df.loc[(df["State"] == "Unclaimed") & (~df["Name"].str.contains("backfill")), "_rank"] = (
+                2  # Primary Unclaimed
+            )
+            df.loc[(df["State"] == "Claimed") & (df["Name"].str.contains("backfill")), "_rank"] = 1  # Backfill Claimed
 
             # Sort by AssignedGPUs and rank (keeping highest rank first)
             df = df.sort_values(["AssignedGPUs", "_rank"], ascending=[True, False])
@@ -514,13 +530,17 @@ def filter_df_enhanced(df: pd.DataFrame, utilization: str = "", state: str = "",
     elif utilization == "Shared":
         # Apply same duplicate cleanup logic as Priority - shared GPUs can also appear in backfill slots
         duplicated_gpus = df[~df["AssignedGPUs"].isna()]["AssignedGPUs"].duplicated(keep=False)
-        # For duplicated GPUs, we want to keep the Claimed state and drop Unclaimed
+        # For duplicated GPUs, prefer primary slots over backfill to ensure all GPUs are counted in totals.
+        # When a GPU is Unclaimed on primary but Claimed on backfill, we keep the primary entry.
         if duplicated_gpus.any():
-            # Create a temporary rank column to sort out duplicates. Prefer claimed to unclaimed and primary slots to backfill.
-            df["_rank"] = 0  # Default rank for Unclaimed
-            df.loc[(df["State"] == "Claimed") & (~df["Name"].str.contains("backfill")), "_rank"] = 3
-            df.loc[(df["State"] == "Claimed") & (df["Name"].str.contains("backfill")), "_rank"] = 2
-            df.loc[(df["State"] == "Unclaimed") & (~df["Name"].str.contains("backfill")), "_rank"] = 1
+            # Create a temporary rank column to sort out duplicates.
+            # Prefer primary slots over backfill slots to ensure accurate total counts.
+            df["_rank"] = 0  # Default rank for Backfill Unclaimed
+            df.loc[(df["State"] == "Claimed") & (~df["Name"].str.contains("backfill")), "_rank"] = 3  # Primary Claimed
+            df.loc[(df["State"] == "Unclaimed") & (~df["Name"].str.contains("backfill")), "_rank"] = (
+                2  # Primary Unclaimed
+            )
+            df.loc[(df["State"] == "Claimed") & (df["Name"].str.contains("backfill")), "_rank"] = 1  # Backfill Claimed
 
             # Sort by AssignedGPUs and rank (keeping highest rank first)
             df = df.sort_values(["AssignedGPUs", "_rank"], ascending=[True, False])
@@ -562,13 +582,17 @@ def filter_df_enhanced(df: pd.DataFrame, utilization: str = "", state: str = "",
     elif utilization == "Priority":
         # Do some cleanup -- primary slots still have in-use GPUs listed as Assigned, so remove them if they're in use
         duplicated_gpus = df[~df["AssignedGPUs"].isna()]["AssignedGPUs"].duplicated(keep=False)
-        # For duplicated GPUs, we want to keep the Claimed state and drop Unclaimed
+        # For duplicated GPUs, prefer primary slots over backfill to ensure all GPUs are counted in totals.
+        # When a GPU is Unclaimed on primary but Claimed on backfill, we keep the primary entry.
         if duplicated_gpus.any():
-            # Create a temporary rank column to sort out duplicates. Prefer claimed to unclaimed and primary slots to backfill.
-            df["_rank"] = 0  # Default rank for Unclaimed
-            df.loc[(df["State"] == "Claimed") & (~df["Name"].str.contains("backfill")), "_rank"] = 3
-            df.loc[(df["State"] == "Claimed") & (df["Name"].str.contains("backfill")), "_rank"] = 2
-            df.loc[(df["State"] == "Unclaimed") & (~df["Name"].str.contains("backfill")), "_rank"] = 1
+            # Create a temporary rank column to sort out duplicates.
+            # Prefer primary slots over backfill slots to ensure accurate total counts.
+            df["_rank"] = 0  # Default rank for Backfill Unclaimed
+            df.loc[(df["State"] == "Claimed") & (~df["Name"].str.contains("backfill")), "_rank"] = 3  # Primary Claimed
+            df.loc[(df["State"] == "Unclaimed") & (~df["Name"].str.contains("backfill")), "_rank"] = (
+                2  # Primary Unclaimed
+            )
+            df.loc[(df["State"] == "Claimed") & (df["Name"].str.contains("backfill")), "_rank"] = 1  # Backfill Claimed
 
             # Sort by AssignedGPUs and rank (keeping highest rank first)
             df = df.sort_values(["AssignedGPUs", "_rank"], ascending=[True, False])
