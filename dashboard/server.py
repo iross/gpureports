@@ -9,7 +9,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from dashboard.data import get_heatmap_data
+from dashboard.data import get_counts_data, get_heatmap_data
 
 BASE_DIR = str(Path(__file__).resolve().parent.parent)
 DASHBOARD_DIR = Path(__file__).resolve().parent
@@ -25,9 +25,17 @@ _cache: dict[str, tuple[float, dict]] = {}
 CACHE_TTL = 300  # 5 minutes
 
 
-def _cache_key(start: str | None, end: str | None, bucket: int) -> str:
-    raw = f"{start}|{end}|{bucket}"
+def _cache_key(prefix: str, start: str | None, end: str | None, bucket: int) -> str:
+    raw = f"{prefix}|{start}|{end}|{bucket}"
     return hashlib.md5(raw.encode()).hexdigest()
+
+
+def _parse_params(
+    start: str | None, end: str | None, bucket_minutes: int
+) -> tuple[datetime.datetime | None, datetime.datetime | None, int]:
+    start_dt = datetime.datetime.fromisoformat(start) if start else None
+    end_dt = datetime.datetime.fromisoformat(end) if end else None
+    return start_dt, end_dt, bucket_minutes
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -41,30 +49,33 @@ async def heatmap(
     end: str | None = Query(None, description="ISO datetime end, e.g. 2026-01-16T00:00"),
     bucket_minutes: int = Query(15, description="Time bucket size in minutes"),
 ):
-    # Check cache
-    key = _cache_key(start, end, bucket_minutes)
+    key = _cache_key("heatmap", start, end, bucket_minutes)
     now = datetime.datetime.now().timestamp()
     if key in _cache:
         cached_time, cached_data = _cache[key]
         if now - cached_time < CACHE_TTL:
             return JSONResponse(content=cached_data)
 
-    # Parse datetimes
-    start_dt = None
-    end_dt = None
-    if start:
-        start_dt = datetime.datetime.fromisoformat(start)
-    if end:
-        end_dt = datetime.datetime.fromisoformat(end)
-
-    data = get_heatmap_data(
-        start=start_dt,
-        end=end_dt,
-        bucket_minutes=bucket_minutes,
-        base_dir=BASE_DIR,
-    )
-
-    # Cache result
+    start_dt, end_dt, bucket_minutes = _parse_params(start, end, bucket_minutes)
+    data = get_heatmap_data(start=start_dt, end=end_dt, bucket_minutes=bucket_minutes, base_dir=BASE_DIR)
     _cache[key] = (now, data)
+    return JSONResponse(content=data)
 
+
+@app.get("/api/counts")
+async def counts(
+    start: str | None = Query(None, description="ISO datetime start, e.g. 2026-01-15T00:00"),
+    end: str | None = Query(None, description="ISO datetime end, e.g. 2026-01-16T00:00"),
+    bucket_minutes: int = Query(15, description="Time bucket size in minutes"),
+):
+    key = _cache_key("counts", start, end, bucket_minutes)
+    now = datetime.datetime.now().timestamp()
+    if key in _cache:
+        cached_time, cached_data = _cache[key]
+        if now - cached_time < CACHE_TTL:
+            return JSONResponse(content=cached_data)
+
+    start_dt, end_dt, bucket_minutes = _parse_params(start, end, bucket_minutes)
+    data = get_counts_data(start=start_dt, end=end_dt, bucket_minutes=bucket_minutes, base_dir=BASE_DIR)
+    _cache[key] = (now, data)
     return JSONResponse(content=data)

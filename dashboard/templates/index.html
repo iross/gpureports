@@ -9,7 +9,11 @@
 <body>
     <div class="topbar">
         <h1>GPU State Dashboard</h1>
-        <div class="legend">
+        <div class="tab-bar">
+            <button class="tab-btn active" data-tab="heatmap">Heatmap</button>
+            <button class="tab-btn" data-tab="charts">Charts</button>
+        </div>
+        <div class="legend" id="legend">
             <div class="legend-item"><div class="legend-swatch" style="background:#ff4444"></div>Idle, prioritized</div>
             <div class="legend-item"><div class="legend-swatch" style="background:#ff8800"></div>Idle, open capacity</div>
             <div class="legend-item"><div class="legend-swatch" style="background:#44ff44"></div>Busy, prioritized</div>
@@ -24,20 +28,45 @@
             <input class="datetime-input" type="datetime-local" id="customStart" title="Custom start">
             <input class="datetime-input" type="datetime-local" id="customEnd" title="Custom end">
             <button id="btnCustom">Go</button>
-            <input class="filter-input" type="text" placeholder="Filter machines..." id="machineFilter">
+            <div class="heatmap-controls" id="heatmapControls">
+                <input class="filter-input" type="text" placeholder="Filter machines..." id="machineFilter">
+                <div class="cat-filters">
+                    <button class="cat-btn active" data-cat="all">All</button>
+                    <button class="cat-btn" data-cat="prioritized">Prioritized</button>
+                    <button class="cat-btn" data-cat="open_capacity">Open Cap.</button>
+                    <button class="cat-btn" data-cat="backfill">Backfill</button>
+                </div>
+            </div>
             <span class="status-text" id="statusText"></span>
+            <span class="refresh-text" id="refreshText"></span>
         </div>
     </div>
 
-    <div class="main">
-        <div class="labels">
-            <div class="labels-header">Machine / GPU</div>
-            <div class="labels-scroll" id="labelsScroll"></div>
+    <div id="tab-heatmap" class="tab-content">
+        <div class="main">
+            <div class="labels">
+                <div class="labels-header">Machine / GPU</div>
+                <div class="labels-scroll" id="labelsScroll"></div>
+            </div>
+            <div class="canvas-wrapper">
+                <canvas id="timeHeader" class="time-header"></canvas>
+                <div class="canvas-scroll" id="canvasScroll">
+                    <canvas id="heatmap"></canvas>
+                </div>
+            </div>
         </div>
-        <div class="canvas-wrapper">
-            <canvas id="timeHeader" class="time-header"></canvas>
-            <div class="canvas-scroll" id="canvasScroll">
-                <canvas id="heatmap"></canvas>
+    </div>
+
+    <div id="tab-charts" class="tab-content hidden">
+        <div class="charts-container">
+            <div class="chart-panel">
+                <canvas id="chart-prioritized"></canvas>
+            </div>
+            <div class="chart-panel">
+                <canvas id="chart-open-capacity"></canvas>
+            </div>
+            <div class="chart-panel">
+                <canvas id="chart-backfill"></canvas>
             </div>
         </div>
     </div>
@@ -45,6 +74,7 @@
     <div class="tooltip" id="tooltip"></div>
     <div class="loading-overlay hidden" id="loading"><div class="spinner"></div></div>
 
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
     <script src="/static/app.js"></script>
 </body>
 </html>

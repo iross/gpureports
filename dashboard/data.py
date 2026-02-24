@@ -33,6 +33,13 @@ STATE_COLORS = {
     5: "#cccccc",
 }
 
+# State codes that count as "claimed" per category
+_CATEGORY_CODES: dict[str, dict[str, list[int]]] = {
+    "prioritized": {"all": [0, 2], "claimed": [2]},
+    "open_capacity": {"all": [1, 3], "claimed": [3]},
+    "backfill": {"all": [4], "claimed": [4]},
+}
+
 COLUMNS = [
     "Name",
     "AssignedGPUs",
@@ -143,6 +150,45 @@ def _dedup_and_bucket(df: pl.DataFrame, bucket_minutes: int) -> pl.DataFrame:
     return df
 
 
+def _prepare_bucketed(
+    start: datetime.datetime | None,
+    end: datetime.datetime | None,
+    bucket_minutes: int,
+    base_dir: str,
+) -> tuple[pl.DataFrame, list, list[str]] | None:
+    """Load, mask, dedup, bucket, and classify data.
+
+    Returns (df, all_buckets, bucket_strs) or None if no data is available.
+    """
+    if end is None:
+        end = get_latest_timestamp_from_most_recent_db(base_dir)
+        if end is None:
+            return None
+    if start is None:
+        start = end - datetime.timedelta(hours=24)
+
+    db_paths = get_required_databases(start, end, base_dir)
+    if not db_paths:
+        return None
+
+    df = _query_dbs(db_paths, start, end)
+    if df.height == 0:
+        return None
+
+    masked = _load_masked_hosts(base_dir)
+    if masked:
+        for host in masked:
+            df = df.filter(~pl.col("Machine").str.contains(host))
+
+    df = _dedup_and_bucket(df, bucket_minutes)
+    df = _classify_states(df)
+
+    all_buckets = sorted(df["time_bucket"].unique().to_list())
+    bucket_strs = [t.strftime("%Y-%m-%dT%H:%M") for t in all_buckets]
+
+    return df, all_buckets, bucket_strs
+
+
 def get_heatmap_data(
     start: datetime.datetime | None = None,
     end: datetime.datetime | None = None,
@@ -164,50 +210,21 @@ def get_heatmap_data(
     -------
     dict matching the API response shape.
     """
-    # Resolve defaults
-    if end is None:
-        end = get_latest_timestamp_from_most_recent_db(base_dir)
-        if end is None:
-            return _empty_response()
-    if start is None:
-        start = end - datetime.timedelta(hours=24)
+    prepared = _prepare_bucketed(start, end, bucket_minutes, base_dir)
+    if prepared is None:
+        return _empty_heatmap_response()
 
-    # Find DB files
-    db_paths = get_required_databases(start, end, base_dir)
-    if not db_paths:
-        return _empty_response()
-
-    # Query
-    df = _query_dbs(db_paths, start, end)
-    if df.height == 0:
-        return _empty_response()
-
-    # Filter masked hosts
-    masked = _load_masked_hosts(base_dir)
-    if masked:
-        for host in masked:
-            df = df.filter(~pl.col("Machine").str.contains(host))
-
-    # Dedup + bucket
-    df = _dedup_and_bucket(df, bucket_minutes)
-
-    # Classify
-    df = _classify_states(df)
-
-    # Build time bucket list
-    all_buckets = sorted(df["time_bucket"].unique().to_list())
-    bucket_strs = [t.strftime("%Y-%m-%dT%H:%M") for t in all_buckets]
+    df, all_buckets, bucket_strs = prepared
     bucket_index = {t: i for i, t in enumerate(all_buckets)}
 
     # Build machine-grouped structure
-    # Get unique machine+gpu combos with device name
     gpu_info = (
         df.select("Machine", "AssignedGPUs", "GPUs_DeviceName")
         .unique(subset=["Machine", "AssignedGPUs"])
         .sort(["Machine", "AssignedGPUs"])
     )
 
-    # Build lookup: (machine, gpu) -> [state_code, ...] for each bucket
+    # Build lookup: (machine, gpu) -> {bucket_index: state_code}
     pivot = {}
     for row in df.iter_rows(named=True):
         key = (row["Machine"], row["AssignedGPUs"])
@@ -248,10 +265,76 @@ def get_heatmap_data(
     }
 
 
-def _empty_response() -> dict:
+def get_counts_data(
+    start: datetime.datetime | None = None,
+    end: datetime.datetime | None = None,
+    bucket_minutes: int = 15,
+    base_dir: str = ".",
+) -> dict:
+    """Build time-series GPU counts per category for the Charts tab.
+
+    For each time bucket, returns total and claimed GPU counts for each
+    of the three categories: prioritized, open_capacity, backfill.
+
+    Parameters
+    ----------
+    start, end : datetime or None
+        Time range. Defaults to last 24h from most recent DB data.
+    bucket_minutes : int
+        Width of each time bucket in minutes.
+    base_dir : str
+        Directory containing gpu_state_*.db files.
+
+    Returns
+    -------
+    dict with 'buckets' list and 'series' dict per category.
+    """
+    prepared = _prepare_bucketed(start, end, bucket_minutes, base_dir)
+    if prepared is None:
+        return _empty_counts_response()
+
+    df, all_buckets, bucket_strs = prepared
+    buckets_df = pl.DataFrame({"time_bucket": all_buckets})
+
+    series: dict[str, dict[str, list]] = {}
+    for cat, codes in _CATEGORY_CODES.items():
+        total_df = (
+            df.filter(pl.col("state_code").is_in(codes["all"])).group_by("time_bucket").agg(pl.len().alias("total"))
+        )
+        claimed_df = (
+            df.filter(pl.col("state_code").is_in(codes["claimed"]))
+            .group_by("time_bucket")
+            .agg(pl.len().alias("claimed"))
+        )
+        merged = (
+            buckets_df.join(total_df, on="time_bucket", how="left")
+            .join(claimed_df, on="time_bucket", how="left")
+            .fill_null(0)
+            .sort("time_bucket")
+        )
+        series[cat] = {
+            "total": merged["total"].to_list(),
+            "claimed": merged["claimed"].to_list(),
+        }
+
+    return {"buckets": bucket_strs, "series": series}
+
+
+def _empty_heatmap_response() -> dict:
     return {
         "time_buckets": [],
         "machines": [],
         "state_map": STATE_MAP,
         "state_colors": STATE_COLORS,
+    }
+
+
+def _empty_counts_response() -> dict:
+    return {
+        "buckets": [],
+        "series": {
+            "prioritized": {"total": [], "claimed": []},
+            "open_capacity": {"total": [], "claimed": []},
+            "backfill": {"total": [], "claimed": []},
+        },
     }
