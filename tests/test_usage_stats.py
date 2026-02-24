@@ -19,14 +19,14 @@ import pytest
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from usage_stats import (
+from gpu_utils import filter_df
+from stats_calculations import (
     calculate_allocation_usage,
     calculate_allocation_usage_by_device,
     calculate_time_series_usage,
-    filter_df,
-    get_time_filtered_data,
-    run_analysis,
 )
+from stats_data import get_time_filtered_data
+from usage_stats import run_analysis
 
 
 @pytest.fixture

@@ -14,7 +14,7 @@ from collections import defaultdict
 import pandas as pd
 
 # Import the exact filter function and host exclusion logic from usage_stats.py
-from usage_stats import filter_df, load_host_exclusions
+from gpu_utils import filter_df, load_host_exclusions
 
 
 def should_include_device(device_name: str, include_all_devices: bool = False) -> bool:
@@ -32,10 +32,10 @@ def analyze_gpu_categories(db_path: str, include_all_devices: bool = False) -> d
     """Analyze GPU categories and return detailed breakdown."""
     # Set up host exclusions like usage_stats.py does
     global HOST_EXCLUSIONS, FILTERED_HOSTS_INFO
-    import usage_stats
+    import gpu_utils
 
-    usage_stats.HOST_EXCLUSIONS = load_host_exclusions(None, "masked_hosts.yaml")
-    usage_stats.FILTERED_HOSTS_INFO = []
+    gpu_utils.HOST_EXCLUSIONS = load_host_exclusions(None, "masked_hosts.yaml")
+    gpu_utils.FILTERED_HOSTS_INFO = []
 
     # Connect to database and load data
     conn = sqlite3.connect(db_path)

@@ -768,16 +768,16 @@ def main(
     import gpu_utils
 
     # Import pandas-based reporting functions
-    from usage_stats import (
+    from gpu_utils import load_host_exclusions
+    from stats_calculations import (
         calculate_allocation_usage_enhanced,
         calculate_backfill_usage_by_user,
         # NOTE: Using Polars versions defined above, not pandas versions:
         # calculate_allocation_usage_by_device_enhanced,
         # calculate_allocation_usage_by_memory,
         calculate_h200_user_breakdown,
-        load_host_exclusions,
-        print_analysis_results,
     )
+    from stats_reporting import print_analysis_results
 
     analysis_start_time = time.time()
     analysis_start_datetime = datetime.datetime.now()

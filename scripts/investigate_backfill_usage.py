@@ -19,7 +19,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 import gpu_utils
 from gpu_utils import analyze_backfill_utilization_by_day, load_host_exclusions
-from usage_stats import get_time_filtered_data
+from stats_data import get_time_filtered_data
 
 
 def get_latest_db_file():

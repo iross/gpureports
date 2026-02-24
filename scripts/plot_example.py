@@ -11,7 +11,9 @@ from pathlib import Path
 
 from plot_usage_stats import create_device_usage_heatmap, create_summary_dashboard, create_usage_timeline_plot
 
-from usage_stats import calculate_time_series_usage, get_time_filtered_data, run_analysis
+from stats_calculations import calculate_time_series_usage
+from stats_data import get_time_filtered_data
+from usage_stats import run_analysis
 
 
 def example_basic_plots():

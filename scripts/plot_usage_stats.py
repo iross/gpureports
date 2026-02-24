@@ -16,7 +16,8 @@ import pandas as pd
 import typer
 
 # Import functions from usage_stats
-from usage_stats import calculate_allocation_usage_by_device, calculate_time_series_usage, get_time_filtered_data
+from stats_calculations import calculate_allocation_usage_by_device, calculate_time_series_usage
+from stats_data import get_time_filtered_data
 
 
 def filter_by_gpu_model(df: pd.DataFrame, gpu_model: str) -> pd.DataFrame:
