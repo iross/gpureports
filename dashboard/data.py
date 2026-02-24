@@ -1,0 +1,257 @@
+"""Data layer for the GPU state dashboard.
+
+Queries SQLite DBs, deduplicates, classifies GPU states, and returns
+structured dicts matching the API response shape.
+"""
+
+import datetime
+from pathlib import Path
+
+import polars as pl
+import yaml
+
+from gpu_utils import get_latest_timestamp_from_most_recent_db, get_required_databases
+
+# State codes used in the API response (compact integer encoding)
+STATE_CODES = {
+    "idle_prioritized": 0,
+    "idle_shared": 1,
+    "busy_prioritized": 2,
+    "busy_shared": 3,
+    "busy_backfill": 4,
+    "na": 5,
+}
+
+STATE_MAP = {v: k for k, v in STATE_CODES.items()}
+
+STATE_COLORS = {
+    0: "#ff4444",
+    1: "#ff8800",
+    2: "#44ff44",
+    3: "#00cc99",
+    4: "#4488ff",
+    5: "#cccccc",
+}
+
+COLUMNS = [
+    "Name",
+    "AssignedGPUs",
+    "State",
+    "PrioritizedProjects",
+    "Machine",
+    "GPUs_DeviceName",
+    "timestamp",
+]
+
+
+def _load_masked_hosts(base_dir: str = ".") -> set[str]:
+    """Load excluded hosts from masked_hosts.yaml."""
+    path = Path(base_dir) / "masked_hosts.yaml"
+    if not path.exists():
+        return set()
+    with open(path) as f:
+        data = yaml.safe_load(f)
+    if data and "excluded_hosts" in data:
+        return set(data["excluded_hosts"].keys())
+    return set()
+
+
+def _query_dbs(db_paths: list[str], start: datetime.datetime, end: datetime.datetime) -> pl.DataFrame:
+    """Load data from multiple SQLite DBs and combine into one Polars DataFrame."""
+    frames = []
+    buffered_start = start - datetime.timedelta(seconds=1)
+    col_select = ", ".join(f'"{c}"' for c in COLUMNS)
+
+    for db_path in db_paths:
+        try:
+            abs_path = str(Path(db_path).resolve())
+            query = f"""
+                SELECT {col_select}
+                FROM gpu_state
+                WHERE timestamp BETWEEN '{buffered_start.strftime("%Y-%m-%d %H:%M:%S.%f")}'
+                  AND '{end.strftime("%Y-%m-%d %H:%M:%S.%f")}'
+            """
+            df = pl.read_database_uri(query, f"sqlite:///{abs_path}")
+            if df.height > 0:
+                frames.append(df)
+        except Exception as e:
+            print(f"Warning: Could not load {db_path}: {e}")
+
+    if not frames:
+        return pl.DataFrame()
+
+    combined = pl.concat(frames)
+
+    # Parse timestamps and apply precise time filter
+    combined = combined.with_columns(pl.col("timestamp").cast(pl.Datetime("us")))
+    combined = combined.filter((pl.col("timestamp") >= start) & (pl.col("timestamp") <= end))
+    return combined
+
+
+def _classify_states(df: pl.DataFrame) -> pl.DataFrame:
+    """Classify each row into one of 6 GPU state codes."""
+    return df.with_columns(
+        pl.when(
+            (pl.col("State").str.to_lowercase() == "claimed")
+            & (pl.col("PrioritizedProjects") != "")
+            & (~pl.col("Name").str.to_lowercase().str.contains("backfill"))
+        )
+        .then(pl.lit(STATE_CODES["busy_prioritized"]))
+        .when(
+            (pl.col("State").str.to_lowercase() == "claimed")
+            & (~pl.col("Name").str.to_lowercase().str.contains("backfill"))
+        )
+        .then(pl.lit(STATE_CODES["busy_shared"]))
+        .when(
+            (pl.col("State").str.to_lowercase() == "claimed")
+            & (pl.col("Name").str.to_lowercase().str.contains("backfill"))
+        )
+        .then(pl.lit(STATE_CODES["busy_backfill"]))
+        .when((pl.col("State").str.to_lowercase() == "unclaimed") & (pl.col("PrioritizedProjects") != ""))
+        .then(pl.lit(STATE_CODES["idle_prioritized"]))
+        .when(pl.col("State").str.to_lowercase() == "unclaimed")
+        .then(pl.lit(STATE_CODES["idle_shared"]))
+        .otherwise(pl.lit(STATE_CODES["na"]))
+        .alias("state_code")
+    )
+
+
+def _dedup_and_bucket(df: pl.DataFrame, bucket_minutes: int) -> pl.DataFrame:
+    """Floor timestamps to buckets, rank duplicates, keep highest-priority entry."""
+    df = df.with_columns(pl.col("timestamp").dt.truncate(f"{bucket_minutes}m").alias("time_bucket"))
+
+    # Rank: claimed+primary(3) > claimed+backfill(2) > unclaimed+primary(1) > unclaimed+backfill(0)
+    is_claimed = pl.col("State").str.to_lowercase() == "claimed"
+    is_backfill = pl.col("Name").str.to_lowercase().str.contains("backfill")
+
+    df = df.with_columns(
+        pl.when(is_claimed & ~is_backfill)
+        .then(pl.lit(3))
+        .when(is_claimed & is_backfill)
+        .then(pl.lit(2))
+        .when(~is_claimed & ~is_backfill)
+        .then(pl.lit(1))
+        .otherwise(pl.lit(0))
+        .alias("_rank")
+    )
+
+    # Sort by rank descending so first row per group wins
+    df = df.sort(["time_bucket", "AssignedGPUs", "_rank"], descending=[False, False, True])
+    df = df.unique(subset=["time_bucket", "AssignedGPUs"], keep="first")
+    df = df.drop("_rank")
+
+    return df
+
+
+def get_heatmap_data(
+    start: datetime.datetime | None = None,
+    end: datetime.datetime | None = None,
+    bucket_minutes: int = 15,
+    base_dir: str = ".",
+) -> dict:
+    """Build the heatmap data structure for the API response.
+
+    Parameters
+    ----------
+    start, end : datetime or None
+        Time range. Defaults to last 24h from most recent DB data.
+    bucket_minutes : int
+        Width of each time bucket in minutes.
+    base_dir : str
+        Directory containing gpu_state_*.db files.
+
+    Returns
+    -------
+    dict matching the API response shape.
+    """
+    # Resolve defaults
+    if end is None:
+        end = get_latest_timestamp_from_most_recent_db(base_dir)
+        if end is None:
+            return _empty_response()
+    if start is None:
+        start = end - datetime.timedelta(hours=24)
+
+    # Find DB files
+    db_paths = get_required_databases(start, end, base_dir)
+    if not db_paths:
+        return _empty_response()
+
+    # Query
+    df = _query_dbs(db_paths, start, end)
+    if df.height == 0:
+        return _empty_response()
+
+    # Filter masked hosts
+    masked = _load_masked_hosts(base_dir)
+    if masked:
+        for host in masked:
+            df = df.filter(~pl.col("Machine").str.contains(host))
+
+    # Dedup + bucket
+    df = _dedup_and_bucket(df, bucket_minutes)
+
+    # Classify
+    df = _classify_states(df)
+
+    # Build time bucket list
+    all_buckets = sorted(df["time_bucket"].unique().to_list())
+    bucket_strs = [t.strftime("%Y-%m-%dT%H:%M") for t in all_buckets]
+    bucket_index = {t: i for i, t in enumerate(all_buckets)}
+
+    # Build machine-grouped structure
+    # Get unique machine+gpu combos with device name
+    gpu_info = (
+        df.select("Machine", "AssignedGPUs", "GPUs_DeviceName")
+        .unique(subset=["Machine", "AssignedGPUs"])
+        .sort(["Machine", "AssignedGPUs"])
+    )
+
+    # Build lookup: (machine, gpu) -> [state_code, ...] for each bucket
+    pivot = {}
+    for row in df.iter_rows(named=True):
+        key = (row["Machine"], row["AssignedGPUs"])
+        if key not in pivot:
+            pivot[key] = {}
+        bi = bucket_index.get(row["time_bucket"])
+        if bi is not None:
+            pivot[key][bi] = row["state_code"]
+
+    n_buckets = len(all_buckets)
+    machines_dict: dict[str, list] = {}
+
+    for row in gpu_info.iter_rows(named=True):
+        machine = row["Machine"]
+        gpu_id = row["AssignedGPUs"]
+        device = row["GPUs_DeviceName"] or "Unknown"
+
+        state_map = pivot.get((machine, gpu_id), {})
+        states = [state_map.get(i, STATE_CODES["na"]) for i in range(n_buckets)]
+
+        if machine not in machines_dict:
+            machines_dict[machine] = []
+        machines_dict[machine].append(
+            {
+                "gpu_id": gpu_id,
+                "device_name": device,
+                "states": states,
+            }
+        )
+
+    machines_list = [{"name": name, "gpus": gpus} for name, gpus in sorted(machines_dict.items())]
+
+    return {
+        "time_buckets": bucket_strs,
+        "machines": machines_list,
+        "state_map": STATE_MAP,
+        "state_colors": STATE_COLORS,
+    }
+
+
+def _empty_response() -> dict:
+    return {
+        "time_buckets": [],
+        "machines": [],
+        "state_map": STATE_MAP,
+        "state_colors": STATE_COLORS,
+    }

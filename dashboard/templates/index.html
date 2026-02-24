@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GPU State Dashboard</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="topbar">
+        <h1>GPU State Dashboard</h1>
+        <div class="legend">
+            <div class="legend-item"><div class="legend-swatch" style="background:#ff4444"></div>Idle, prioritized</div>
+            <div class="legend-item"><div class="legend-swatch" style="background:#ff8800"></div>Idle, open capacity</div>
+            <div class="legend-item"><div class="legend-swatch" style="background:#44ff44"></div>Busy, prioritized</div>
+            <div class="legend-item"><div class="legend-swatch" style="background:#00cc99"></div>Busy, open capacity</div>
+            <div class="legend-item"><div class="legend-swatch" style="background:#4488ff"></div>Busy, backfill</div>
+            <div class="legend-item"><div class="legend-swatch" style="background:#cccccc"></div>N/A</div>
+        </div>
+        <div class="controls">
+            <button data-range="6" id="btn6h">Last 6h</button>
+            <button data-range="24" id="btn24h" class="active">Last 24h</button>
+            <button data-range="168" id="btn7d">Last 7d</button>
+            <input class="datetime-input" type="datetime-local" id="customStart" title="Custom start">
+            <input class="datetime-input" type="datetime-local" id="customEnd" title="Custom end">
+            <button id="btnCustom">Go</button>
+            <input class="filter-input" type="text" placeholder="Filter machines..." id="machineFilter">
+            <span class="status-text" id="statusText"></span>
+        </div>
+    </div>
+
+    <div class="main">
+        <div class="labels">
+            <div class="labels-header">Machine / GPU</div>
+            <div class="labels-scroll" id="labelsScroll"></div>
+        </div>
+        <div class="canvas-wrapper">
+            <canvas id="timeHeader" class="time-header"></canvas>
+            <div class="canvas-scroll" id="canvasScroll">
+                <canvas id="heatmap"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <div class="tooltip" id="tooltip"></div>
+    <div class="loading-overlay hidden" id="loading"><div class="spinner"></div></div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

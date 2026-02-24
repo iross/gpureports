@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-GPU Daily Hours Analysis Script
+GPU Weekly Hours Analysis Script
 
-Analyzes total GPU hours used per day across multiple database files.
+Analyzes total GPU hours used per week across multiple database files.
 Calculates usage based on the 'Claimed' state of GPUs over time, separated by slot type.
 """
 
@@ -19,7 +19,6 @@ try:
 
     import matplotlib.dates as mdates
     import matplotlib.pyplot as plt
-    import numpy as np
     from scipy import stats
 
     MATPLOTLIB_AVAILABLE = True
@@ -30,7 +29,6 @@ except ImportError:
 
         import matplotlib.dates as mdates
         import matplotlib.pyplot as plt
-        import numpy as np
 
         MATPLOTLIB_AVAILABLE = True
         SCIPY_AVAILABLE = False
@@ -248,7 +246,6 @@ def calculate_monthly_stats(daily_data):
 
     # Calculate averages
     for month in monthly:
-        hours_list = monthly[month]["hours_list"]
         monthly[month]["avg_hours"] = monthly[month]["total_hours"] / monthly[month]["days"]
 
     return dict(monthly)
@@ -375,6 +372,10 @@ def aggregate_to_weekly(daily_data):
     for week_start in sorted(weekly_data.keys()):
         week_info = weekly_data[week_start]
 
+        # Skip partial weeks (must have all 7 days)
+        if len(week_info["dates"]) < 7:
+            continue
+
         # Calculate totals and averages
         total_gpu_hours = sum(week_info["gpu_hours"])
         avg_claimed_gpus = sum(week_info["claimed_gpus"]) / len(week_info["claimed_gpus"])
@@ -465,7 +466,7 @@ def print_summary_stats(daily_data):
             )
 
 
-def create_plots(daily_data, output_dir=None, show_linear_trend=False, transition_date=None):
+def create_plots(daily_data, output_dir=None, show_linear_trend=False, transition_date=None, grid_view=False):
     """Create various plots to visualize GPU usage data, separated by slot type.
 
     Args:
@@ -473,6 +474,7 @@ def create_plots(daily_data, output_dir=None, show_linear_trend=False, transitio
         output_dir: Directory to save plots
         show_linear_trend: Whether to show linear trend lines
         transition_date: Date string (YYYY-MM-DD) to split backfill slots into before/after periods
+        grid_view: If True, show full 2x2 grid of plots; if False, show only GPU hours over time
     """
     if not MATPLOTLIB_AVAILABLE:
         print("Error: matplotlib is required for plotting. Install it with: pip install matplotlib")
@@ -481,6 +483,9 @@ def create_plots(daily_data, output_dir=None, show_linear_trend=False, transitio
     if not daily_data:
         print("No data available for plotting")
         return
+
+    # Aggregate to weekly data for clearer visualization
+    daily_data = aggregate_to_weekly(daily_data)
 
     # Convert data for plotting
 
@@ -507,11 +512,14 @@ def create_plots(daily_data, output_dir=None, show_linear_trend=False, transitio
             backfill_before = None
             backfill_after = None
 
-    # Create figure with subplots
-    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
-    fig.suptitle("GPU Usage Analysis - Primary vs Backfill Slots", fontsize=16, fontweight="bold")
+    # Create figure - either single plot or 2x2 grid
+    if grid_view:
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
+        fig.suptitle("Weekly GPU Usage Analysis - Primary vs Backfill Slots", fontsize=16, fontweight="bold")
+    else:
+        fig, ax1 = plt.subplots(1, 1, figsize=(12, 6))
 
-    # Plot 1: Daily GPU Hours over time by slot type
+    # Plot 1: Weekly GPU Hours over time by slot type
     if has_slot_breakdown:
         ax1.plot(dates, primary_hours, color="#2E86AB", linewidth=2, marker="o", markersize=3, label="Primary Slots")
         ax1.plot(dates, backfill_hours, color="#A23B72", linewidth=2, marker="s", markersize=3, label="Backfill Slots")
@@ -581,113 +589,119 @@ def create_plots(daily_data, output_dir=None, show_linear_trend=False, transitio
                 )
                 ax1.legend()
 
-    ax1.set_title("Daily GPU Hours Over Time")
-    ax1.set_xlabel("Date")
+    ax1.set_title("Weekly GPU Hours Over Time")
+    ax1.set_xlabel("Week Starting")
     ax1.set_ylabel("GPU Hours")
     ax1.grid(True, alpha=0.3)
     ax1.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
     ax1.xaxis.set_major_locator(mdates.WeekdayLocator(interval=2))
     plt.setp(ax1.xaxis.get_majorticklabels(), rotation=45)
 
-    # Plot 2: Stacked area chart showing slot type breakdown
-    if has_slot_breakdown:
-        ax2.fill_between(dates, 0, primary_hours, alpha=0.8, color="#2E86AB", label="Primary Slots")
-        ax2.fill_between(
-            dates,
-            primary_hours,
-            [p + b for p, b in zip(primary_hours, backfill_hours, strict=False)],
-            alpha=0.8,
-            color="#A23B72",
-            label="Backfill Slots",
-        )
-        ax2.legend()
-        ax2.set_title("GPU Hours by Slot Type (Stacked)")
-    else:
-        ax2.plot(dates, claimed_gpus, color="#F18F01", linewidth=2, marker="s", markersize=4)
-        ax2.set_title("Average Claimed GPUs Over Time")
-
-    ax2.set_xlabel("Date")
-    ax2.set_ylabel("GPU Hours" if has_slot_breakdown else "Number of GPUs")
-    ax2.grid(True, alpha=0.3)
-    ax2.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
-    ax2.xaxis.set_major_locator(mdates.WeekdayLocator(interval=2))
-    plt.setp(ax2.xaxis.get_majorticklabels(), rotation=45)
-
-    # Plot 3: Distribution histograms
-    if has_slot_breakdown:
-        if transition_date and backfill_before and backfill_after:
-            # Show split backfill slots
-            ax3.hist(
-                [primary_hours, backfill_before, backfill_after],
-                bins=20,
-                alpha=0.7,
-                label=["Primary Slots", f"Backfill (Before {transition_date})", f"Backfill (After {transition_date})"],
-                color=["#2E86AB", "#A23B72", "#F18F01"],
-                edgecolor="#404040",
-            )
-            ax3.legend(fontsize=9)
-            ax3.set_title(f"Distribution of Daily GPU Hours by Slot Type\n(Backfill split at {transition_date})")
-        else:
-            # Show original combined backfill
-            ax3.hist(
-                [primary_hours, backfill_hours],
-                bins=20,
+    # Additional plots only in grid view
+    if grid_view:
+        # Plot 2: Stacked area chart showing slot type breakdown
+        if has_slot_breakdown:
+            ax2.fill_between(dates, 0, primary_hours, alpha=0.8, color="#2E86AB", label="Primary Slots")
+            ax2.fill_between(
+                dates,
+                primary_hours,
+                [p + b for p, b in zip(primary_hours, backfill_hours, strict=False)],
                 alpha=0.8,
-                label=["Primary Slots", "Backfill Slots"],
-                color=["#2E86AB", "#A23B72"],
+                color="#A23B72",
+                label="Backfill Slots",
+            )
+            ax2.legend()
+            ax2.set_title("Weekly GPU Hours by Slot Type (Stacked)")
+        else:
+            ax2.plot(dates, claimed_gpus, color="#F18F01", linewidth=2, marker="s", markersize=4)
+            ax2.set_title("Average Claimed GPUs Over Time (Weekly)")
+
+        ax2.set_xlabel("Week Starting")
+        ax2.set_ylabel("GPU Hours" if has_slot_breakdown else "Number of GPUs")
+        ax2.grid(True, alpha=0.3)
+        ax2.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+        ax2.xaxis.set_major_locator(mdates.WeekdayLocator(interval=2))
+        plt.setp(ax2.xaxis.get_majorticklabels(), rotation=45)
+
+        # Plot 3: Distribution histograms
+        if has_slot_breakdown:
+            if transition_date and backfill_before and backfill_after:
+                # Show split backfill slots
+                ax3.hist(
+                    [primary_hours, backfill_before, backfill_after],
+                    bins=20,
+                    alpha=0.7,
+                    label=[
+                        "Primary Slots",
+                        f"Backfill (Before {transition_date})",
+                        f"Backfill (After {transition_date})",
+                    ],
+                    color=["#2E86AB", "#A23B72", "#F18F01"],
+                    edgecolor="#404040",
+                )
+                ax3.legend(fontsize=9)
+                ax3.set_title(f"Distribution of Weekly GPU Hours by Slot Type\n(Backfill split at {transition_date})")
+            else:
+                # Show original combined backfill
+                ax3.hist(
+                    [primary_hours, backfill_hours],
+                    bins=20,
+                    alpha=0.8,
+                    label=["Primary Slots", "Backfill Slots"],
+                    color=["#2E86AB", "#A23B72"],
+                    edgecolor="#404040",
+                )
+                ax3.legend()
+                ax3.set_title("Distribution of Weekly GPU Hours by Slot Type")
+        else:
+            ax3.hist(gpu_hours, bins=20, color="#5DADE2", alpha=0.8, edgecolor="#404040")
+            ax3.set_title("Distribution of Weekly GPU Hours")
+
+        ax3.set_xlabel("GPU Hours")
+        ax3.set_ylabel("Frequency")
+        ax3.grid(True, alpha=0.3)
+
+        # Plot 4: Monthly totals by slot type
+        monthly_stats = calculate_monthly_stats(daily_data)
+        months = sorted(monthly_stats.keys())
+
+        if has_slot_breakdown:
+            primary_monthly = [monthly_stats[month]["primary_hours"] for month in months]
+            backfill_monthly = [monthly_stats[month]["backfill_hours"] for month in months]
+
+            width = 0.35
+            x = range(len(months))
+            ax4.bar(
+                [i - width / 2 for i in x],
+                primary_monthly,
+                width,
+                label="Primary Slots",
+                color="#2E86AB",
+                alpha=0.8,
                 edgecolor="#404040",
             )
-            ax3.legend()
-            ax3.set_title("Distribution of Daily GPU Hours by Slot Type")
-    else:
-        ax3.hist(gpu_hours, bins=20, color="#5DADE2", alpha=0.8, edgecolor="#404040")
-        ax3.set_title("Distribution of Daily GPU Hours")
+            ax4.bar(
+                [i + width / 2 for i in x],
+                backfill_monthly,
+                width,
+                label="Backfill Slots",
+                color="#A23B72",
+                alpha=0.8,
+                edgecolor="#404040",
+            )
+            ax4.set_xticks(x)
+            ax4.set_xticklabels(months)
+            ax4.legend()
+            ax4.set_title("Monthly GPU Hours by Slot Type")
+        else:
+            monthly_totals = [monthly_stats[month]["total_hours"] for month in months]
+            ax4.bar(months, monthly_totals, color="#F18F01", alpha=0.8, edgecolor="#404040")
+            ax4.set_title("Monthly GPU Hours Totals")
 
-    ax3.set_xlabel("GPU Hours")
-    ax3.set_ylabel("Frequency")
-    ax3.grid(True, alpha=0.3)
-
-    # Plot 4: Monthly totals by slot type
-    monthly_stats = calculate_monthly_stats(daily_data)
-    months = sorted(monthly_stats.keys())
-
-    if has_slot_breakdown:
-        primary_monthly = [monthly_stats[month]["primary_hours"] for month in months]
-        backfill_monthly = [monthly_stats[month]["backfill_hours"] for month in months]
-
-        width = 0.35
-        x = range(len(months))
-        ax4.bar(
-            [i - width / 2 for i in x],
-            primary_monthly,
-            width,
-            label="Primary Slots",
-            color="#2E86AB",
-            alpha=0.8,
-            edgecolor="#404040",
-        )
-        ax4.bar(
-            [i + width / 2 for i in x],
-            backfill_monthly,
-            width,
-            label="Backfill Slots",
-            color="#A23B72",
-            alpha=0.8,
-            edgecolor="#404040",
-        )
-        ax4.set_xticks(x)
-        ax4.set_xticklabels(months)
-        ax4.legend()
-        ax4.set_title("Monthly GPU Hours by Slot Type")
-    else:
-        monthly_totals = [monthly_stats[month]["total_hours"] for month in months]
-        ax4.bar(months, monthly_totals, color="#F18F01", alpha=0.8, edgecolor="#404040")
-        ax4.set_title("Monthly GPU Hours Totals")
-
-    ax4.set_xlabel("Month")
-    ax4.set_ylabel("Total GPU Hours")
-    ax4.grid(True, alpha=0.3)
-    plt.setp(ax4.xaxis.get_majorticklabels(), rotation=45)
+        ax4.set_xlabel("Month")
+        ax4.set_ylabel("Total GPU Hours")
+        ax4.grid(True, alpha=0.3)
+        plt.setp(ax4.xaxis.get_majorticklabels(), rotation=45)
 
     plt.tight_layout()
 
@@ -705,7 +719,7 @@ def create_plots(daily_data, output_dir=None, show_linear_trend=False, transitio
     # Show plot only if display is available (optional)
     try:
         plt.show()
-    except:
+    except Exception:
         print("Display not available - plot saved to file only")
 
 
@@ -863,12 +877,12 @@ def create_trend_plot(daily_data, output_dir=None, show_linear_trend=False):
     # Show plot only if display is available (optional)
     try:
         plt.show()
-    except:
+    except Exception:
         print("Display not available - plot saved to file only")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Analyze daily GPU hours from multiple database files")
+    parser = argparse.ArgumentParser(description="Analyze weekly GPU hours from multiple database files")
     parser.add_argument(
         "--databases",
         "-d",
@@ -886,7 +900,10 @@ def main():
     )
     parser.add_argument("--output", "-o", help="Output CSV file path")
     parser.add_argument("--detailed", action="store_true", help="Show detailed daily breakdown")
-    parser.add_argument("--plot", action="store_true", help="Generate and save visualization plots as PNG")
+    parser.add_argument("--plot", action="store_true", help="Generate and save GPU hours over time plot as PNG")
+    parser.add_argument(
+        "--grid", action="store_true", help="Show full 2x2 grid of plots (stacked area, histogram, monthly bars)"
+    )
     parser.add_argument(
         "--trend", action="store_true", help="Generate and save trend analysis plot with moving average as PNG"
     )
@@ -904,8 +921,8 @@ def main():
 
     args = parser.parse_args()
 
-    print("GPU Daily Hours Analysis - Primary vs Backfill Slots")
-    print("=" * 55)
+    print("GPU Weekly Hours Analysis - Primary vs Backfill Slots")
+    print("=" * 56)
     print(f"Analyzing databases: {', '.join(args.databases)}")
 
     # Analyze the data
@@ -960,7 +977,7 @@ def main():
     # Generate plots if requested
     if args.plot:
         try:
-            create_plots(daily_summary, args.plot_output, args.linear_trend, args.transition_date)
+            create_plots(daily_summary, args.plot_output, args.linear_trend, args.transition_date, args.grid)
         except ImportError:
             print("Error: matplotlib is required for plotting. Install it with: pip install matplotlib")
         except Exception as e:

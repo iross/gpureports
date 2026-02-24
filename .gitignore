@@ -9,6 +9,8 @@ logs/
 
 # Test outputs and temporary files
 *.html
+!templates/**/*.html
+!dashboard/templates/*.html
 test_*/
 *_output/
 full_test_website/

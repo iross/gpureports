@@ -4,8 +4,8 @@ from elasticsearch import Elasticsearch
 from elasticsearch.helpers import scan
 
 INDEX = "chtc-schedd-*"
-FROM = datetime(2024, 10, 20)
-TO = datetime(2024, 10, 27)
+FROM = datetime(2025, 10, 1)
+TO = datetime(2025, 12, 31)
 FIELDS = [
     "RecordTime",
     "QDate",
@@ -28,6 +28,7 @@ def get_query():
             "_source": FIELDS,
             "query": {
                 "bool": {
+                    "must": [{"range": {"RequestGpus": {"gt": 0}}}],
                     "filter": [
                         {
                             "range": {
@@ -57,7 +58,7 @@ def main():
     docs = []
     for doc in scan(client=client, query=query.pop("body"), **query):
         docs.append(doc["_source"])
-    print_csv(docs)
+        print_csv(docs)
 
 
 if __name__ == "__main__":
