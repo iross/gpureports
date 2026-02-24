@@ -135,11 +135,12 @@ body {
 
 /* Left label column */
 .labels {
-    width: 220px;
-    min-width: 220px;
-    overflow-y: hidden;
+    width: 160px;
+    min-width: 160px;
     background: #16213e;
     border-right: 1px solid #333;
+    display: flex;
+    flex-direction: column;
 }
 .labels-header {
     height: 30px;
@@ -150,22 +151,37 @@ body {
     color: #888;
     border-bottom: 1px solid #333;
     background: #16213e;
+    flex-shrink: 0;
 }
+/* Scroll via JS (scrollTop); hide the scrollbar visually */
 .labels-scroll {
-    overflow-y: hidden;
+    overflow-y: scroll;
+    scrollbar-width: none;       /* Firefox */
+    -ms-overflow-style: none;    /* IE / Edge */
+    flex: 1;
 }
-.label-row {
-    font-size: 10px;
+.labels-scroll::-webkit-scrollbar { display: none; }
+
+/* One group per machine; its height matches the GPU rows on the canvas */
+.machine-group {
+    border-top: 1px solid #3a3a5a;
+    position: relative;
+}
+/* Sticky hostname — stays at the top of the labels viewport while within its group */
+.machine-name {
+    position: sticky;
+    top: 0;
+    background: #16213e;
     padding: 0 8px;
+    font-size: 10px;
+    font-weight: 600;
+    color: #aaa;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    border-bottom: 1px solid transparent;
-}
-.label-row.machine-start {
-    border-top: 1px solid #444;
-    font-weight: 600;
-    color: #aaa;
+    line-height: 14px;
+    height: 14px;
+    z-index: 1;
 }
 
 /* Canvas area */

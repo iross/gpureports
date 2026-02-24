@@ -20,6 +20,7 @@ STATE_CODES = {
     "busy_shared": 3,
     "busy_backfill": 4,
     "na": 5,
+    "idle_backfill": 6,
 }
 
 STATE_MAP = {v: k for k, v in STATE_CODES.items()}
@@ -31,13 +32,14 @@ STATE_COLORS = {
     3: "#00cc99",
     4: "#4488ff",
     5: "#cccccc",
+    6: "#334499",
 }
 
 # State codes that count as "claimed" per category
 _CATEGORY_CODES: dict[str, dict[str, list[int]]] = {
     "prioritized": {"all": [0, 2], "claimed": [2]},
     "open_capacity": {"all": [1, 3], "claimed": [3]},
-    "backfill": {"all": [4], "claimed": [4]},
+    "backfill": {"all": [4, 6], "claimed": [4]},
 }
 
 COLUMNS = [
@@ -114,6 +116,11 @@ def _classify_states(df: pl.DataFrame) -> pl.DataFrame:
             & (pl.col("Name").str.to_lowercase().str.contains("backfill"))
         )
         .then(pl.lit(STATE_CODES["busy_backfill"]))
+        .when(
+            (pl.col("State").str.to_lowercase() == "unclaimed")
+            & (pl.col("Name").str.to_lowercase().str.contains("backfill"))
+        )
+        .then(pl.lit(STATE_CODES["idle_backfill"]))
         .when((pl.col("State").str.to_lowercase() == "unclaimed") & (pl.col("PrioritizedProjects") != ""))
         .then(pl.lit(STATE_CODES["idle_prioritized"]))
         .when(pl.col("State").str.to_lowercase() == "unclaimed")

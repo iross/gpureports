@@ -2,9 +2,9 @@
 
 const STATE_LABELS = {
     0: 'Idle, prioritized', 1: 'Idle, open capacity', 2: 'Busy, prioritized',
-    3: 'Busy, open capacity', 4: 'Busy, backfill', 5: 'N/A'
+    3: 'Busy, open capacity', 4: 'Busy, backfill', 5: 'N/A', 6: 'Idle, backfill'
 };
-const STATE_COLORS = ['#ff4444', '#ff8800', '#44ff44', '#00cc99', '#4488ff', '#cccccc'];
+const STATE_COLORS = ['#ff4444', '#ff8800', '#44ff44', '#00cc99', '#4488ff', '#cccccc', '#334499'];
 
 // State codes belonging to each category (for the heatmap category filter)
 const CATEGORY_CODES = {
@@ -141,13 +141,17 @@ function getGpuRows(machines) {
 function renderLabels() {
     const container = document.getElementById('labelsScroll');
     container.innerHTML = '';
-    currentRows.forEach(row => {
-        const div = document.createElement('div');
-        div.className = 'label-row' + (row.isFirst ? ' machine-start' : '');
-        div.style.height = ROW_HEIGHT + 'px';
-        div.style.lineHeight = ROW_HEIGHT + 'px';
-        div.textContent = row.isFirst ? row.machine.split('.')[0] : row.gpu_id.slice(0, 12);
-        container.appendChild(div);
+    filteredMachines.forEach(machine => {
+        const groupHeight = machine.gpus.length * ROW_HEIGHT;
+        const group = document.createElement('div');
+        group.className = 'machine-group';
+        group.style.height = groupHeight + 'px';
+
+        const label = document.createElement('div');
+        label.className = 'machine-name';
+        label.textContent = machine.name.split('.')[0];
+        group.appendChild(label);
+        container.appendChild(group);
     });
 }
 
