@@ -4,7 +4,7 @@ const STATE_LABELS = {
     0: 'Idle, prioritized', 1: 'Idle, open capacity', 2: 'Busy, prioritized',
     3: 'Busy, open capacity', 4: 'Busy, backfill', 5: 'N/A', 6: 'Idle, backfill'
 };
-const STATE_COLORS = ['#ff4444', '#ff8800', '#44ff44', '#00cc99', '#4488ff', '#cccccc', '#334499'];
+const STATE_COLORS = ['#ff4444', '#ff8800', '#44ff44', '#00cc99', '#4488ff', '#cccccc', '#ff8800'];
 
 // State codes belonging to each category (for the heatmap category filter)
 const CATEGORY_CODES = {
