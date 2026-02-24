@@ -318,53 +318,32 @@ def get_counts_data(
         for host in masked:
             df_raw = df_raw.filter(~pl.col("Machine").str.contains(host))
 
-    # Deduped + classified DataFrame for primary category counts.
-    # Dedup is required there to avoid double-counting a GPU that appears in
-    # both a priority slot and a shared slot at the same timestamp.
-    df_classified = _classify_states(_dedup_and_bucket(df_raw, bucket_minutes))
-    all_buckets = sorted(df_classified["time_bucket"].unique().to_list())
+    # Count all categories directly from raw (pre-dedup) slot rows.
+    #
+    # A GPU can appear in BOTH a primary slot and a backfill slot simultaneously.
+    # Dedup merges these, causing GPUs to disappear from primary totals when
+    # their backfill slot wins the rank competition (e.g. backfill-claimed > primary-idle).
+    # Counting each slot type independently avoids this entirely.
+    df_raw_bucketed = df_raw.with_columns(pl.col("timestamp").dt.truncate(f"{bucket_minutes}m").alias("time_bucket"))
+
+    is_backfill = pl.col("Name").str.to_lowercase().str.contains("backfill")
+    is_claimed = pl.col("State").str.to_lowercase() == "claimed"
+    has_gpu = pl.col("AssignedGPUs").is_not_null()
+    has_priority = pl.col("PrioritizedProjects").is_not_null() & (pl.col("PrioritizedProjects") != "")
+
+    primary_df = df_raw_bucketed.filter(~is_backfill & has_gpu)
+    backfill_df = df_raw_bucketed.filter(is_backfill & has_gpu)
+
+    all_buckets = sorted(df_raw_bucketed.filter(has_gpu)["time_bucket"].unique().to_list())
     bucket_strs = [t.strftime("%Y-%m-%dT%H:%M") for t in all_buckets]
     buckets_df = pl.DataFrame({"time_bucket": all_buckets})
 
-    # Raw bucketed DataFrame for backfill counts.
-    # Backfill unclaimed slots are always overridden by the primary slot for
-    # the same GPU during dedup (rank 0 loses to rank 1+), so counting from
-    # the deduped data would produce zero unclaimed backfill.  Instead, count
-    # directly from the backfill-slot rows in the raw data.
-    df_raw_bucketed = df_raw.with_columns(pl.col("timestamp").dt.truncate(f"{bucket_minutes}m").alias("time_bucket"))
-    is_backfill = pl.col("Name").str.to_lowercase().str.contains("backfill")
-    is_claimed = pl.col("State").str.to_lowercase() == "claimed"
-    backfill_df = df_raw_bucketed.filter(is_backfill & pl.col("AssignedGPUs").is_not_null())
-    backfill_total = backfill_df.group_by("time_bucket").agg(pl.col("AssignedGPUs").n_unique().alias("total"))
-    backfill_claimed = (
-        backfill_df.filter(is_claimed).group_by("time_bucket").agg(pl.col("AssignedGPUs").n_unique().alias("claimed"))
-    )
-    backfill_merged = (
-        buckets_df.join(backfill_total, on="time_bucket", how="left")
-        .join(backfill_claimed, on="time_bucket", how="left")
-        .fill_null(0)
-        .sort("time_bucket")
-    )
-
-    series: dict[str, dict[str, list]] = {
-        "backfill": {
-            "total": backfill_merged["total"].to_list(),
-            "claimed": backfill_merged["claimed"].to_list(),
-        }
-    }
-
-    for cat, codes in _CATEGORY_CODES.items():
-        if cat == "backfill":
-            continue
-        total_df = (
-            df_classified.filter(pl.col("state_code").is_in(codes["all"]))
-            .group_by("time_bucket")
-            .agg(pl.len().alias("total"))
-        )
+    def _count_series(df: pl.DataFrame, total_mask: pl.Expr, claimed_mask: pl.Expr) -> dict[str, list]:
+        total_df = df.filter(total_mask).group_by("time_bucket").agg(pl.col("AssignedGPUs").n_unique().alias("total"))
         claimed_df = (
-            df_classified.filter(pl.col("state_code").is_in(codes["claimed"]))
+            df.filter(total_mask & claimed_mask)
             .group_by("time_bucket")
-            .agg(pl.len().alias("claimed"))
+            .agg(pl.col("AssignedGPUs").n_unique().alias("claimed"))
         )
         merged = (
             buckets_df.join(total_df, on="time_bucket", how="left")
@@ -372,10 +351,13 @@ def get_counts_data(
             .fill_null(0)
             .sort("time_bucket")
         )
-        series[cat] = {
-            "total": merged["total"].to_list(),
-            "claimed": merged["claimed"].to_list(),
-        }
+        return {"total": merged["total"].to_list(), "claimed": merged["claimed"].to_list()}
+
+    series: dict[str, dict[str, list]] = {
+        "prioritized": _count_series(primary_df, has_priority, is_claimed),
+        "open_capacity": _count_series(primary_df, ~has_priority, is_claimed),
+        "backfill": _count_series(backfill_df, pl.lit(True), is_claimed),
+    }
 
     return {"buckets": bucket_strs, "series": series}
 
