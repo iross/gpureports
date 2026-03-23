@@ -1,0 +1,15 @@
+# Criteria for flagging suspicious jobs on open capacity nodes.
+#
+# cmd_patterns: list of regex patterns matched against the job Cmd basename.
+# min_runtime_hours: job must have been running at least this long to be flagged.
+#
+# A job is flagged as suspicious only when BOTH conditions match.
+
+suspicious_jobs:
+  cmd_patterns:
+    - "^sleep$"
+    - "^bash$"
+    - "^sh$"
+    - "^python[0-9.]*$"
+    - "^python3[0-9.]*$"
+  min_runtime_hours: 1

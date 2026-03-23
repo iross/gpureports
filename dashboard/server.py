@@ -9,7 +9,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from dashboard.data import get_counts_data, get_heatmap_data
+from dashboard.data import get_counts_data, get_heatmap_data, get_open_capacity_jobs_data
 
 BASE_DIR = str(Path(__file__).resolve().parent.parent)
 DASHBOARD_DIR = Path(__file__).resolve().parent
@@ -58,6 +58,20 @@ async def heatmap(
 
     start_dt, end_dt, bucket_minutes = _parse_params(start, end, bucket_minutes)
     data = get_heatmap_data(start=start_dt, end=end_dt, bucket_minutes=bucket_minutes, base_dir=BASE_DIR)
+    _cache[key] = (now, data)
+    return JSONResponse(content=data)
+
+
+@app.get("/api/jobs")
+async def jobs():
+    key = _cache_key("jobs", None, None, 0)
+    now = datetime.datetime.now().timestamp()
+    if key in _cache:
+        cached_time, cached_data = _cache[key]
+        if now - cached_time < CACHE_TTL:
+            return JSONResponse(content=cached_data)
+
+    data = get_open_capacity_jobs_data(base_dir=BASE_DIR)
     _cache[key] = (now, data)
     return JSONResponse(content=data)
 

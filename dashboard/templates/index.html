@@ -12,6 +12,7 @@
         <div class="tab-bar">
             <button class="tab-btn active" data-tab="heatmap">Heatmap</button>
             <button class="tab-btn" data-tab="charts">Charts</button>
+            <button class="tab-btn" data-tab="jobs">Open Capacity Jobs</button>
         </div>
         <div class="legend" id="legend">
             <div class="legend-item"><div class="legend-swatch" style="background:#ff4444"></div>Idle, prioritized</div>
@@ -68,6 +69,27 @@
             <div class="chart-panel">
                 <canvas id="chart-backfill"></canvas>
             </div>
+        </div>
+    </div>
+
+    <div id="tab-jobs" class="tab-content hidden">
+        <div class="jobs-container">
+            <p class="jobs-subtitle" id="jobsSubtitle"></p>
+            <table class="jobs-table" id="jobsTable">
+                <thead>
+                    <tr>
+                        <th>Machine</th>
+                        <th>GPU</th>
+                        <th>Owner</th>
+                        <th>Cmd</th>
+                        <th>Args</th>
+                        <th>Runtime (h)</th>
+                        <th>GlobalJobId</th>
+                    </tr>
+                </thead>
+                <tbody id="jobsBody"></tbody>
+            </table>
+            <p class="jobs-empty hidden" id="jobsEmpty">No claimed open-capacity jobs found.</p>
         </div>
     </div>
 

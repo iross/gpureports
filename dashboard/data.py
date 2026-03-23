@@ -5,6 +5,8 @@ structured dicts matching the API response shape.
 """
 
 import datetime
+import re
+import sqlite3
 from pathlib import Path
 
 import polars as pl
@@ -380,3 +382,182 @@ def _empty_counts_response() -> dict:
             "backfill": {"total": [], "claimed": []},
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# Open-capacity jobs panel (AC #6-8 of task-29)
+# ---------------------------------------------------------------------------
+
+
+def _get_job_info_databases(start: datetime.datetime, end: datetime.datetime, base_dir: str) -> list[str]:
+    """Return job_info_YYYY-MM.db paths that overlap [start, end]."""
+    paths = []
+    current = start.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    end_month = end.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    while current <= end_month:
+        p = Path(base_dir) / f"job_info_{current.strftime('%Y-%m')}.db"
+        if p.exists():
+            paths.append(str(p))
+        if current.month == 12:
+            current = current.replace(year=current.year + 1, month=1)
+        else:
+            current = current.replace(month=current.month + 1)
+    return paths
+
+
+def _load_suspicious_criteria(base_dir: str) -> tuple[list[re.Pattern], float]:
+    """Load cmd patterns and min_runtime_hours from suspicious_jobs.yaml."""
+    path = Path(base_dir) / "suspicious_jobs.yaml"
+    if not path.exists():
+        return [], 0.0
+    with open(path) as f:
+        cfg = yaml.safe_load(f)
+    criteria = cfg.get("suspicious_jobs", {})
+    patterns = [re.compile(p) for p in criteria.get("cmd_patterns", [])]
+    min_hours = float(criteria.get("min_runtime_hours", 1))
+    return patterns, min_hours
+
+
+def _is_suspicious(cmd: str, qdate: int, patterns: list[re.Pattern], min_hours: float) -> bool:
+    """Return True when cmd basename matches a pattern AND runtime >= min_hours."""
+    if not patterns:
+        return False
+    basename = Path(cmd).name if cmd else ""
+    cmd_match = any(p.match(basename) for p in patterns)
+    if not cmd_match:
+        return False
+    runtime_hours = (datetime.datetime.now().timestamp() - qdate) / 3600
+    return runtime_hours >= min_hours
+
+
+def _fetch_job_info(job_ids: list[str], db_paths: list[str]) -> dict[str, dict]:
+    """Query job_info DBs for the given GlobalJobIds; return mapping id -> row dict."""
+    if not job_ids or not db_paths:
+        return {}
+    result: dict[str, dict] = {}
+    placeholders = ",".join("?" * len(job_ids))
+    for db_path in db_paths:
+        try:
+            conn = sqlite3.connect(db_path)
+            rows = conn.execute(
+                f"SELECT GlobalJobId, Cmd, Args, Owner, RequestGPUs, QDate "  # noqa: S608
+                f"FROM job_info WHERE GlobalJobId IN ({placeholders})",
+                job_ids,
+            ).fetchall()
+            conn.close()
+        except Exception as e:
+            print(f"Warning: could not read {db_path}: {e}")
+            continue
+        for row in rows:
+            gid, cmd, args, owner, req_gpus, qdate = row
+            result[gid] = {
+                "GlobalJobId": gid,
+                "Cmd": cmd or "",
+                "Args": args or "",
+                "Owner": owner or "",
+                "RequestGPUs": req_gpus or 0,
+                "QDate": qdate or 0,
+            }
+    return result
+
+
+def get_open_capacity_jobs_data(
+    base_dir: str = ".",
+) -> dict:
+    """Return recent jobs on claimed open-capacity slots, joined with job_info.
+
+    Looks at the latest gpu_state snapshot (most recent timestamp) to find
+    currently claimed open-capacity slots, then joins against job_info DBs
+    covering the current and previous month so jobs that started last month
+    are still resolved.
+
+    Returns a dict with keys:
+        jobs      - list of job dicts (machine, gpu_id, GlobalJobId, Owner,
+                    Cmd, Args, runtime_hours, suspicious)
+        criteria  - the loaded suspicious criteria for display
+    """
+    end = get_latest_timestamp_from_most_recent_db(base_dir)
+    if end is None:
+        return {"jobs": [], "criteria": {}}
+
+    # Use a tight 10-minute window around the latest timestamp so we see only
+    # the current snapshot, not hours of history.
+    start = end - datetime.timedelta(minutes=10)
+
+    db_paths = get_required_databases(start, end, base_dir)
+    if not db_paths:
+        return {"jobs": [], "criteria": {}}
+
+    col_select = ", ".join(
+        f'"{c}"'
+        for c in ["Name", "AssignedGPUs", "State", "PrioritizedProjects", "Machine", "GlobalJobId", "timestamp"]
+    )
+    frames = []
+    for db_path in db_paths:
+        try:
+            abs_path = str(Path(db_path).resolve())
+            query = f"""
+                SELECT {col_select} FROM gpu_state
+                WHERE timestamp BETWEEN '{start.strftime("%Y-%m-%d %H:%M:%S.%f")}'
+                  AND '{end.strftime("%Y-%m-%d %H:%M:%S.%f")}'
+            """  # noqa: S608
+            df = pl.read_database_uri(query, f"sqlite:///{abs_path}")
+            if df.height > 0:
+                frames.append(df)
+        except Exception as e:
+            print(f"Warning: could not load {db_path}: {e}")
+
+    if not frames:
+        return {"jobs": [], "criteria": {}}
+
+    df = pl.concat(frames)
+
+    # Filter to claimed, non-backfill, non-prioritized = open capacity
+    is_claimed = pl.col("State").str.to_lowercase() == "claimed"
+    is_backfill = pl.col("Name").str.to_lowercase().str.contains("backfill")
+    has_priority = pl.col("PrioritizedProjects").is_not_null() & (pl.col("PrioritizedProjects") != "")
+    df = df.filter(is_claimed & ~is_backfill & ~has_priority)
+
+    if df.height == 0:
+        return {"jobs": [], "criteria": {}}
+
+    # Deduplicate: one row per (Machine, AssignedGPUs) — take latest timestamp
+    df = df.sort("timestamp", descending=True).unique(subset=["Machine", "AssignedGPUs"], keep="first")
+
+    job_ids = df["GlobalJobId"].drop_nulls().unique().to_list()
+
+    # Query job_info DBs covering end's month and the month before (cross-month)
+    prev_month_start = (end.replace(day=1) - datetime.timedelta(days=1)).replace(day=1)
+    job_db_paths = _get_job_info_databases(prev_month_start, end, base_dir)
+    job_map = _fetch_job_info(job_ids, job_db_paths)
+
+    patterns, min_hours = _load_suspicious_criteria(base_dir)
+    path_criteria = {
+        "cmd_patterns": [p.pattern for p in patterns],
+        "min_runtime_hours": min_hours,
+    }
+
+    jobs = []
+    for row in df.iter_rows(named=True):
+        gid = row.get("GlobalJobId") or ""
+        info = job_map.get(gid, {})
+        cmd = info.get("Cmd", "")
+        qdate = info.get("QDate", 0)
+        runtime_hours = round((end.timestamp() - qdate) / 3600, 1) if qdate else None
+        jobs.append(
+            {
+                "machine": row["Machine"],
+                "gpu_id": row["AssignedGPUs"],
+                "GlobalJobId": gid,
+                "Owner": info.get("Owner", ""),
+                "Cmd": cmd,
+                "Args": info.get("Args", ""),
+                "RequestGPUs": info.get("RequestGPUs", 0),
+                "runtime_hours": runtime_hours,
+                "suspicious": _is_suspicious(cmd, qdate, patterns, min_hours),
+            }
+        )
+
+    jobs.sort(key=lambda j: (not j["suspicious"], j["machine"]))
+
+    return {"jobs": jobs, "criteria": path_criteria}

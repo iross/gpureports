@@ -223,6 +223,52 @@ body {
     position: relative;
 }
 
+/* Jobs tab layout */
+.jobs-container {
+    padding: 16px;
+    overflow-y: auto;
+    height: calc(100vh - 52px);
+}
+.jobs-subtitle {
+    font-size: 12px;
+    color: #888;
+    margin-bottom: 12px;
+}
+.jobs-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+}
+.jobs-table th {
+    background: #16213e;
+    color: #aaa;
+    padding: 6px 10px;
+    text-align: left;
+    border-bottom: 1px solid #333;
+    font-weight: 600;
+    white-space: nowrap;
+    position: sticky;
+    top: 0;
+    z-index: 1;
+}
+.jobs-table td {
+    padding: 5px 10px;
+    border-bottom: 1px solid #222;
+    vertical-align: top;
+    color: #ccc;
+}
+.jobs-table tr:hover td { background: #1e2a4a; }
+.job-suspicious td { background: rgba(255, 80, 80, 0.12); }
+.job-suspicious td:first-child::before {
+    content: '⚑ ';
+    color: #ff6060;
+}
+.job-cmd  { font-family: monospace; color: #88ddff; }
+.job-args { font-family: monospace; color: #aaa; max-width: 280px;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.job-id   { font-family: monospace; font-size: 11px; color: #666; }
+.jobs-empty { font-size: 13px; color: #666; padding: 20px 0; }
+
 /* Tooltip */
 .tooltip {
     position: fixed;
