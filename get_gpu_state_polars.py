@@ -42,11 +42,13 @@ def get_gpus() -> pl.DataFrame:
     # Collect results into list of dicts
     records = []
     for ad in res:
-        # Process AvailableGPUs
-        ad["AvailableGPUs"] = ",".join([i.__str__().replace("GPUs_", "") for i in ad["AvailableGPUs"]])
-
-        # Filter out GPUs_GPU_ keys
-        ad = {k: v for k, v in ad.items() if not k.startswith("GPUs_GPU_")}
+        # Process AvailableGPUs — normalize to hyphen format to match AssignedGPUs
+        ad["AvailableGPUs"] = ",".join(
+            [i.__str__().replace("GPUs_", "").replace("_", "-") for i in ad["AvailableGPUs"]]
+        )
+        # Drop per-GPU/MIG sub-attributes; keep only known aggregate GPU attrs.
+        _KEEP_GPUS_KEYS = {"GPUs_DeviceName", "GPUs_GlobalMemoryMb"}
+        ad = {k: v for k, v in ad.items() if not k.startswith("GPUs_") or k in _KEEP_GPUS_KEYS}
         records.append(dict(ad))
 
     # Create Polars DataFrame from records
