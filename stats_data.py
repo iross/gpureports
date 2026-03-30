@@ -149,16 +149,16 @@ def get_time_filtered_data(
         try:
             conn = sqlite3.connect(db_path)
             # OPTIMIZATION: Filter at SQL level instead of loading entire database
-            optimized_query = """
+            # Note: datetime strings are internal values (not user input), so f-string is safe here.
+            # Parameterized queries with pandas+sqlite3 are broken in pandas <2.3.0.
+            start_str = start_time.strftime("%Y-%m-%d %H:%M:%S.%f")
+            end_str = end_time.strftime("%Y-%m-%d %H:%M:%S.%f")
+            optimized_query = f"""
             SELECT * FROM gpu_state
-            WHERE timestamp >= ? AND timestamp <= ?
+            WHERE CAST(timestamp AS TEXT) >= '{start_str}' AND CAST(timestamp AS TEXT) <= '{end_str}'
             ORDER BY timestamp
             """
-            df = pd.read_sql_query(
-                optimized_query,
-                conn,
-                params=[start_time.strftime("%Y-%m-%d %H:%M:%S.%f"), end_time.strftime("%Y-%m-%d %H:%M:%S.%f")],
-            )
+            df = pd.read_sql_query(optimized_query, conn)
             conn.close()
 
             if len(df) > 0:
@@ -176,16 +176,14 @@ def get_time_filtered_data(
         print(f"Warning: Multi-database query failed, falling back to single database: {e}")
         try:
             conn = sqlite3.connect(db_path)
-            query = """
+            start_str = start_time.strftime("%Y-%m-%d %H:%M:%S.%f")
+            end_str = end_time.strftime("%Y-%m-%d %H:%M:%S.%f")
+            query = f"""
             SELECT * FROM gpu_state
-            WHERE timestamp BETWEEN ? AND ?
+            WHERE CAST(timestamp AS TEXT) BETWEEN '{start_str}' AND '{end_str}'
             ORDER BY timestamp
             """
-            df = pd.read_sql_query(
-                query,
-                conn,
-                params=[start_time.strftime("%Y-%m-%d %H:%M:%S.%f"), end_time.strftime("%Y-%m-%d %H:%M:%S.%f")],
-            )
+            df = pd.read_sql_query(query, conn)
             conn.close()
             if len(df) > 0:
                 df["timestamp"] = pd.to_datetime(df["timestamp"])
@@ -219,17 +217,14 @@ def get_multi_db_data(db_paths: list, start_time: datetime.datetime, end_time: d
     for db_path in db_paths:
         try:
             conn = sqlite3.connect(db_path)
-            # Use parameterized query for time filtering at the database level for efficiency
-            query = """
+            buf_str = buffered_start.strftime("%Y-%m-%d %H:%M:%S.%f")
+            end_str = end_time.strftime("%Y-%m-%d %H:%M:%S.%f")
+            query = f"""
             SELECT * FROM gpu_state
-            WHERE timestamp BETWEEN ? AND ?
+            WHERE CAST(timestamp AS TEXT) BETWEEN '{buf_str}' AND '{end_str}'
             ORDER BY timestamp
             """
-            df = pd.read_sql_query(
-                query,
-                conn,
-                params=[buffered_start.strftime("%Y-%m-%d %H:%M:%S.%f"), end_time.strftime("%Y-%m-%d %H:%M:%S.%f")],
-            )
+            df = pd.read_sql_query(query, conn)
             conn.close()
 
             if len(df) > 0:
