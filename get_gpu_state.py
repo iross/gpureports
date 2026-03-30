@@ -28,9 +28,12 @@ def get_gpus() -> pd.DataFrame:
     res = coll.query(htcondor.AdTypes.Startd, constraint="GPUs >= 1", projection=PROJ)
     df = pd.DataFrame(columns=PROJ)
     for ad in res:
-        ad["AvailableGPUs"] = ",".join([i.__str__().replace("GPUs_", "") for i in ad["AvailableGPUs"]])
-        # drop all keys starting with GPUs_
-        ad = {k: v for k, v in ad.items() if not k.startswith("GPUs_GPU_")}
+        ad["AvailableGPUs"] = ",".join(
+            [i.__str__().replace("GPUs_", "").replace("_", "-") for i in ad["AvailableGPUs"]]
+        )
+        # Drop per-GPU/MIG sub-attributes; keep only known aggregate GPU attrs.
+        _KEEP_GPUS_KEYS = {"GPUs_DeviceName", "GPUs_GlobalMemoryMb"}
+        ad = {k: v for k, v in ad.items() if not k.startswith("GPUs_") or k in _KEEP_GPUS_KEYS}
         df = pd.concat([df, pd.DataFrame([dict(ad)])], ignore_index=True)
 
     # Backfill slots don't actually have these GPUs assigned, but for ease downstream, we'll pretend.
