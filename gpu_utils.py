@@ -740,18 +740,16 @@ def get_most_recent_database(base_dir: str = ".") -> str | None:
     Returns:
         Path to the most recent database file, or None if none found
     """
-    import glob
+    import re
     from pathlib import Path
 
-    # Find all database files matching the pattern
-    pattern = str(Path(base_dir) / "gpu_state_*.db")
-    db_files = glob.glob(pattern)
+    # Match only exact gpu_state_YYYY-MM.db files, not variants like _dev or _backup
+    pattern = re.compile(r"gpu_state_\d{4}-\d{2}\.db$")
+    db_files = sorted(str(p) for p in Path(base_dir).glob("gpu_state_*.db") if pattern.search(p.name))
 
     if not db_files:
         return None
 
-    # Sort by filename (which contains YYYY-MM date) to get the most recent
-    db_files.sort()
     return db_files[-1]
 
 
@@ -775,6 +773,7 @@ def get_latest_timestamp_from_most_recent_db(base_dir: str = ".") -> datetime.da
 
     try:
         conn = sqlite3.connect(most_recent_db)
+        print("reading max_time from gpu_state db in the gpu_utils code")
         df_temp = pd.read_sql_query("SELECT MAX(timestamp) as max_time FROM gpu_state", conn)
         conn.close()
         if len(df_temp) > 0 and df_temp["max_time"].iloc[0] is not None:
