@@ -155,7 +155,7 @@ def get_time_filtered_data(
             end_str = end_time.strftime("%Y-%m-%d %H:%M:%S.%f")
             optimized_query = f"""
             SELECT * FROM gpu_state
-            WHERE timestamp >= '{start_str}' AND timestamp <= '{end_str}'
+            WHERE CAST(timestamp AS TEXT) >= '{start_str}' AND CAST(timestamp AS TEXT) <= '{end_str}'
             ORDER BY timestamp
             """
             df = pd.read_sql_query(optimized_query, conn)
@@ -180,7 +180,7 @@ def get_time_filtered_data(
             end_str = end_time.strftime("%Y-%m-%d %H:%M:%S.%f")
             query = f"""
             SELECT * FROM gpu_state
-            WHERE timestamp BETWEEN '{start_str}' AND '{end_str}'
+            WHERE CAST(timestamp AS TEXT) BETWEEN '{start_str}' AND '{end_str}'
             ORDER BY timestamp
             """
             df = pd.read_sql_query(query, conn)
@@ -221,7 +221,7 @@ def get_multi_db_data(db_paths: list, start_time: datetime.datetime, end_time: d
             end_str = end_time.strftime("%Y-%m-%d %H:%M:%S.%f")
             query = f"""
             SELECT * FROM gpu_state
-            WHERE timestamp BETWEEN '{buf_str}' AND '{end_str}'
+            WHERE CAST(timestamp AS TEXT) BETWEEN '{buf_str}' AND '{end_str}'
             ORDER BY timestamp
             """
             df = pd.read_sql_query(query, conn)
