@@ -2,6 +2,18 @@
 
 This system monitors GPU utilization across a compute cluster and provides detailed usage statistics and reports.
 
+## Production deployment
+
+Running on a CHTC baremetal host as `iaross`. Data is collected every 5 minutes from the
+HTCondor collector and written to monthly SQLite databases. Email reports go out daily,
+weekly, and monthly via cron.
+
+```
+HTCondor → get_gpu_state.py → gpu_state_YYYY-MM.db → usage_stats.py → email
+```
+
+See [OPERATIONS.md](OPERATIONS.md) for crontab entries, log locations, and troubleshooting.
+
 ## Project Structure
 
 ```
@@ -24,7 +36,7 @@ This system monitors GPU utilization across a compute cluster and provides detai
 │   ├── weekly_allocation_plot.py
 │   ├── gap_analysis.py
 │   └── query.py
-├── dashboard/                 # FastAPI real-time GPU state dashboard
+├── dashboard/                 # FastAPI real-time GPU state dashboard [WIP — not yet deployed]
 │   ├── server.py
 │   └── data.py
 ├── tests/                     # Unit tests
