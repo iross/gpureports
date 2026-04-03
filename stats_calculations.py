@@ -1114,6 +1114,72 @@ def calculate_machines_with_zero_active_gpus(
     }
 
 
+def calculate_mig_hosts(df: pd.DataFrame, host: str = "") -> list[dict]:
+    """
+    Summarize hosts that have MIG (Multi-Instance GPU) devices.
+
+    Args:
+        df: DataFrame with GPU state data
+        host: Optional host filter
+
+    Returns:
+        List of dicts sorted by machine name, each containing:
+          - machine: hostname
+          - mig_device: MIG device type string
+          - avg_total: average number of MIG slots available per interval
+          - avg_claimed: average number of MIG slots claimed per interval
+          - utilization_pct: avg_claimed / avg_total * 100
+    """
+    df = df.copy()
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    df["15min_bucket"] = df["timestamp"].dt.floor("15min")
+
+    if gpu_utils.HOST_EXCLUSIONS:
+        for excluded_host in gpu_utils.HOST_EXCLUSIONS.keys():
+            df = df[~df["Machine"].str.contains(excluded_host, case=False, na=False)]
+
+    if host:
+        df = df[df["Machine"] == host]
+
+    mig_df = df[df["GPUs_DeviceName"].str.contains("MIG", case=False, na=False)]
+
+    if mig_df.empty:
+        return []
+
+    total_intervals = len(df["15min_bucket"].unique())
+    results = []
+
+    for (machine, mig_device), group in mig_df.groupby(["Machine", "GPUs_DeviceName"]):
+        total_slots = 0
+        claimed_slots = 0
+
+        for bucket in sorted(df["15min_bucket"].unique()):
+            bucket_df = group[group["15min_bucket"] == bucket]
+            if bucket_df.empty:
+                continue
+            unique_slots = set(bucket_df["AssignedGPUs"].dropna().unique())
+            claimed = set(bucket_df[bucket_df["State"] == "Claimed"]["AssignedGPUs"].dropna().unique())
+            total_slots += len(unique_slots)
+            claimed_slots += len(claimed)
+
+        avg_total = total_slots / total_intervals if total_intervals > 0 else 0
+        avg_claimed = claimed_slots / total_intervals if total_intervals > 0 else 0
+        utilization_pct = (avg_claimed / avg_total * 100) if avg_total > 0 else 0.0
+
+        results.append(
+            {
+                "machine": machine,
+                "mig_device": mig_device,
+                "avg_total": avg_total,
+                "avg_claimed": avg_claimed,
+                "utilization_pct": utilization_pct,
+            }
+        )
+
+    results.sort(key=lambda x: x["machine"])
+    return results
+
+
 def calculate_monthly_summary(db_path: str, end_time: datetime.datetime | None = None) -> dict:
     """
     Calculate complete monthly GPU usage summary for the previous month.

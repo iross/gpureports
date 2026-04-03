@@ -23,6 +23,7 @@ from stats_calculations import (
     calculate_backfill_usage_by_user,
     calculate_h200_user_breakdown,
     calculate_machines_with_zero_active_gpus,
+    calculate_mig_hosts,
     calculate_monthly_summary,
     calculate_time_series_usage,
     get_gpu_models_at_time,
@@ -100,6 +101,7 @@ def run_analysis(
             result["h200_user_stats"] = calculate_h200_user_breakdown(df, host, hours_back)
             result["backfill_user_stats"] = calculate_backfill_usage_by_user(df, host, hours_back, all_devices)
             result["zero_active_machines"] = calculate_machines_with_zero_active_gpus(df, host, all_devices)
+            result["mig_hosts"] = calculate_mig_hosts(df, host)
             result["raw_data"] = df  # Pass raw data for unique cluster totals calculation
             result["host_filter"] = host  # Pass host filter for consistency
         else:

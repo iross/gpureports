@@ -825,6 +825,28 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
 
                 html_parts.append("</table>")
 
+        # MIG Hosts Summary
+        if "mig_hosts" in results and results["mig_hosts"]:
+            mig_hosts = results["mig_hosts"]
+            html_parts.append("<h2>Hosts with MIG Devices</h2>")
+            html_parts.append("<table border='1' style='margin-top: 20px;'>")
+            html_parts.append(
+                "<tr style='background-color: #e0e0e0;'>"
+                "<th>Machine</th><th>MIG Device</th>"
+                "<th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th>"
+                "</tr>"
+            )
+            for entry in mig_hosts:
+                short_name = get_human_readable_device_name(entry["mig_device"])
+                html_parts.append("<tr>")
+                html_parts.append(f"<td>{entry['machine']}</td>")
+                html_parts.append(f"<td>{short_name}</td>")
+                html_parts.append(f"<td style='text-align: right'>{entry['utilization_pct']:.1f}%</td>")
+                html_parts.append(f"<td style='text-align: right'>{entry['avg_claimed']:.1f}</td>")
+                html_parts.append(f"<td style='text-align: right'>{entry['avg_total']:.1f}</td>")
+                html_parts.append("</tr>")
+            html_parts.append("</table>")
+
         html_parts.append("<h2>Usage by Device Type (filtered)</h2>")
 
         for class_name in CLASS_ORDER:
