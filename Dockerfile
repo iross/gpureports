@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y \
 RUN uv venv
 COPY pyproject.toml uv.lock ./
 RUN uv sync
-RUN uv pip install htcondor2
+RUN uv pip install htcondor
 
 # Copy only the files needed for get_gpu_state.py and emailer.sh
 COPY get_gpu_state.py get_job_pressure.py usage_stats.py gpu_utils.py device_name_mappings.py ./
