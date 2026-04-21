@@ -12,6 +12,10 @@ HTCondor collector
     → gpu_state_YYYY-MM.db (SQLite, one file per calendar month)
     → usage_stats.py (via emailer.sh)
     → email report
+
+HTCondor schedds (all)
+    → get_job_pressure.py (every 5 min)
+    → job_pressure_YYYY-MM.db (SQLite, one file per calendar month)
 ```
 
 ## Crontab entries
@@ -19,6 +23,7 @@ HTCondor collector
 ```
 # Data collection
 */5 * * * * /home/iaross/gpureports/.venv/bin/python /home/iaross/gpureports/get_gpu_state.py &> /tmp/gpu_state.log
+*/5 * * * * /home/iaross/gpureports/.venv/bin/python /home/iaross/gpureports/get_job_pressure.py &> /tmp/job_pressure.log
 
 # Email reports
 0 6 * * *    bash /home/iaross/gpureports/emailer.sh daily   &> /tmp/gpu_emailer.log
@@ -33,7 +38,8 @@ To install: `crontab -e` on the production host and paste the above.
 
 | Log | Written by |
 |-----|-----------|
-| `/tmp/gpu_state.log` | `get_gpu_state.py` — data collection |
+| `/tmp/gpu_state.log` | `get_gpu_state.py` — GPU slot collection |
+| `/tmp/job_pressure.log` | `get_job_pressure.py` — idle GPU job collection |
 | `/tmp/gpu_emailer.log` | `emailer.sh daily` and `emailer.sh test` |
 | `/tmp/gpu_emailer_weekly.log` | `emailer.sh weekly` |
 | `/tmp/gpu_emailer_monthly.log` | `emailer.sh monthly` |
@@ -46,10 +52,11 @@ SQLite databases live in the repo directory at `/home/iaross/gpureports/`:
 gpu_state_2025-06.db
 gpu_state_2025-07.db
 ...
-gpu_state_YYYY-MM.db   ← one per calendar month, created automatically
+gpu_state_YYYY-MM.db      ← GPU slot state, one per calendar month
+job_pressure_YYYY-MM.db   ← idle GPU job queue snapshots, one per calendar month
 ```
 
-`get_gpu_state.py` creates a new file on the first run of each month.
+Both scripts create a new file on the first run of each month.
 
 ## Changing email recipients
 
@@ -82,10 +89,14 @@ bash emailer.sh daily    # or weekly / monthly / test
 - Verify `get_gpu_state.py` cron is running: `crontab -l`
 - Check disk space: `df -h /home/iaross/gpureports`
 
-**`get_gpu_state.py` exits silently**
-- The script uses HTCondor Python bindings (`htcondor` package) which must be installed
+**`get_gpu_state.py` or `get_job_pressure.py` exits silently**
+- The scripts use HTCondor Python bindings (`htcondor` package) which must be installed
   in the system Python or the venv. These are not in `pyproject.toml` because they're
   provided by the HTCondor installation on the host — not installable via pip on dev machines.
+
+**`get_job_pressure.py` reports 0 jobs unexpectedly**
+- Check `/tmp/job_pressure.log` for per-schedd query warnings
+- Confirm schedd discovery works: `python -c "import htcondor; c=htcondor.Collector('cm.chtc.wisc.edu'); print(len(c.locateAll(htcondor.DaemonTypes.Schedd)), 'schedds found')"`
 
 ## Dependencies
 
