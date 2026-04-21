@@ -87,7 +87,8 @@ def collect_job_info(df: pd.DataFrame, db_path: str) -> None:
             Owner       TEXT,
             RequestGPUs REAL,
             QDate       INTEGER,
-            first_seen  TEXT
+            first_seen  TEXT,
+            InitialWaitDuration INTEGER
         )
     """)
     conn.commit()
@@ -118,7 +119,7 @@ def collect_job_info(df: pd.DataFrame, db_path: str) -> None:
 
         id_list = " || ".join(f'GlobalJobId == "{jid}"' for jid in batch_ids)
         constraint = f"({id_list})"
-        proj = ["GlobalJobId", "Cmd", "Arguments", "Owner", "RequestGPUs", "QDate"]
+        proj = ["GlobalJobId", "Cmd", "Arguments", "Owner", "RequestGPUs", "QDate", "InitialWaitDuration"]
 
         try:
             ads = schedd.query(constraint=constraint, projection=proj)
@@ -136,6 +137,7 @@ def collect_job_info(df: pd.DataFrame, db_path: str) -> None:
                     float(ad.get("RequestGPUs", 0) or 0),
                     int(ad.get("QDate", 0) or 0),
                     now_str,
+                    ad.get("InitialWaitDuration", ""),
                 )
             )
 
@@ -145,8 +147,8 @@ def collect_job_info(df: pd.DataFrame, db_path: str) -> None:
     conn = sqlite3.connect(db_path)
     conn.executemany(
         "INSERT OR IGNORE INTO job_info "
-        "(GlobalJobId, Cmd, Args, Owner, RequestGPUs, QDate, first_seen) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "(GlobalJobId, Cmd, Args, Owner, RequestGPUs, QDate, first_seen, InitialWaitDuration) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         rows,
     )
     conn.commit()

@@ -155,13 +155,16 @@ def filter_df(df: pl.DataFrame, utilization: str = "", state: str = "", host: st
 
         # For duplicated GPUs, we want to keep the Claimed state and drop Unclaimed
         if duplicated_gpus.any():
-            # Create a rank column to sort out duplicates. Prefer claimed to unclaimed and primary slots to backfill.
+            # Create a rank column to sort out duplicates. Prefer primary slots over backfill,
+            # and claimed over unclaimed within the same type.
+            # Primary Unclaimed (rank 2) must beat Backfill Claimed (rank 1) so idle GPUs that
+            # are also offered as backfill are not dropped after the backfill filter.
             df = df.with_columns(
                 pl.when((pl.col("State") == "Claimed") & (~pl.col("Name").str.contains("backfill")))
                 .then(3)
-                .when((pl.col("State") == "Claimed") & (pl.col("Name").str.contains("backfill")))
-                .then(2)
                 .when((pl.col("State") == "Unclaimed") & (~pl.col("Name").str.contains("backfill")))
+                .then(2)
+                .when((pl.col("State") == "Claimed") & (pl.col("Name").str.contains("backfill")))
                 .then(1)
                 .otherwise(0)
                 .alias("_rank")
@@ -222,13 +225,16 @@ def filter_df(df: pl.DataFrame, utilization: str = "", state: str = "", host: st
 
         # For duplicated GPUs, we want to keep the Claimed state and drop Unclaimed
         if duplicated_gpus.any():
-            # Create a rank column to sort out duplicates. Prefer claimed to unclaimed and primary slots to backfill.
+            # Create a rank column to sort out duplicates. Prefer primary slots over backfill,
+            # and claimed over unclaimed within the same type.
+            # Primary Unclaimed (rank 2) must beat Backfill Claimed (rank 1) so idle GPUs that
+            # are also offered as backfill are not dropped after the backfill filter.
             df = df.with_columns(
                 pl.when((pl.col("State") == "Claimed") & (~pl.col("Name").str.contains("backfill")))
                 .then(3)
-                .when((pl.col("State") == "Claimed") & (pl.col("Name").str.contains("backfill")))
-                .then(2)
                 .when((pl.col("State") == "Unclaimed") & (~pl.col("Name").str.contains("backfill")))
+                .then(2)
+                .when((pl.col("State") == "Claimed") & (pl.col("Name").str.contains("backfill")))
                 .then(1)
                 .otherwise(0)
                 .alias("_rank")
@@ -506,13 +512,17 @@ def _apply_duplicate_cleanup(df: pl.DataFrame) -> pl.DataFrame:
     if not duplicated_gpus.any():
         return df
 
-    # Create a rank column to sort out duplicates
+    # Create a rank column to sort out duplicates.
+    # Prefer primary slots over backfill slots, and claimed over unclaimed within the same type.
+    # This matches the pandas version: Primary Claimed > Primary Unclaimed > Backfill Claimed > Backfill Unclaimed.
+    # IMPORTANT: Primary Unclaimed (rank 2) must beat Backfill Claimed (rank 1) so that idle GPUs
+    # that are also offered as backfill are not dropped from the denominator after the backfill filter.
     df = df.with_columns(
         pl.when((pl.col("State") == "Claimed") & (~pl.col("Name").str.contains("backfill")))
         .then(3)
-        .when((pl.col("State") == "Claimed") & (pl.col("Name").str.contains("backfill")))
-        .then(2)
         .when((pl.col("State") == "Unclaimed") & (~pl.col("Name").str.contains("backfill")))
+        .then(2)
+        .when((pl.col("State") == "Claimed") & (pl.col("Name").str.contains("backfill")))
         .then(1)
         .otherwise(0)
         .alias("_rank")
