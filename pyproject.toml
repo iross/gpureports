@@ -19,6 +19,7 @@ dependencies = [
     "psutil>=5.9.0",
     "pyarrow>=22.0.0",
     "connectorx>=0.4.4",
+    "sqlalchemy>=2.0.0",
     "fastapi>=0.100.0",
     "uvicorn>=0.20.0",
 ]
