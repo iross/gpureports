@@ -18,6 +18,8 @@ import typer
 
 COLL = htcondor.Collector("cm.chtc.wisc.edu")
 
+TARGET_APS = ["ap2001.chtc.wisc.edu", "ap2002.chtc.wisc.edu"]
+
 PROJ = [
     "GlobalJobId",
     "Owner",
@@ -26,6 +28,7 @@ PROJ = [
     "RequestMemory",
     "RequestGPUMemory",
     "QDate",
+    "ChtcProjects",
 ]
 
 CONSTRAINT = "RequestGPUs >= 1 && JobStatus == 1"
@@ -40,7 +43,8 @@ _CREATE_TABLE = """
         RequestCPUs      REAL,
         RequestMemory    REAL,
         RequestGPUMemory REAL,
-        QDate            INTEGER
+        QDate            INTEGER,
+        ChtcProjects     TEXT
     )
 """
 _CREATE_INDEX = "CREATE INDEX IF NOT EXISTS idx_timestamp ON job_pressure (timestamp)"
@@ -67,6 +71,7 @@ def collect_idle_gpu_jobs(timestamp: str) -> list[tuple]:
     rows: list[tuple] = []
     for schedd_ad in schedd_ads:
         schedd_name = schedd_ad.get("Name", "")
+        if schedd_name not in TARGET_APS: continue
         try:
             schedd = htcondor.Schedd(schedd_ad)
             ads = schedd.query(constraint=CONSTRAINT, projection=PROJ)
@@ -86,6 +91,7 @@ def collect_idle_gpu_jobs(timestamp: str) -> list[tuple]:
                     float(ad.get("RequestMemory", 0) or 0),
                     _float_or_none(ad.get("RequestGPUMemory")),
                     int(ad.get("QDate", 0) or 0),
+                    ad.get("ChtcProjects", ""),
                 )
             )
 
@@ -96,7 +102,7 @@ def store_rows(rows: list[tuple], db_path: str) -> None:
     conn = sqlite3.connect(db_path)
     conn.execute(_CREATE_TABLE)
     conn.execute(_CREATE_INDEX)
-    conn.executemany("INSERT INTO job_pressure VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+    conn.executemany("INSERT INTO job_pressure VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
     conn.commit()
     conn.close()
 
