@@ -2,7 +2,7 @@ import datetime
 import sqlite3
 from collections import defaultdict
 
-import htcondor
+import htcondor2 as htcondor
 import pandas as pd
 import typer
 from sqlalchemy import create_engine
