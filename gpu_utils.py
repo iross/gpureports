@@ -162,12 +162,13 @@ def filter_df(df: pd.DataFrame, utilization: str = "", state: str = "", host: st
             df = df.drop_duplicates(subset=["timestamp", "AssignedGPUs"], keep="first")
             # Remove the temporary rank column
             df = df.drop(columns=["_rank"])
+        not_primary_excluded = ~df["Name"].str.contains("backfill") & ~df["Name"].str.contains("interactive")
         if state == "Claimed":  # Only care about claimed shared GPUs
             df = df[
                 (df["PrioritizedProjects"] == "")
                 & (df["State"] == state if state != "" else True)
                 & (df["Name"].str.contains(host) if host != "" else True)
-                & (~df["Name"].str.contains("backfill"))
+                & not_primary_excluded
             ]
         elif (
             state == "Unclaimed"
@@ -177,7 +178,7 @@ def filter_df(df: pd.DataFrame, utilization: str = "", state: str = "", host: st
                     (df["PrioritizedProjects"] == "")
                     & (df["State"] == state if state != "" else True)
                     & (df["Name"].str.contains(host) if host != "" else True)
-                    & (~df["Name"].str.contains("backfill"))
+                    & not_primary_excluded
                 )
                 | (
                     (df["PrioritizedProjects"] == "")
@@ -190,7 +191,7 @@ def filter_df(df: pd.DataFrame, utilization: str = "", state: str = "", host: st
             df = df[
                 (df["PrioritizedProjects"] == "")
                 & (df["Name"].str.contains(host) if host != "" else True)
-                & (~df["Name"].str.contains("backfill"))
+                & not_primary_excluded
             ]
     elif utilization == "Priority":
         # Do some cleanup -- primary slots still have in-use GPUs listed as Assigned, so remove them if they're in use
@@ -549,12 +550,13 @@ def filter_df_enhanced(df: pd.DataFrame, utilization: str = "", state: str = "",
             df = df.drop_duplicates(subset=["timestamp", "AssignedGPUs"], keep="first")
             # Remove the temporary rank column
             df = df.drop(columns=["_rank"])
+        not_primary_excluded = ~df["Name"].str.contains("backfill") & ~df["Name"].str.contains("interactive")
         if state == "Claimed":  # Only care about claimed shared GPUs
             df = df[
                 (df["PrioritizedProjects"] == "")
                 & (df["State"] == state if state != "" else True)
                 & (df["Name"].str.contains(host) if host != "" else True)
-                & (~df["Name"].str.contains("backfill"))
+                & not_primary_excluded
             ]
         elif (
             state == "Unclaimed"
@@ -564,7 +566,7 @@ def filter_df_enhanced(df: pd.DataFrame, utilization: str = "", state: str = "",
                     (df["PrioritizedProjects"] == "")
                     & (df["State"] == state if state != "" else True)
                     & (df["Name"].str.contains(host) if host != "" else True)
-                    & (~df["Name"].str.contains("backfill"))
+                    & not_primary_excluded
                 )
                 | (
                     (df["PrioritizedProjects"] == "")
@@ -577,7 +579,7 @@ def filter_df_enhanced(df: pd.DataFrame, utilization: str = "", state: str = "",
             df = df[
                 (df["PrioritizedProjects"] == "")
                 & (df["Name"].str.contains(host) if host != "" else True)
-                & (~df["Name"].str.contains("backfill"))
+                & not_primary_excluded
             ]
     elif utilization == "Priority":
         # Do some cleanup -- primary slots still have in-use GPUs listed as Assigned, so remove them if they're in use

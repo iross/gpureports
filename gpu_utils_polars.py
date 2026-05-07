@@ -680,19 +680,14 @@ def filter_df_enhanced(df: pl.DataFrame, utilization: str = "", state: str = "",
     elif utilization == "Shared":
         df = _apply_duplicate_cleanup(df)
 
+        not_primary_excluded = ~pl.col("Name").str.contains("backfill") & ~pl.col("Name").str.contains("interactive")
         if state == "Claimed":
             df = df.filter(
-                (pl.col("PrioritizedProjects") == "")
-                & (pl.col("State") == state)
-                & host_cond
-                & (~pl.col("Name").str.contains("backfill"))
+                (pl.col("PrioritizedProjects") == "") & (pl.col("State") == state) & host_cond & not_primary_excluded
             )
         elif state == "Unclaimed":
             condition1 = (
-                (pl.col("PrioritizedProjects") == "")
-                & (pl.col("State") == state)
-                & host_cond
-                & (~pl.col("Name").str.contains("backfill"))
+                (pl.col("PrioritizedProjects") == "") & (pl.col("State") == state) & host_cond & not_primary_excluded
             )
             condition2 = (
                 (pl.col("PrioritizedProjects") == "")
@@ -702,9 +697,7 @@ def filter_df_enhanced(df: pl.DataFrame, utilization: str = "", state: str = "",
             )
             df = df.filter(condition1 | condition2)
         else:
-            df = df.filter(
-                (pl.col("PrioritizedProjects") == "") & host_cond & (~pl.col("Name").str.contains("backfill"))
-            )
+            df = df.filter((pl.col("PrioritizedProjects") == "") & host_cond & not_primary_excluded)
 
     elif utilization == "Priority":
         # Legacy support - same as Priority without category split

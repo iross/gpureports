@@ -223,6 +223,10 @@ body {
     position: relative;
 }
 
+.chart-panel--wide {
+    height: calc(100vh - 140px);
+}
+
 /* Jobs tab layout */
 .jobs-container {
     padding: 16px;

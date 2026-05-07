@@ -164,6 +164,7 @@ def _prepare_bucketed(
     end: datetime.datetime | None,
     bucket_minutes: int,
     base_dir: str,
+    hours: int = 24,
 ) -> tuple[pl.DataFrame, list, list[str]] | None:
     """Load, mask, dedup, bucket, and classify data.
 
@@ -174,7 +175,7 @@ def _prepare_bucketed(
         if end is None:
             return None
     if start is None:
-        start = end - datetime.timedelta(hours=24)
+        start = end - datetime.timedelta(hours=hours)
 
     db_paths = get_required_databases(start, end, base_dir)
     if not db_paths:
@@ -203,6 +204,7 @@ def get_heatmap_data(
     end: datetime.datetime | None = None,
     bucket_minutes: int = 15,
     base_dir: str = ".",
+    hours: int = 24,
 ) -> dict:
     """Build the heatmap data structure for the API response.
 
@@ -219,7 +221,7 @@ def get_heatmap_data(
     -------
     dict matching the API response shape.
     """
-    prepared = _prepare_bucketed(start, end, bucket_minutes, base_dir)
+    prepared = _prepare_bucketed(start, end, bucket_minutes, base_dir, hours)
     if prepared is None:
         return _empty_heatmap_response()
 
@@ -279,6 +281,7 @@ def get_counts_data(
     end: datetime.datetime | None = None,
     bucket_minutes: int = 15,
     base_dir: str = ".",
+    hours: int = 24,
 ) -> dict:
     """Build time-series GPU counts per category for the Charts tab.
 
@@ -305,7 +308,7 @@ def get_counts_data(
         if end is None:
             return _empty_counts_response()
     if start is None:
-        start = end - datetime.timedelta(hours=24)
+        start = end - datetime.timedelta(hours=hours)
 
     db_paths = get_required_databases(start, end, base_dir)
     if not db_paths:
@@ -371,6 +374,127 @@ def _empty_heatmap_response() -> dict:
         "state_map": STATE_MAP,
         "state_colors": STATE_COLORS,
     }
+
+
+def get_opencap_users_data(
+    start: datetime.datetime | None = None,
+    end: datetime.datetime | None = None,
+    bucket_minutes: int = 15,
+    base_dir: str = ".",
+    hours: int = 24,
+    top_n: int = 6,
+) -> dict:
+    """Bucketed per-user open-cap GPU counts, anonymized by peak-usage rank.
+
+    Returns dict with 'buckets' (ISO time strings) and 'series' (anonymized
+    label -> list of max GPU count per bucket). User names are never returned.
+    """
+    if end is None:
+        end = get_latest_timestamp_from_most_recent_db(base_dir)
+        if end is None:
+            return {"buckets": [], "series": {}}
+    if start is None:
+        start = end - datetime.timedelta(hours=hours)
+
+    db_paths = get_required_databases(start, end, base_dir)
+    if not db_paths:
+        return {"buckets": [], "series": {}}
+
+    cols = ["Name", "AssignedGPUs", "State", "PrioritizedProjects", "Machine", "RemoteOwner", "timestamp"]
+    col_select = ", ".join(f'"{c}"' for c in cols)
+    buffered_start = start - datetime.timedelta(seconds=1)
+
+    frames = []
+    for db_path in db_paths:
+        try:
+            abs_path = str(Path(db_path).resolve())
+            query = f"""
+                SELECT {col_select} FROM gpu_state
+                WHERE timestamp BETWEEN '{buffered_start.strftime("%Y-%m-%d %H:%M:%S.%f")}'
+                  AND '{end.strftime("%Y-%m-%d %H:%M:%S.%f")}'
+                  AND AssignedGPUs IS NOT NULL AND AssignedGPUs != ''
+            """  # noqa: S608
+            df = pl.read_database_uri(query, f"sqlite:///{abs_path}")
+            if df.height > 0:
+                frames.append(df)
+        except Exception as e:
+            print(f"Warning: could not load {db_path}: {e}")
+
+    if not frames:
+        return {"buckets": [], "series": {}}
+
+    df = pl.concat(frames)
+    df = df.with_columns(pl.col("timestamp").cast(pl.Datetime("us")))
+    df = df.filter((pl.col("timestamp") >= start) & (pl.col("timestamp") <= end))
+
+    masked = _load_masked_hosts(base_dir)
+    if masked:
+        for host in masked:
+            df = df.filter(~pl.col("Machine").str.contains(host))
+
+    if df.height == 0:
+        return {"buckets": [], "series": {}}
+
+    # Dedup: one row per (timestamp, GPU), prefer claimed primary over backfill.
+    # Must dedup before filtering so a GPU isn't double-counted when it appears
+    # in both a primary and a backfill slot simultaneously.
+    is_backfill = pl.col("Name").str.to_lowercase().str.contains("backfill")
+    is_claimed = pl.col("State").str.to_lowercase() == "claimed"
+
+    df = df.with_columns(
+        pl.when(is_claimed & ~is_backfill)
+        .then(pl.lit(3))
+        .when(~is_claimed & ~is_backfill)
+        .then(pl.lit(2))
+        .when(is_claimed & is_backfill)
+        .then(pl.lit(1))
+        .otherwise(pl.lit(0))
+        .alias("_rank")
+    )
+    df = df.sort(["timestamp", "AssignedGPUs", "_rank"], descending=[False, False, True])
+    df = df.unique(subset=["timestamp", "AssignedGPUs"], keep="first")
+    df = df.drop("_rank")
+
+    # Filter to claimed open-cap slots with a known owner
+    has_priority = pl.col("PrioritizedProjects").is_not_null() & (pl.col("PrioritizedProjects") != "")
+    has_owner = pl.col("RemoteOwner").is_not_null() & (pl.col("RemoteOwner") != "")
+    df = df.filter(is_claimed & ~is_backfill & ~has_priority & has_owner)
+
+    if df.height == 0:
+        return {"buckets": [], "series": {}}
+
+    # Count distinct GPUs per (timestamp, owner) snapshot, then take max within bucket.
+    # Using max (not sum) matches the script: "peak snapshot within the window".
+    snap = (
+        df.group_by(["timestamp", "RemoteOwner"])
+        .agg(pl.col("AssignedGPUs").n_unique().alias("snap_count"))
+        .with_columns(pl.col("timestamp").dt.truncate(f"{bucket_minutes}m").alias("bucket"))
+    )
+    bucketed = snap.group_by(["bucket", "RemoteOwner"]).agg(pl.col("snap_count").max().alias("gpu_count"))
+
+    all_buckets = sorted(bucketed["bucket"].unique().to_list())
+    bucket_strs = [t.strftime("%Y-%m-%dT%H:%M") for t in all_buckets]
+    bucket_index = {b: i for i, b in enumerate(all_buckets)}
+    n_buckets = len(all_buckets)
+
+    # Rank users by peak GPU count; anonymize as "User 1", "User 2", …
+    top_users = (
+        bucketed.group_by("RemoteOwner")
+        .agg(pl.col("gpu_count").max().alias("peak"))
+        .sort("peak", descending=True)
+        .head(top_n)["RemoteOwner"]
+        .to_list()
+    )
+    user_to_label = {u: f"User {i + 1}" for i, u in enumerate(top_users)}
+    series: dict[str, list[int]] = {f"User {i + 1}": [0] * n_buckets for i in range(len(top_users))}
+
+    for row in bucketed.filter(pl.col("RemoteOwner").is_in(top_users)).iter_rows(named=True):
+        label = user_to_label[row["RemoteOwner"]]
+        bi = bucket_index.get(row["bucket"])
+        if bi is not None:
+            series[label][bi] = row["gpu_count"]
+
+    return {"buckets": bucket_strs, "series": series}
 
 
 def _empty_counts_response() -> dict:

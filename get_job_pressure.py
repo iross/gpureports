@@ -2,8 +2,15 @@
 """
 Periodic snapshot of idle GPU job pressure in the HTCondor pool.
 
-Queries all schedds for idle jobs requesting GPUs and records per-job
-resource requests in a monthly SQLite database.
+Queries all schedds for idle jobs requesting GPUs and records each idle
+period as a single row with first_seen / last_seen INTEGER timestamps (Unix
+seconds). Each poll extends last_seen for jobs still idle and opens a new
+row for newly-appeared jobs, so long-idle jobs that previously generated
+hundreds of identical rows now generate one.
+
+Schema change from the original: timestamp TEXT column is replaced by
+first_seen INTEGER and last_seen INTEGER; column order differs.
+Existing old-schema DBs are read by migrate_job_pressure.py.
 
 Crontab entry (on the production host):
     */5 * * * * /home/iaross/gpureports/.venv/bin/python \
@@ -17,7 +24,6 @@ import htcondor
 import typer
 
 COLL = htcondor.Collector("cm.chtc.wisc.edu")
-
 TARGET_APS = ["ap2001.chtc.wisc.edu", "ap2002.chtc.wisc.edu"]
 
 PROJ = [
@@ -33,10 +39,14 @@ PROJ = [
 
 CONSTRAINT = "RequestGPUs >= 1 && JobStatus == 1"
 
+# A job absent for longer than this is treated as a closed interval; the
+# next sighting opens a fresh row. Set to 3× the actual crontab interval.
+# Current crontab runs every 30 minutes → 3 × 1800 = 5400.
+_STALE_SECONDS = 5400
+
 _CREATE_TABLE = """
     CREATE TABLE IF NOT EXISTS job_pressure (
-        timestamp        TEXT,
-        GlobalJobId      TEXT,
+        GlobalJobId      TEXT NOT NULL,
         ScheddName       TEXT,
         Owner            TEXT,
         RequestGPUs      REAL,
@@ -44,10 +54,13 @@ _CREATE_TABLE = """
         RequestMemory    REAL,
         RequestGPUMemory REAL,
         QDate            INTEGER,
-        ChtcProjects     TEXT
+        ChtcProjects     TEXT,
+        first_seen       INTEGER NOT NULL,
+        last_seen        INTEGER NOT NULL
     )
 """
-_CREATE_INDEX = "CREATE INDEX IF NOT EXISTS idx_timestamp ON job_pressure (timestamp)"
+_CREATE_IDX_LAST = "CREATE INDEX IF NOT EXISTS idx_last_seen  ON job_pressure (last_seen)"
+_CREATE_IDX_FIRST = "CREATE INDEX IF NOT EXISTS idx_first_seen ON job_pressure (first_seen)"
 
 
 def _float_or_none(val: object) -> float | None:
@@ -60,18 +73,19 @@ def _float_or_none(val: object) -> float | None:
         return None
 
 
-def collect_idle_gpu_jobs(timestamp: str) -> list[tuple]:
-    """Query all schedds for idle GPU jobs; return rows ready for DB insertion."""
+def collect_idle_gpu_jobs() -> list[dict]:
+    """Query all schedds for idle GPU jobs; return list of job attribute dicts."""
     try:
         schedd_ads = COLL.locateAll(htcondor.DaemonTypes.Schedd)
     except Exception as e:
         print(f"Warning: could not query collector for schedds: {e}")
         return []
 
-    rows: list[tuple] = []
+    jobs: list[dict] = []
     for schedd_ad in schedd_ads:
         schedd_name = schedd_ad.get("Name", "")
-        if schedd_name not in TARGET_APS: continue
+        if schedd_name not in TARGET_APS:
+            continue
         try:
             schedd = htcondor.Schedd(schedd_ad)
             ads = schedd.query(constraint=CONSTRAINT, projection=PROJ)
@@ -80,40 +94,85 @@ def collect_idle_gpu_jobs(timestamp: str) -> list[tuple]:
             continue
 
         for ad in ads:
-            rows.append(
-                (
-                    timestamp,
-                    ad.get("GlobalJobId", ""),
-                    schedd_name,
-                    ad.get("Owner", ""),
-                    float(ad.get("RequestGPUs", 0) or 0),
-                    float(ad.get("RequestCPUs", 0) or 0),
-                    float(ad.get("RequestMemory", 0) or 0),
-                    _float_or_none(ad.get("RequestGPUMemory")),
-                    int(ad.get("QDate", 0) or 0),
-                    ad.get("ChtcProjects", ""),
-                )
+            jobs.append(
+                {
+                    "GlobalJobId": ad.get("GlobalJobId", ""),
+                    "ScheddName": schedd_name,
+                    "Owner": ad.get("Owner", ""),
+                    "RequestGPUs": float(ad.get("RequestGPUs", 0) or 0),
+                    "RequestCPUs": float(ad.get("RequestCPUs", 0) or 0),
+                    "RequestMemory": float(ad.get("RequestMemory", 0) or 0),
+                    "RequestGPUMemory": _float_or_none(ad.get("RequestGPUMemory")),
+                    "QDate": int(ad.get("QDate", 0) or 0),
+                    "ChtcProjects": ad.get("ChtcProjects", ""),
+                }
             )
 
-    return rows
+    return jobs
 
 
-def store_rows(rows: list[tuple], db_path: str) -> None:
+def update_intervals(jobs: list[dict], db_path: str, now_ts: int) -> None:
+    """Extend last_seen for continuing idle jobs; open new rows for new ones."""
     conn = sqlite3.connect(db_path)
     conn.execute(_CREATE_TABLE)
-    conn.execute(_CREATE_INDEX)
-    conn.executemany("INSERT INTO job_pressure VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+    conn.execute(_CREATE_IDX_LAST)
+    conn.execute(_CREATE_IDX_FIRST)
+
+    # Open intervals: rows whose last_seen is recent enough to still be active.
+    open_rows = conn.execute(
+        "SELECT GlobalJobId, rowid FROM job_pressure WHERE last_seen >= ?",
+        (now_ts - _STALE_SECONDS,),
+    ).fetchall()
+    # If a GlobalJobId appears in multiple open rows (shouldn't happen), keep
+    # the most recently updated one.
+    open_map: dict[str, int] = {}
+    for gid, rowid in open_rows:
+        open_map[gid] = rowid
+
+    current_ids = {j["GlobalJobId"] for j in jobs}
+
+    continuing = current_ids & open_map.keys()
+    if continuing:
+        conn.executemany(
+            "UPDATE job_pressure SET last_seen = ? WHERE rowid = ?",
+            [(now_ts, open_map[gid]) for gid in continuing],
+        )
+
+    new_jobs = [j for j in jobs if j["GlobalJobId"] not in open_map]
+    if new_jobs:
+        conn.executemany(
+            "INSERT INTO job_pressure VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            [
+                (
+                    j["GlobalJobId"],
+                    j["ScheddName"],
+                    j["Owner"],
+                    j["RequestGPUs"],
+                    j["RequestCPUs"],
+                    j["RequestMemory"],
+                    j["RequestGPUMemory"],
+                    j["QDate"],
+                    j["ChtcProjects"],
+                    now_ts,
+                    now_ts,
+                )
+                for j in new_jobs
+            ],
+        )
+
     conn.commit()
     conn.close()
 
 
 def main(db_path: str = typer.Argument("/home/iaross/gpureports")) -> None:
-    timestamp = datetime.datetime.now().isoformat()
-    month = datetime.datetime.now().strftime("%Y-%m")
-    rows = collect_idle_gpu_jobs(timestamp)
-    print(f"{timestamp}: {len(rows)} idle GPU jobs")
-    if rows:
-        store_rows(rows, f"{db_path}/job_pressure_{month}.db")
+    now = datetime.datetime.now()
+    now_ts = int(now.timestamp())
+    month = now.strftime("%Y-%m")
+
+    jobs = collect_idle_gpu_jobs()
+    print(f"{now.isoformat()}: {len(jobs)} idle GPU jobs")
+    if jobs:
+        update_intervals(jobs, f"{db_path}/job_pressure_{month}.db", now_ts)
 
 
 if __name__ == "__main__":

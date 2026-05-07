@@ -35,6 +35,7 @@ const REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 let heatmapData = null;
 let countsData = null;
 let jobsData = null;
+let usersData = null;
 let filteredMachines = [];
 let currentRows = [];
 let activeTab = 'heatmap';
@@ -53,6 +54,7 @@ function buildUrl(path, params) {
     if (params.start)          url.searchParams.set('start', params.start);
     if (params.end)            url.searchParams.set('end', params.end);
     if (params.bucket_minutes) url.searchParams.set('bucket_minutes', params.bucket_minutes);
+    if (params.hours)          url.searchParams.set('hours', params.hours);
     return url;
 }
 
@@ -62,30 +64,35 @@ async function fetchAll(params) {
     currentParams = { ...params };
 
     try {
-        const [hRes, cRes, jRes] = await Promise.all([
+        const [hRes, cRes, jRes, uRes] = await Promise.all([
             fetch(buildUrl('/api/heatmap', params)),
             fetch(buildUrl('/api/counts', params)),
             fetch('/api/jobs'),
+            fetch(buildUrl('/api/opencap_users', params)),
         ]);
         if (!hRes.ok) throw new Error(`heatmap HTTP ${hRes.status}`);
         if (!cRes.ok) throw new Error(`counts HTTP ${cRes.status}`);
         if (!jRes.ok) throw new Error(`jobs HTTP ${jRes.status}`);
+        if (!uRes.ok) throw new Error(`users HTTP ${uRes.status}`);
 
         heatmapData = await hRes.json();
         countsData  = await cRes.json();
         jobsData    = await jRes.json();
+        usersData   = await uRes.json();
 
         applyFilter();
         render();
         updateStatus();
-        renderCharts();
-        renderJobs();
     } catch (err) {
         console.error('Fetch error:', err);
         document.getElementById('statusText').textContent = 'Error loading data';
+        return;
     } finally {
         loading.classList.add('hidden');
     }
+    renderCharts();
+    renderUsersChart();
+    renderJobs();
 }
 
 // --- Status bar ---
@@ -365,6 +372,72 @@ function renderCharts() {
     }
 }
 
+// --- Users tab ---
+
+const USER_PALETTE = [
+    { r: 231, g: 76,  b: 60  },
+    { r: 52,  g: 152, b: 219 },
+    { r: 46,  g: 204, b: 113 },
+    { r: 230, g: 126, b: 34  },
+    { r: 155, g: 89,  b: 182 },
+    { r: 26,  g: 188, b: 156 },
+];
+
+function renderUsersChart() {
+    if (!usersData || !usersData.buckets.length) return;
+
+    const labels  = usersData.buckets.map(b => b.replace('T', ' '));
+    const userKeys = Object.keys(usersData.series);
+
+    const datasets = userKeys.map((label, i) => {
+        const { r, g, b } = USER_PALETTE[i % USER_PALETTE.length];
+        return {
+            label,
+            data: usersData.series[label],
+            borderColor:     `rgba(${r},${g},${b},1)`,
+            backgroundColor: `rgba(${r},${g},${b},0.15)`,
+            borderWidth: 1.5,
+            tension: 0.1,
+            pointRadius: 0,
+            fill: false,
+        };
+    });
+
+    if (chartInstances['users']) chartInstances['users'].destroy();
+
+    const ctx = document.getElementById('chart-users').getContext('2d');
+    chartInstances['users'] = new Chart(ctx, {
+        type: 'line',
+        data: { labels, datasets },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: false,
+            scales: {
+                x: {
+                    ticks: { color: '#888', maxTicksLimit: 12, maxRotation: 0 },
+                    grid:  { color: '#2a2a4a' },
+                },
+                y: {
+                    min: 0,
+                    ticks: { color: '#888' },
+                    grid:  { color: '#2a2a4a' },
+                    title: { display: true, text: 'GPUs on open-cap slots', color: '#888' },
+                },
+            },
+            plugins: {
+                legend: { labels: { color: '#ccc', usePointStyle: true } },
+                title: {
+                    display: true,
+                    text: 'Open-capacity GPU usage per user (anonymized, top 6 by peak)',
+                    color: '#e0e0e0',
+                    font: { size: 13 },
+                },
+            },
+        },
+    });
+}
+
 // --- Jobs tab ---
 
 function renderJobs() {
@@ -416,7 +489,8 @@ function switchTab(tab) {
     document.getElementById('legend').classList.toggle('hidden', tab !== 'heatmap');
     document.getElementById('heatmapControls').classList.toggle('hidden', tab !== 'heatmap');
     if (tab === 'charts') renderCharts();
-    if (tab === 'jobs') renderJobs();
+    if (tab === 'users')  renderUsersChart();
+    if (tab === 'jobs')   renderJobs();
 }
 
 // --- Auto-refresh ---
@@ -428,11 +502,7 @@ function scheduleRefresh() {
     nextRefreshAt = Date.now() + REFRESH_INTERVAL_MS;
 
     refreshTimer = setInterval(async () => {
-        // Force re-discovery of latest data on auto-refresh
-        const savedHeatmap = heatmapData;
-        heatmapData = null;
         await loadPresetRange(currentRange.type === 'preset' ? currentRange.hours : 24, false);
-        if (!heatmapData) heatmapData = savedHeatmap;
         nextRefreshAt = Date.now() + REFRESH_INTERVAL_MS;
     }, REFRESH_INTERVAL_MS);
 
@@ -464,27 +534,9 @@ function setActiveRangeButton(id) {
 async function loadPresetRange(hours, resetSchedule = true) {
     currentRange = { type: 'preset', hours };
     const bucket = bucketForRange(hours);
-
-    // Use cached end time if available, otherwise do a discovery fetch first
-    let endStr = null;
-    if (heatmapData && heatmapData.time_buckets.length > 0) {
-        endStr = heatmapData.time_buckets[heatmapData.time_buckets.length - 1];
-    }
-
-    if (!endStr) {
-        await fetchAll({ bucket_minutes: bucket });
-        if (heatmapData && heatmapData.time_buckets.length > 0) {
-            endStr = heatmapData.time_buckets[heatmapData.time_buckets.length - 1];
-        } else {
-            return;
-        }
-    }
-
-    const endDate   = new Date(endStr);
-    const startDate = new Date(endDate.getTime() - hours * 3600 * 1000);
-    const fmt = d => d.toISOString().slice(0, 16);
-    await fetchAll({ start: fmt(startDate), end: fmt(endDate), bucket_minutes: bucket });
-
+    // Pass hours to the server so it computes the correct range from the
+    // latest DB timestamp — no discovery fetch needed.
+    await fetchAll({ hours, bucket_minutes: bucket });
     if (resetSchedule) scheduleRefresh();
 }
 

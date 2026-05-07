@@ -9,7 +9,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from dashboard.data import get_counts_data, get_heatmap_data, get_open_capacity_jobs_data
+from dashboard.data import get_counts_data, get_heatmap_data, get_open_capacity_jobs_data, get_opencap_users_data
 
 BASE_DIR = str(Path(__file__).resolve().parent.parent)
 DASHBOARD_DIR = Path(__file__).resolve().parent
@@ -25,8 +25,8 @@ _cache: dict[str, tuple[float, dict]] = {}
 CACHE_TTL = 300  # 5 minutes
 
 
-def _cache_key(prefix: str, start: str | None, end: str | None, bucket: int) -> str:
-    raw = f"{prefix}|{start}|{end}|{bucket}"
+def _cache_key(prefix: str, start: str | None, end: str | None, bucket: int, hours: int = 24) -> str:
+    raw = f"{prefix}|{start}|{end}|{bucket}|{hours if start is None else ''}"
     return hashlib.md5(raw.encode()).hexdigest()
 
 
@@ -48,8 +48,9 @@ async def heatmap(
     start: str | None = Query(None, description="ISO datetime start, e.g. 2026-01-15T00:00"),
     end: str | None = Query(None, description="ISO datetime end, e.g. 2026-01-16T00:00"),
     bucket_minutes: int = Query(15, description="Time bucket size in minutes"),
+    hours: int = Query(24, description="Hours of history when start is omitted"),
 ):
-    key = _cache_key("heatmap", start, end, bucket_minutes)
+    key = _cache_key("heatmap", start, end, bucket_minutes, hours)
     now = datetime.datetime.now().timestamp()
     if key in _cache:
         cached_time, cached_data = _cache[key]
@@ -57,7 +58,7 @@ async def heatmap(
             return JSONResponse(content=cached_data)
 
     start_dt, end_dt, bucket_minutes = _parse_params(start, end, bucket_minutes)
-    data = get_heatmap_data(start=start_dt, end=end_dt, bucket_minutes=bucket_minutes, base_dir=BASE_DIR)
+    data = get_heatmap_data(start=start_dt, end=end_dt, bucket_minutes=bucket_minutes, base_dir=BASE_DIR, hours=hours)
     _cache[key] = (now, data)
     return JSONResponse(content=data)
 
@@ -81,8 +82,9 @@ async def counts(
     start: str | None = Query(None, description="ISO datetime start, e.g. 2026-01-15T00:00"),
     end: str | None = Query(None, description="ISO datetime end, e.g. 2026-01-16T00:00"),
     bucket_minutes: int = Query(15, description="Time bucket size in minutes"),
+    hours: int = Query(24, description="Hours of history when start is omitted"),
 ):
-    key = _cache_key("counts", start, end, bucket_minutes)
+    key = _cache_key("counts", start, end, bucket_minutes, hours)
     now = datetime.datetime.now().timestamp()
     if key in _cache:
         cached_time, cached_data = _cache[key]
@@ -90,6 +92,28 @@ async def counts(
             return JSONResponse(content=cached_data)
 
     start_dt, end_dt, bucket_minutes = _parse_params(start, end, bucket_minutes)
-    data = get_counts_data(start=start_dt, end=end_dt, bucket_minutes=bucket_minutes, base_dir=BASE_DIR)
+    data = get_counts_data(start=start_dt, end=end_dt, bucket_minutes=bucket_minutes, base_dir=BASE_DIR, hours=hours)
+    _cache[key] = (now, data)
+    return JSONResponse(content=data)
+
+
+@app.get("/api/opencap_users")
+async def opencap_users(
+    start: str | None = Query(None, description="ISO datetime start, e.g. 2026-01-15T00:00"),
+    end: str | None = Query(None, description="ISO datetime end, e.g. 2026-01-16T00:00"),
+    bucket_minutes: int = Query(15, description="Time bucket size in minutes"),
+    hours: int = Query(24, description="Hours of history when start is omitted"),
+):
+    key = _cache_key("opencap_users", start, end, bucket_minutes, hours)
+    now = datetime.datetime.now().timestamp()
+    if key in _cache:
+        cached_time, cached_data = _cache[key]
+        if now - cached_time < CACHE_TTL:
+            return JSONResponse(content=cached_data)
+
+    start_dt, end_dt, bucket_minutes = _parse_params(start, end, bucket_minutes)
+    data = get_opencap_users_data(
+        start=start_dt, end=end_dt, bucket_minutes=bucket_minutes, base_dir=BASE_DIR, hours=hours
+    )
     _cache[key] = (now, data)
     return JSONResponse(content=data)
