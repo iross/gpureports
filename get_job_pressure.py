@@ -63,7 +63,23 @@ _CREATE_IDX_LAST = "CREATE INDEX IF NOT EXISTS idx_last_seen  ON job_pressure (l
 _CREATE_IDX_FIRST = "CREATE INDEX IF NOT EXISTS idx_first_seen ON job_pressure (first_seen)"
 
 
+def _eval_classad(val: object) -> object:
+    """Evaluate a ClassAd ExprTree to a Python value if possible.
+
+    In k8s (no local HTCondor config) schedd.query() returns unevaluated
+    ExprTree objects; on baremetal the local config provides context so values
+    come back as native Python types already.
+    """
+    if hasattr(val, "eval"):
+        try:
+            return val.eval()
+        except Exception:
+            pass
+    return val
+
+
 def _float_or_none(val: object) -> float | None:
+    val = _eval_classad(val)
     if val is None:
         return None
     try:
@@ -71,6 +87,26 @@ def _float_or_none(val: object) -> float | None:
         return f if f > 0 else None
     except (TypeError, ValueError):
         return None
+
+
+def _safe_float(val: object, default: float = 0.0) -> float:
+    val = _eval_classad(val)
+    if val is None:
+        return default
+    try:
+        return float(val)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_int(val: object, default: int = 0) -> int:
+    val = _eval_classad(val)
+    if val is None:
+        return default
+    try:
+        return int(val)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
 
 
 def collect_idle_gpu_jobs() -> list[dict]:
@@ -99,11 +135,11 @@ def collect_idle_gpu_jobs() -> list[dict]:
                     "GlobalJobId": ad.get("GlobalJobId", ""),
                     "ScheddName": schedd_name,
                     "Owner": ad.get("Owner", ""),
-                    "RequestGPUs": float(ad.get("RequestGPUs", 0) or 0),
-                    "RequestCPUs": float(ad.get("RequestCPUs", 0) or 0),
-                    "RequestMemory": float(ad.get("RequestMemory", 0) or 0),
+                    "RequestGPUs": _safe_float(ad.get("RequestGPUs")),
+                    "RequestCPUs": _safe_float(ad.get("RequestCPUs")),
+                    "RequestMemory": _safe_float(ad.get("RequestMemory")),
                     "RequestGPUMemory": _float_or_none(ad.get("RequestGPUMemory")),
-                    "QDate": int(ad.get("QDate", 0) or 0),
+                    "QDate": _safe_int(ad.get("QDate")),
                     "ChtcProjects": ad.get("ChtcProjects", ""),
                 }
             )

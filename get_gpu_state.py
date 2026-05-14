@@ -7,6 +7,42 @@ import pandas as pd
 import typer
 from sqlalchemy import create_engine
 
+
+def _eval_classad(val: object) -> object:
+    """Evaluate a ClassAd ExprTree to a Python value if possible.
+
+    In k8s (no local HTCondor config) schedd.query() returns unevaluated
+    ExprTree objects; on baremetal the local config provides context so values
+    come back as native Python types already.
+    """
+    if hasattr(val, "eval"):
+        try:
+            return val.eval()
+        except Exception:
+            pass
+    return val
+
+
+def _safe_float(val: object, default: float = 0.0) -> float:
+    val = _eval_classad(val)
+    if val is None:
+        return default
+    try:
+        return float(val)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_int(val: object, default: int = 0) -> int:
+    val = _eval_classad(val)
+    if val is None:
+        return default
+    try:
+        return int(val)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+
+
 coll = htcondor.Collector("cm.chtc.wisc.edu")
 
 
@@ -134,8 +170,8 @@ def collect_job_info(df: pd.DataFrame, db_path: str) -> None:
                     ad.get("Cmd", ""),
                     ad.get("Arguments", ""),
                     ad.get("Owner", ""),
-                    float(ad.get("RequestGPUs", 0) or 0),
-                    int(ad.get("QDate", 0) or 0),
+                    _safe_float(ad.get("RequestGPUs")),
+                    _safe_int(ad.get("QDate")),
                     now_str,
                     ad.get("InitialWaitDuration", ""),
                 )
