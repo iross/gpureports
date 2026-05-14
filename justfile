@@ -11,4 +11,6 @@ week:
 dashboard:
     uv run uvicorn dashboard.server:app --reload --port 8051
 last-hour:
-    uv run usage_stats_polars.py --exclude-hosts-yaml masked_hosts.yaml --hours-back 1 --group-by-device 
+    uv run usage_stats_polars.py --exclude-hosts-yaml masked_hosts.yaml --hours-back 1 --group-by-device
+sync-dbs:
+    scp "deepdivesubmit2000.chtc.wisc.edu:/home/iaross/gpureports/*$(date +%Y-%m).db" .

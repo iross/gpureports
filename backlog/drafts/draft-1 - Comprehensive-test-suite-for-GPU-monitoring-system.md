@@ -1,5 +1,5 @@
 ---
-id: task-6
+id: DRAFT-1
 title: Comprehensive test suite for GPU monitoring system
 status: Draft
 assignee: []
@@ -10,24 +10,28 @@ dependencies: []
 
 ## Description
 
+<!-- SECTION:DESCRIPTION:BEGIN -->
 Create a comprehensive test suite for the GPU health monitoring system to ensure reliability, accuracy, and performance across all functionality. Currently, the system has grown organically with limited formal testing, making it difficult to verify correctness and catch regressions when making changes.
 
 This task will establish a robust testing framework covering data collection, calculations, HTML generation, email functionality, and the new host-level features. The test suite should provide confidence for future development and help identify edge cases or performance issues.
+<!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
-
-- [ ] Unit tests cover all core calculation functions with edge cases
-- [ ] Integration tests validate end-to-end report generation pipeline  
-- [ ] Email functionality is thoroughly tested across different scenarios
-- [ ] Host exclusion logic is validated for both statistical and operational use cases
-- [ ] HTML generation produces correct output with proper styling and positioning
-- [ ] Performance tests ensure scalability with large datasets
-- [ ] Regression tests protect against breaking changes to existing functionality
-- [ ] Test data fixtures provide consistent, reproducible test scenarios
-- [ ] Test documentation explains how to run tests and interpret results
+<!-- AC:BEGIN -->
+- [ ] #1 Unit tests cover all core calculation functions with edge cases
+- [ ] #2 Integration tests validate end-to-end report generation pipeline  
+- [ ] #3 Email functionality is thoroughly tested across different scenarios
+- [ ] #4 Host exclusion logic is validated for both statistical and operational use cases
+- [ ] #5 HTML generation produces correct output with proper styling and positioning
+- [ ] #6 Performance tests ensure scalability with large datasets
+- [ ] #7 Regression tests protect against breaking changes to existing functionality
+- [ ] #8 Test data fixtures provide consistent, reproducible test scenarios
+- [ ] #9 Test documentation explains how to run tests and interpret results
+<!-- AC:END -->
 
 ## Implementation Plan
 
+<!-- SECTION:PLAN:BEGIN -->
 ### 1. Test Infrastructure Setup
 - Set up pytest framework with appropriate configuration
 - Create test data fixtures for consistent testing scenarios
@@ -200,3 +204,4 @@ This task will establish a robust testing framework covering data collection, ca
 - [ ] Document test data creation process
 - [ ] Create troubleshooting guide for test failures
 - [ ] Document performance benchmarks and thresholds
+<!-- SECTION:PLAN:END -->
