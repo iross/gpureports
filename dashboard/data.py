@@ -12,7 +12,12 @@ from pathlib import Path
 import polars as pl
 import yaml
 
-from gpu_utils import get_latest_timestamp_from_most_recent_db, get_required_databases
+from gpu_utils_polars import (
+    get_latest_timestamp_from_most_recent_parquet as get_latest_timestamp_from_most_recent_db,
+)
+from gpu_utils_polars import (
+    get_required_parquet_files as get_required_databases,
+)
 
 # State codes used in the API response (compact integer encoding)
 STATE_CODES = {
@@ -67,34 +72,49 @@ def _load_masked_hosts(base_dir: str = ".") -> set[str]:
     return set()
 
 
-def _query_dbs(db_paths: list[str], start: datetime.datetime, end: datetime.datetime) -> pl.DataFrame:
-    """Load data from multiple SQLite DBs and combine into one Polars DataFrame."""
+def _query_dbs(file_specs: list[tuple[str, str]], start: datetime.datetime, end: datetime.datetime) -> pl.DataFrame:
+    """Load data from Parquet and/or SQLite files and combine into one Polars DataFrame.
+
+    file_specs is a list of (path, format) tuples where format is "parquet" or "sqlite".
+    """
+    if not file_specs:
+        return pl.DataFrame()
+
     frames = []
     buffered_start = start - datetime.timedelta(seconds=1)
     col_select = ", ".join(f'"{c}"' for c in COLUMNS)
 
-    for db_path in db_paths:
+    for path, fmt in file_specs:
         try:
-            abs_path = str(Path(db_path).resolve())
-            query = f"""
-                SELECT {col_select}
-                FROM gpu_state
-                WHERE timestamp BETWEEN '{buffered_start.strftime("%Y-%m-%d %H:%M:%S.%f")}'
-                  AND '{end.strftime("%Y-%m-%d %H:%M:%S.%f")}'
-            """
-            df = pl.read_database_uri(query, f"sqlite:///{abs_path}")
+            if fmt == "parquet":
+                df = (
+                    pl.scan_parquet(path)
+                    .filter((pl.col("timestamp") >= buffered_start) & (pl.col("timestamp") <= end))
+                    .select(COLUMNS)
+                    .collect()
+                )
+            else:
+                abs_path = str(Path(path).resolve())
+                query = (
+                    f"SELECT {col_select} FROM gpu_state "
+                    f"WHERE timestamp BETWEEN '{buffered_start.strftime('%Y-%m-%d %H:%M:%S.%f')}' "
+                    f"  AND '{end.strftime('%Y-%m-%d %H:%M:%S.%f')}'"
+                )
+                df = pl.read_database_uri(query, f"sqlite:///{abs_path}")
             if df.height > 0:
                 frames.append(df)
         except Exception as e:
-            print(f"Warning: Could not load {db_path}: {e}")
+            print(f"Warning: Could not load {path}: {e}")
 
     if not frames:
         return pl.DataFrame()
 
-    combined = pl.concat(frames)
-
-    # Parse timestamps and apply precise time filter
-    combined = combined.with_columns(pl.col("timestamp").cast(pl.Datetime("us")))
+    combined = pl.concat(frames, how="diagonal_relaxed")
+    # Parquet yields Datetime; SQLite TEXT yields Utf8 — normalise to Datetime.
+    if combined.schema["timestamp"] in (pl.Utf8, pl.String):
+        combined = combined.with_columns(pl.col("timestamp").str.to_datetime(strict=False))
+    elif combined.schema["timestamp"] != pl.Datetime("us"):
+        combined = combined.with_columns(pl.col("timestamp").cast(pl.Datetime("us")))
     combined = combined.filter((pl.col("timestamp") >= start) & (pl.col("timestamp") <= end))
     return combined
 
@@ -400,30 +420,43 @@ def get_opencap_users_data(
     if not db_paths:
         return {"buckets": [], "series": {}}
 
-    cols = ["Name", "AssignedGPUs", "State", "PrioritizedProjects", "Machine", "RemoteOwner", "timestamp"]
-    col_select = ", ".join(f'"{c}"' for c in cols)
+    opencap_cols = ["Name", "AssignedGPUs", "State", "PrioritizedProjects", "Machine", "RemoteOwner", "timestamp"]
+    col_select = ", ".join(f'"{c}"' for c in opencap_cols)
     buffered_start = start - datetime.timedelta(seconds=1)
 
     frames = []
-    for db_path in db_paths:
+    for path, fmt in db_paths:
         try:
-            abs_path = str(Path(db_path).resolve())
-            query = f"""
-                SELECT {col_select} FROM gpu_state
-                WHERE timestamp BETWEEN '{buffered_start.strftime("%Y-%m-%d %H:%M:%S.%f")}'
-                  AND '{end.strftime("%Y-%m-%d %H:%M:%S.%f")}'
-                  AND AssignedGPUs IS NOT NULL AND AssignedGPUs != ''
-            """  # noqa: S608
-            df = pl.read_database_uri(query, f"sqlite:///{abs_path}")
+            if fmt == "parquet":
+                df = (
+                    pl.scan_parquet(path)
+                    .filter(
+                        (pl.col("timestamp") >= buffered_start)
+                        & (pl.col("timestamp") <= end)
+                        & pl.col("AssignedGPUs").is_not_null()
+                        & (pl.col("AssignedGPUs") != "")
+                    )
+                    .select([c for c in opencap_cols if c != "RemoteOwner"] + ["RemoteOwner"])
+                    .collect()
+                )
+            else:
+                abs_path = str(Path(path).resolve())
+                query = (
+                    f"SELECT {col_select} FROM gpu_state "
+                    f"WHERE timestamp BETWEEN '{buffered_start.strftime('%Y-%m-%d %H:%M:%S.%f')}' "
+                    f"  AND '{end.strftime('%Y-%m-%d %H:%M:%S.%f')}' "
+                    f"  AND AssignedGPUs IS NOT NULL AND AssignedGPUs != ''"
+                )  # noqa: S608
+                df = pl.read_database_uri(query, f"sqlite:///{abs_path}")
             if df.height > 0:
                 frames.append(df)
         except Exception as e:
-            print(f"Warning: could not load {db_path}: {e}")
+            print(f"Warning: could not load {path}: {e}")
 
     if not frames:
         return {"buckets": [], "series": {}}
 
-    df = pl.concat(frames)
+    df = pl.concat(frames, how="diagonal_relaxed")
     df = df.with_columns(pl.col("timestamp").cast(pl.Datetime("us")))
     df = df.filter((pl.col("timestamp") >= start) & (pl.col("timestamp") <= end))
 
@@ -612,29 +645,35 @@ def get_open_capacity_jobs_data(
     if not db_paths:
         return {"jobs": [], "criteria": {}}
 
-    col_select = ", ".join(
-        f'"{c}"'
-        for c in ["Name", "AssignedGPUs", "State", "PrioritizedProjects", "Machine", "GlobalJobId", "timestamp"]
-    )
+    jobs_cols = ["Name", "AssignedGPUs", "State", "PrioritizedProjects", "Machine", "GlobalJobId", "timestamp"]
+    col_select = ", ".join(f'"{c}"' for c in jobs_cols)
     frames = []
-    for db_path in db_paths:
+    for path, fmt in db_paths:
         try:
-            abs_path = str(Path(db_path).resolve())
-            query = f"""
-                SELECT {col_select} FROM gpu_state
-                WHERE timestamp BETWEEN '{start.strftime("%Y-%m-%d %H:%M:%S.%f")}'
-                  AND '{end.strftime("%Y-%m-%d %H:%M:%S.%f")}'
-            """  # noqa: S608
-            df = pl.read_database_uri(query, f"sqlite:///{abs_path}")
+            if fmt == "parquet":
+                df = (
+                    pl.scan_parquet(path)
+                    .filter((pl.col("timestamp") >= start) & (pl.col("timestamp") <= end))
+                    .select(jobs_cols)
+                    .collect()
+                )
+            else:
+                abs_path = str(Path(path).resolve())
+                query = (
+                    f"SELECT {col_select} FROM gpu_state "
+                    f"WHERE timestamp BETWEEN '{start.strftime('%Y-%m-%d %H:%M:%S.%f')}' "
+                    f"  AND '{end.strftime('%Y-%m-%d %H:%M:%S.%f')}'"
+                )  # noqa: S608
+                df = pl.read_database_uri(query, f"sqlite:///{abs_path}")
             if df.height > 0:
                 frames.append(df)
         except Exception as e:
-            print(f"Warning: could not load {db_path}: {e}")
+            print(f"Warning: could not load {path}: {e}")
 
     if not frames:
         return {"jobs": [], "criteria": {}}
 
-    df = pl.concat(frames)
+    df = pl.concat(frames, how="diagonal_relaxed")
 
     # Filter to claimed, non-backfill, non-prioritized = open capacity
     is_claimed = pl.col("State").str.to_lowercase() == "claimed"

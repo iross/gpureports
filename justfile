@@ -1,7 +1,7 @@
 last-day:
-    uv run usage_stats_polars.py --exclude-hosts-yaml masked_hosts.yaml --hours-back 24 --group-by-device
+    uv run report.py --exclude-hosts-yaml masked_hosts.yaml --hours-back 24 --group-by-device
 last-day-html:
-    uv run usage_stats_polars.py --exclude-hosts-yaml masked_hosts.yaml --hours-back 24 --group-by-device --output-format html --output-file last-day_polars.html
+    uv run report.py --exclude-hosts-yaml masked_hosts.yaml --hours-back 24 --group-by-device --output-format html --output-file last-day.html
 weekly-overview:
     uv run weekly_gpu_hours_analysis.py --plot --databases  gpu_state_*.db
 weekly-allocation:
@@ -11,6 +11,6 @@ week:
 dashboard:
     uv run uvicorn dashboard.server:app --reload --port 8051
 last-hour:
-    uv run usage_stats_polars.py --exclude-hosts-yaml masked_hosts.yaml --hours-back 1 --group-by-device
+    uv run report.py --exclude-hosts-yaml masked_hosts.yaml --hours-back 1 --group-by-device
 sync-dbs:
     scp "deepdivesubmit2000.chtc.wisc.edu:/home/iaross/gpureports/*$(date +%Y-%m).db" .

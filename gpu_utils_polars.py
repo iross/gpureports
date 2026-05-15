@@ -412,6 +412,55 @@ def get_display_name(class_name: str) -> str:
     return display_names.get(class_name, class_name)
 
 
+def get_required_parquet_files(
+    start_time: datetime.datetime, end_time: datetime.datetime, base_dir: str = "."
+) -> list[tuple[str, str]]:
+    """Return (path, format) pairs for each month in [start_time, end_time].
+
+    Prefers Parquet over SQLite for each month; skips months with neither.
+    Format is "parquet" or "sqlite".
+    """
+    files = []
+    current = start_time.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    end_month = end_time.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    while current <= end_month:
+        stem = f"gpu_state_{current.strftime('%Y-%m')}"
+        parquet = Path(base_dir) / f"{stem}.parquet"
+        sqlite = Path(base_dir) / f"{stem}.db"
+        if parquet.exists():
+            files.append((str(parquet), "parquet"))
+        elif sqlite.exists():
+            files.append((str(sqlite), "sqlite"))
+        if current.month == 12:
+            current = current.replace(year=current.year + 1, month=1)
+        else:
+            current = current.replace(month=current.month + 1)
+    return files
+
+
+def get_most_recent_parquet(base_dir: str = ".") -> str | None:
+    """Return path to the most recent gpu_state Parquet file, or None."""
+    import glob
+
+    files = sorted(glob.glob(str(Path(base_dir) / "gpu_state_*.parquet")))
+    return files[-1] if files else None
+
+
+def get_latest_timestamp_from_most_recent_parquet(base_dir: str = ".") -> datetime.datetime | None:
+    """Return the latest timestamp across the most recent Parquet (or SQLite fallback)."""
+    parquet = get_most_recent_parquet(base_dir)
+    if parquet:
+        try:
+            ts = pl.scan_parquet(parquet).select(pl.col("timestamp").max()).collect()["timestamp"][0]
+            if ts is not None:
+                return ts.replace(tzinfo=None) if hasattr(ts, "tzinfo") else ts
+        except Exception:
+            pass
+
+    # Fall back to SQLite
+    return get_latest_timestamp_from_most_recent_db(base_dir)
+
+
 def get_required_databases(start_time: datetime.datetime, end_time: datetime.datetime, base_dir: str = ".") -> list:
     """
     Get list of database files needed to cover the specified time range.
