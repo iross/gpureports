@@ -10,11 +10,8 @@ import datetime
 import os
 from pathlib import Path
 
-import htcondor
 import polars as pl
 import typer
-
-coll = htcondor.Collector("cm.chtc.wisc.edu")
 
 
 def _current_month() -> str:
@@ -23,6 +20,9 @@ def _current_month() -> str:
 
 def get_gpus() -> pl.DataFrame:
     """Query HTCondor collector for GPU information and return as a Polars DataFrame."""
+    import htcondor
+
+    coll = htcondor.Collector("cm.chtc.wisc.edu")
     PROJ = [
         "Name",
         "AssignedGPUs",

@@ -10,7 +10,9 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Install dependencies first (cache-friendly layer)
-RUN uv venv
+ENV VIRTUAL_ENV=/app/.venv
+ENV PATH="/app/.venv/bin:$PATH"
+RUN uv venv $VIRTUAL_ENV
 COPY pyproject.toml uv.lock ./
 RUN uv sync
 RUN uv pip install htcondor
