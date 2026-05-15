@@ -20,7 +20,7 @@ Crontab entry (on the production host):
 import datetime
 import sqlite3
 
-import htcondor
+import htcondor2 as htcondor
 import typer
 
 COLL = htcondor.Collector("cm.chtc.wisc.edu")

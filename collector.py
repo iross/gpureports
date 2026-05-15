@@ -20,7 +20,7 @@ def _current_month() -> str:
 
 def get_gpus() -> pl.DataFrame:
     """Query HTCondor collector for GPU information and return as a Polars DataFrame."""
-    import htcondor
+    import htcondor2 as htcondor
 
     coll = htcondor.Collector("cm.chtc.wisc.edu")
     PROJ = [
