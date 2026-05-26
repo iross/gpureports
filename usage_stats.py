@@ -8,7 +8,6 @@ and stats_reporting for the implementation details.
 """
 
 import datetime
-import os
 
 import pandas as pd
 import typer
@@ -37,7 +36,7 @@ from stats_reporting import (
 
 
 def run_analysis(
-    db_path: str,
+    data_dir: str,
     hours_back: int = 24,
     host: str = "",
     analysis_type: str = "allocation",
@@ -70,7 +69,7 @@ def run_analysis(
     gpu_utils.FILTERED_HOSTS_INFO = []  # Reset tracking
 
     # Get filtered data
-    df = get_time_filtered_data(db_path, hours_back, end_time)
+    df = get_time_filtered_data(data_dir, hours_back, end_time)
 
     if len(df) == 0:
         return {"error": "No data found in the specified time range."}
@@ -109,7 +108,7 @@ def run_analysis(
         result["timeseries_data"] = calculate_time_series_usage(df, bucket_minutes, host)
 
     elif analysis_type == "monthly":
-        result["monthly_stats"] = calculate_monthly_summary(db_path, end_time)
+        result["monthly_stats"] = calculate_monthly_summary(data_dir, end_time)
 
     # Add runtime information to metadata
     analysis_end_time = time.time()
@@ -125,7 +124,7 @@ def run_analysis(
 def main(
     hours_back: int = typer.Option(24, help="Number of hours to analyze (default: 24)"),
     host: str = typer.Option("", help="Host name to filter results"),
-    db_path: str | None = typer.Option(None, help="Path to SQLite database (defaults to current month)"),
+    data_dir: str = typer.Option(".", help="Directory containing gpu_state_*.parquet files"),
     analysis_type: str = typer.Option(
         "allocation", help="Type of analysis: allocation (% GPUs claimed), timeseries, gpu_model_snapshot, or monthly"
     ),
@@ -169,28 +168,6 @@ def main(
     if exclude_hosts and exclude_hosts_yaml == "masked_hosts.yaml":
         exclude_hosts_yaml = None
 
-    # Auto-detect database path if not provided
-    if db_path is None:
-        current_date = datetime.datetime.now()
-        current_month_db = f"gpu_state_{current_date.strftime('%Y-%m')}.db"
-
-        # Check if current month database exists
-        if os.path.exists(current_month_db):
-            db_path = current_month_db
-            print(f"Using current month database: {db_path}")
-        else:
-            # Fall back to most recent database file
-            import glob
-
-            db_files = glob.glob("gpu_state_*.db")
-            if db_files:
-                # Sort by filename (which includes date) to get most recent
-                db_path = sorted(db_files)[-1]
-                print(f"Current month database not found, using most recent: {db_path}")
-            else:
-                print("Error: No database files found. Please specify --db-path.")
-                return
-
     # Parse end_time if provided
     parsed_end_time = None
     if end_time:
@@ -215,11 +192,11 @@ def main(
 
         if gpu_model:
             # Analyze specific GPU model
-            analysis = analyze_gpu_model_at_time(db_path, gpu_model, parsed_snapshot_time, window_minutes)
+            analysis = analyze_gpu_model_at_time(data_dir, gpu_model, parsed_snapshot_time, window_minutes)
             print_gpu_model_analysis(analysis)
         else:
             # Show all available GPU models at that time
-            available_models = get_gpu_models_at_time(db_path, parsed_snapshot_time, window_minutes)
+            available_models = get_gpu_models_at_time(data_dir, parsed_snapshot_time, window_minutes)
             if not available_models:
                 print(f"No GPU models found around {parsed_snapshot_time.strftime('%Y-%m-%d %H:%M:%S')}")
                 return
@@ -236,7 +213,7 @@ def main(
     # Run the standard analysis
     try:
         results = run_analysis(
-            db_path=db_path,
+            data_dir=data_dir,
             hours_back=hours_back,
             host=host,
             analysis_type=analysis_type,

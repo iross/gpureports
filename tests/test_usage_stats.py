@@ -8,7 +8,6 @@ calculations, and data processing functions.
 
 import datetime
 import os
-import sqlite3
 
 # Import the functions we want to test
 import sys
@@ -162,18 +161,17 @@ def sample_gpu_data():
 
 @pytest.fixture
 def temp_db_with_data(sample_gpu_data):
-    """Create a temporary database with sample data."""
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-        db_path = f.name
+    """Create a temporary directory with a parquet file containing sample data."""
+    import shutil
 
-    conn = sqlite3.connect(db_path)
-    sample_gpu_data.to_sql("gpu_state", conn, index=False, if_exists="replace")
-    conn.close()
+    data_dir = tempfile.mkdtemp()
+    month = sample_gpu_data["timestamp"].dt.strftime("%Y-%m").iloc[0]
+    parquet_path = os.path.join(data_dir, f"gpu_state_{month}.parquet")
+    sample_gpu_data.to_parquet(parquet_path, index=False)
 
-    yield db_path
+    yield data_dir
 
-    # Cleanup
-    os.unlink(db_path)
+    shutil.rmtree(data_dir)
 
 
 class TestFilterFunctions:
@@ -368,7 +366,6 @@ class TestDatabaseFunctions:
 
     def test_get_time_filtered_data(self, temp_db_with_data):
         """Test time-filtered data retrieval."""
-        # Get data from the last 1 hour (should get all data)
         df = get_time_filtered_data(temp_db_with_data, hours_back=1)
 
         assert len(df) == 9  # All rows from sample data (updated after adding GPU-004 to interval 2)
@@ -384,26 +381,16 @@ class TestDatabaseFunctions:
         assert len(df) == 6
         assert all(df["timestamp"] <= pd.Timestamp(end_time))
 
-    def test_empty_database(self):
-        """Test handling of empty database."""
-        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-            db_path = f.name
+    def test_empty_directory(self):
+        """Test handling of directory with no parquet files."""
+        import shutil
 
+        data_dir = tempfile.mkdtemp()
         try:
-            conn = sqlite3.connect(db_path)
-            # Create empty table
-            conn.execute("""CREATE TABLE gpu_state (
-                Name TEXT, AssignedGPUs TEXT, State TEXT,
-                GPUs_DeviceName TEXT, PrioritizedProjects TEXT,
-                GPUsAverageUsage REAL, timestamp TEXT
-            )""")
-            conn.close()
-
-            df = get_time_filtered_data(db_path, hours_back=1)
+            df = get_time_filtered_data(data_dir, hours_back=1)
             assert len(df) == 0
-
         finally:
-            os.unlink(db_path)
+            shutil.rmtree(data_dir)
 
 
 class TestIntegrationFunctions:
@@ -411,7 +398,7 @@ class TestIntegrationFunctions:
 
     def test_run_analysis_allocation(self, temp_db_with_data):
         """Test the run_analysis function with allocation analysis."""
-        results = run_analysis(db_path=temp_db_with_data, hours_back=1, analysis_type="allocation")
+        results = run_analysis(data_dir=temp_db_with_data, hours_back=1, analysis_type="allocation")
 
         assert "error" not in results
         assert "metadata" in results
@@ -434,7 +421,7 @@ class TestIntegrationFunctions:
     def test_run_analysis_device_grouping(self, temp_db_with_data):
         """Test the run_analysis function with device grouping."""
         results = run_analysis(
-            db_path=temp_db_with_data, hours_back=1, analysis_type="allocation", group_by_device=True, all_devices=True
+            data_dir=temp_db_with_data, hours_back=1, analysis_type="allocation", group_by_device=True, all_devices=True
         )
 
         assert "error" not in results
@@ -452,7 +439,7 @@ class TestIntegrationFunctions:
 
     def test_run_analysis_timeseries(self, temp_db_with_data):
         """Test the run_analysis function with timeseries analysis."""
-        results = run_analysis(db_path=temp_db_with_data, hours_back=1, analysis_type="timeseries", bucket_minutes=15)
+        results = run_analysis(data_dir=temp_db_with_data, hours_back=1, analysis_type="timeseries", bucket_minutes=15)
 
         assert "error" not in results
         assert "timeseries_data" in results
@@ -462,25 +449,16 @@ class TestIntegrationFunctions:
         assert "priority_usage_percent" in ts_data.columns
 
     def test_run_analysis_no_data(self):
-        """Test run_analysis with empty database."""
-        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-            db_path = f.name
+        """Test run_analysis with empty directory."""
+        import shutil
 
+        data_dir = tempfile.mkdtemp()
         try:
-            conn = sqlite3.connect(db_path)
-            conn.execute("""CREATE TABLE gpu_state (
-                Name TEXT, AssignedGPUs TEXT, State TEXT,
-                GPUs_DeviceName TEXT, PrioritizedProjects TEXT,
-                GPUsAverageUsage REAL, timestamp TEXT
-            )""")
-            conn.close()
-
-            results = run_analysis(db_path, hours_back=1)
+            results = run_analysis(data_dir, hours_back=1)
             assert "error" in results
             assert "No data found" in results["error"]
-
         finally:
-            os.unlink(db_path)
+            shutil.rmtree(data_dir)
 
 
 class TestEdgeCases:

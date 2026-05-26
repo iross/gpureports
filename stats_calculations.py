@@ -19,10 +19,10 @@ from gpu_utils import (
     UTILIZATION_TYPES,
     filter_df,
     filter_df_enhanced,
-    get_latest_timestamp_from_most_recent_db,
 )
 from stats_data import (
     get_cached_filtered_dataframe,
+    get_latest_timestamp,
     get_preprocessed_dataframe,
     get_time_filtered_data,
 )
@@ -1114,27 +1114,21 @@ def calculate_machines_with_zero_active_gpus(
     }
 
 
-def calculate_monthly_summary(db_path: str, end_time: datetime.datetime | None = None) -> dict:
+def calculate_monthly_summary(data_dir: str, end_time: datetime.datetime | None = None) -> dict:
     """
     Calculate complete monthly GPU usage summary for the previous month.
 
     Args:
-        db_path: Path to SQLite database (used to determine base directory)
+        data_dir: Directory containing gpu_state Parquet files
         end_time: Optional end time (defaults to latest data)
 
     Returns:
         Dictionary containing monthly usage statistics
     """
     import calendar
-    from pathlib import Path
 
-    # Get base directory from the provided db_path
-    db_path_obj = Path(db_path)
-    base_dir = str(db_path_obj.parent) if db_path_obj.parent != Path(".") else "."
-
-    # If end_time is not provided, use the latest timestamp from the most recent database
     if end_time is None:
-        end_time = get_latest_timestamp_from_most_recent_db(base_dir)
+        end_time = get_latest_timestamp(data_dir)
         if end_time is None:
             end_time = datetime.datetime.now()
 
@@ -1152,7 +1146,7 @@ def calculate_monthly_summary(db_path: str, end_time: datetime.datetime | None =
     print(f"Total hours in month: {total_hours}")
 
     # Get data for the entire previous month
-    df = get_time_filtered_data(db_path, total_hours, prev_month_end + datetime.timedelta(seconds=1))
+    df = get_time_filtered_data(data_dir, total_hours, prev_month_end + datetime.timedelta(seconds=1))
 
     if df.empty:
         return {
