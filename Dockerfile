@@ -10,13 +10,14 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Install dependencies first (cache-friendly layer)
-RUN uv venv
+ENV VIRTUAL_ENV=/app/.venv
+ENV PATH="/app/.venv/bin:$PATH"
+RUN uv venv $VIRTUAL_ENV
 COPY pyproject.toml uv.lock ./
 RUN uv sync
 RUN uv pip install htcondor
 
-# Copy only the files needed for get_gpu_state.py and emailer.sh
-COPY get_gpu_state.py get_job_pressure.py usage_stats.py gpu_utils.py device_name_mappings.py ./
-COPY emailer.sh methodology.md masked_hosts.yaml chtc_owned ./
+COPY collector.py get_job_pressure.py usage_stats.py gpu_utils.py gpu_utils_polars.py device_name_mappings.py ./
+COPY _emailer.sh stats_data.py stats_reporting.py stats_calculations.py emailer.sh methodology.md masked_hosts.yaml chtc_owned ./
 
-CMD ["uv", "run", "get_gpu_state.py", "./"]
+CMD ["uv", "run", "collector.py", "./"]

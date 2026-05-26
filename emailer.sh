@@ -21,35 +21,36 @@ TEST_RECIPIENT="iaross@wisc.edu"
 
 MODE="${1:-}"
 
-cd /home/iaross/gpureports
-source .venv/bin/activate
-
 case "$MODE" in
     daily)
-        python usage_stats.py \
+        uv run usage_stats.py \
             --exclude-hosts-yaml masked_hosts.yaml \
             --hours-back 24 \
             --group-by-device \
+            --data-dir /data \
             --email-to "$RECIPIENTS"
         ;;
     weekly)
-        python usage_stats.py \
+        uv run usage_stats.py \
             --exclude-hosts-yaml masked_hosts.yaml \
             --hours-back 168 \
             --group-by-device \
+            --data-dir /data \
             --email-to "$RECIPIENTS"
         ;;
     monthly)
-        python usage_stats.py \
+        uv run usage_stats.py \
             --exclude-hosts-yaml masked_hosts.yaml \
             --analysis-type monthly \
+            --data-dir /data \
             --email-to "$RECIPIENTS"
         ;;
     test)
-        python usage_stats.py \
+        uv run usage_stats.py \
             --exclude-hosts-yaml masked_hosts.yaml \
             --hours-back 24 \
             --group-by-device \
+            --data-dir /data \
             --email-to "$TEST_RECIPIENT"
         ;;
     *)

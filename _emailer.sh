@@ -1,10 +1,60 @@
 #!/bin/bash
+set -euo pipefail
 
-today=`date +%F`
+# emailer.sh — send GPU allocation reports via email
+#
+# Usage: bash emailer.sh <mode>
+#
+#   daily    24h allocation report → full recipient list (runs 06:00 daily)
+#   weekly   168h allocation report → full recipient list (runs 06:00 Mondays)
+#   monthly  monthly summary → full recipient list (runs 06:00 on the 1st)
+#   test     24h allocation report → iaross only (safe to run anytime)
+#
+# Crontab entries (on the production host):
+#   0 6 * * *    bash /home/iaross/gpureports/emailer.sh daily  &> /tmp/gpu_emailer.log
+#   0 6 * * 1    bash /home/iaross/gpureports/emailer.sh weekly &> /tmp/gpu_emailer_weekly.log
+#   0 6 1 * *    bash /home/iaross/gpureports/emailer.sh monthly &> /tmp/gpu_emailer_monthly.log
+#   41 12 * * *  bash /home/iaross/gpureports/emailer.sh test   &> /tmp/gpu_emailer.log
 
-cd /home/iaross/gpureports
-source .venv/bin/activate
-today=$(date +%Y-%m-%e)
+RECIPIENTS="iaross@wisc.edu"
+TEST_RECIPIENT="iaross@wisc.edu"
 
+MODE="${1:-}"
 
-python usage_stats.py --exclude-hosts-yaml masked_hosts.yaml --hours-back 24 --group-by-device --email-to "iaross@wisc.edu" --smtp-server "postfix-mail" --smtp-port 587
+case "$MODE" in
+    daily)
+        uv run usage_stats.py \
+            --exclude-hosts-yaml masked_hosts.yaml \
+            --hours-back 24 \
+            --group-by-device \
+            --data_dir=/data \
+            --email-to "$RECIPIENTS"
+        ;;
+    weekly)
+        uv run usage_stats.py \
+            --exclude-hosts-yaml masked_hosts.yaml \
+            --hours-back 168 \
+            --group-by-device \
+            --data_dir=/data \
+            --email-to "$RECIPIENTS"
+        ;;
+    monthly)
+        uv run usage_stats.py \
+            --exclude-hosts-yaml masked_hosts.yaml \
+            --analysis-type monthly \
+            --data_dir=/data \
+            --email-to "$RECIPIENTS"
+        ;;
+    test)
+        uv run usage_stats.py \
+            --exclude-hosts-yaml masked_hosts.yaml \
+            --hours-back 24 \
+            --group-by-device \
+            --data_dir=/data \
+            --email-to "$TEST_RECIPIENT"
+        ;;
+    *)
+        echo "Usage: bash emailer.sh <daily|weekly|monthly|test>" >&2
+        exit 1
+        ;;
+esac
