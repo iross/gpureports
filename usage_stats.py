@@ -21,13 +21,14 @@ from stats_calculations import (
     calculate_allocation_usage_by_memory,
     calculate_allocation_usage_enhanced,
     calculate_backfill_usage_by_user,
+    calculate_draining_stats,
     calculate_h200_user_breakdown,
     calculate_machines_with_zero_active_gpus,
     calculate_monthly_summary,
     calculate_time_series_usage,
     get_gpu_models_at_time,
 )
-from stats_data import get_time_filtered_data
+from stats_data import get_draining_data, get_time_filtered_data
 from stats_reporting import (
     generate_html_report,
     print_analysis_results,
@@ -110,6 +111,21 @@ def run_analysis(
 
     elif analysis_type == "monthly":
         result["monthly_stats"] = calculate_monthly_summary(db_path, end_time)
+
+    # Add draining data to all analysis types
+    try:
+        draining_df = get_draining_data(db_path, hours_back, end_time)
+        draining_stats = calculate_draining_stats(draining_df)
+        if analysis_type == "monthly" and "monthly_stats" in result and "error" not in result["monthly_stats"]:
+            result["monthly_stats"]["draining_stats"] = draining_stats
+        else:
+            result["draining_stats"] = draining_stats
+    except Exception as e:
+        print(f"Warning: Could not fetch draining data: {e}", file=__import__("sys").stderr)
+        if analysis_type == "monthly" and "monthly_stats" in result and "error" not in result["monthly_stats"]:
+            result["monthly_stats"]["draining_stats"] = {"has_draining": False}
+        else:
+            result["draining_stats"] = {"has_draining": False}
 
     # Add runtime information to metadata
     analysis_end_time = time.time()

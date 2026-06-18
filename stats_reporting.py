@@ -403,6 +403,8 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
             regular_results["memory_stats"] = monthly_stats["memory_stats"]
         if "h200_user_stats" in monthly_stats:
             regular_results["h200_user_stats"] = monthly_stats["h200_user_stats"]
+        if "draining_stats" in monthly_stats:
+            regular_results["draining_stats"] = monthly_stats["draining_stats"]
         if "raw_data" in monthly_stats:
             regular_results["raw_data"] = monthly_stats["raw_data"]
         if "host_filter" in monthly_stats:
@@ -1093,6 +1095,60 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
                     html_parts.append(f"<td style='text-align: right'>{stats['total']:.1f}</td>")
                     html_parts.append("</tr>")
             html_parts.append("</table>")
+
+    # Draining Status
+    draining_stats = results.get("draining_stats", {})
+    if draining_stats.get("has_draining", False):
+        html_parts.append("<h2 style='color: #d32f2f;'>GPU Draining Status</h2>")
+        html_parts.append("<table border='1' style='background-color: #ffebee;'>")
+        html_parts.append("<tr style='background-color: #ffcdd2;'><th>Metric</th><th>Value</th></tr>")
+
+        html_parts.append("<tr>")
+        html_parts.append("<td><strong>Hosts with drained GPUs</strong></td>")
+        html_parts.append(f"<td style='text-align: right;'>{draining_stats['num_hosts']}</td>")
+        html_parts.append("</tr>")
+
+        html_parts.append("<tr>")
+        html_parts.append("<td><strong>Unique GPUs drained</strong></td>")
+        html_parts.append(f"<td style='text-align: right;'>{draining_stats['num_unique_gpus']}</td>")
+        html_parts.append("</tr>")
+
+        html_parts.append("<tr>")
+        html_parts.append("<td><strong>Total draining intervals</strong></td>")
+        html_parts.append(f"<td style='text-align: right;'>{draining_stats['num_intervals']}</td>")
+        html_parts.append("</tr>")
+
+        html_parts.append("<tr style='background-color: #ffcdd2; font-weight: bold;'>")
+        html_parts.append("<td><strong>Total draining time</strong></td>")
+        html_parts.append(
+            f"<td style='text-align: right; font-weight: bold;'>{draining_stats['total_hours']:.2f} hours</td>"
+        )
+        html_parts.append("</tr>")
+
+        html_parts.append("</table>")
+
+        # Per-host breakdown if available
+        per_host = draining_stats.get("per_host", {})
+        if per_host:
+            html_parts.append("<h3>Per-Host Breakdown</h3>")
+            html_parts.append("<table border='1'>")
+            html_parts.append(
+                "<tr style='background-color: #e0e0e0;'><th>Host</th><th>Drained GPUs</th><th>Intervals</th><th>Total Hours</th></tr>"
+            )
+
+            for host_name in sorted(per_host.keys()):
+                host_data = per_host[host_name]
+                html_parts.append("<tr>")
+                html_parts.append(f"<td><strong>{host_name}</strong></td>")
+                html_parts.append(f"<td style='text-align: right;'>{host_data['num_gpus']}</td>")
+                html_parts.append(f"<td style='text-align: right;'>{host_data['num_intervals']}</td>")
+                html_parts.append(f"<td style='text-align: right;'>{host_data['total_hours']:.2f}</td>")
+                html_parts.append("</tr>")
+
+            html_parts.append("</table>")
+    elif draining_stats:
+        html_parts.append("<h2>GPU Draining Status</h2>")
+        html_parts.append("<p><em>No GPUs were drained during this period.</em></p>")
 
     # Excluded hosts
     excluded_hosts = metadata.get("excluded_hosts", {})

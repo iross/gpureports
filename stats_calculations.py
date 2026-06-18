@@ -1368,3 +1368,102 @@ def analyze_gpu_model_at_time(
         "inactive_gpus": inactive_gpus.to_dict("records") if len(inactive_gpus) > 0 else [],
         "raw_data": snapshot_df,
     }
+
+
+def calculate_draining_stats(df: pd.DataFrame) -> dict:
+    """
+    Calculate summary statistics for drained GPUs.
+
+    Args:
+        df: DataFrame with draining data (Machine, AssignedGPUs, timestamp)
+
+    Returns:
+        Dictionary with draining summary and per-host breakdown
+    """
+    if df.empty:
+        return {
+            "has_draining": False,
+            "num_hosts": 0,
+            "num_unique_gpus": 0,
+            "num_intervals": 0,
+            "total_hours": 0.0,
+            "per_host": {},
+        }
+
+    # Group by machine+GPU and create intervals
+    draining_intervals = []
+    df = df.copy()
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+
+    for (machine, gpu_id), gpu_df in df.groupby(["Machine", "AssignedGPUs"]):
+        gpu_df = gpu_df.sort_values("timestamp").copy()
+        gpu_df["time_diff"] = gpu_df["timestamp"].diff()
+
+        # Start new interval if gap > 20 minutes
+        gpu_df["new_interval"] = gpu_df["time_diff"] > pd.Timedelta(minutes=20)
+        gpu_df["interval_id"] = gpu_df["new_interval"].cumsum()
+
+        for _interval_id, group in gpu_df.groupby("interval_id"):
+            start = group["timestamp"].min()
+            end = group["timestamp"].max()
+
+            # If single data point, assume 15 min duration
+            if start == end:
+                end = start + pd.Timedelta(minutes=15)
+
+            duration_hours = (end - start).total_seconds() / 3600
+            draining_intervals.append(
+                {
+                    "machine": machine,
+                    "gpu_id": gpu_id,
+                    "start": start,
+                    "end": end,
+                    "duration_hours": duration_hours,
+                }
+            )
+
+    if not draining_intervals:
+        return {
+            "has_draining": False,
+            "num_hosts": 0,
+            "num_unique_gpus": 0,
+            "num_intervals": 0,
+            "total_hours": 0.0,
+            "per_host": {},
+        }
+
+    intervals_df = pd.DataFrame(draining_intervals)
+
+    # Calculate totals
+    unique_hosts = intervals_df["machine"].nunique()
+    unique_gpus = intervals_df["gpu_id"].nunique()
+    total_intervals = len(intervals_df)
+    total_hours = intervals_df["duration_hours"].sum()
+
+    # Per-host breakdown
+    per_host = {}
+    for machine in sorted(intervals_df["machine"].unique()):
+        machine_data = intervals_df[intervals_df["machine"] == machine]
+        host_gpus = machine_data["gpu_id"].unique()
+
+        per_host[machine] = {
+            "num_gpus": len(host_gpus),
+            "num_intervals": len(machine_data),
+            "total_hours": machine_data["duration_hours"].sum(),
+            "gpu_details": {
+                str(gpu_id): {
+                    "num_intervals": len(machine_data[machine_data["gpu_id"] == gpu_id]),
+                    "total_hours": machine_data[machine_data["gpu_id"] == gpu_id]["duration_hours"].sum(),
+                }
+                for gpu_id in sorted(host_gpus)
+            },
+        }
+
+    return {
+        "has_draining": True,
+        "num_hosts": unique_hosts,
+        "num_unique_gpus": unique_gpus,
+        "num_intervals": total_intervals,
+        "total_hours": total_hours,
+        "per_host": per_host,
+    }
