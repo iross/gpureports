@@ -1,11 +1,11 @@
 ---
 id: TASK-32
 title: Add draining GPU state to email reports
-status: In Progress
+status: Done
 assignee:
   - iaross
 created_date: '2026-06-18 00:38'
-updated_date: '2026-06-18 00:38'
+updated_date: '2026-06-18 00:56'
 labels:
   - reporting
   - monitoring
@@ -26,10 +26,10 @@ Include GPU draining state information in the daily/weekly/monthly email reports
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Draining summary appears in email output (e.g., number of hosts with drained GPUs, total draining time)
-- [ ] #2 Email shows per-host breakdown of drained GPUs when draining occurred in the reporting period
-- [ ] #3 All email modes work correctly (daily, weekly, monthly, test)
-- [ ] #4 Draining section gracefully handles periods with no draining data
+- [x] #1 Draining summary appears in email output (e.g., number of hosts with drained GPUs, total draining time)
+- [x] #2 Email shows per-host breakdown of drained GPUs when draining occurred in the reporting period
+- [x] #3 All email modes work correctly (daily, weekly, monthly, test)
+- [x] #4 Draining section gracefully handles periods with no draining data
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -37,3 +37,38 @@ Include GPU draining state information in the daily/weekly/monthly email reports
 <!-- SECTION:PLAN:BEGIN -->
 1. Extract draining data fetching logic from draining_report.py into a reusable function\n2. Add draining data retrieval to usage_stats.py analysis flow\n3. Calculate draining summary stats (hosts count, GPU count, total time, per-host breakdown)\n4. Add draining section to HTML report generation in stats_reporting.py\n5. Test email output for all modes (daily, weekly, monthly, test)\n6. Verify graceful handling when no draining data exists
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Implemented draining GPU state information in email reports by:
+
+1. **stats_data.py**: Added get_draining_data() function that queries gpu_state database for Drained state records, filtering out GPUs that are also claimed (to avoid double-counting)
+
+2. **stats_calculations.py**: Added calculate_draining_stats() function that processes draining data to compute:
+   - Total unique hosts with drained GPUs
+   - Total unique GPUs drained
+   - Number of draining intervals
+   - Total draining time in hours
+   - Per-host breakdown with GPU-level details
+
+3. **usage_stats.py**: Integrated draining data fetching into the analysis flow:
+   - Added imports for draining functions
+   - Fetch and calculate draining stats for all analysis modes
+   - Special handling for monthly stats (nested structure)
+
+4. **stats_reporting.py**: Enhanced HTML report generation:
+   - Added draining status section with red highlighting when draining occurs
+   - Shows summary metrics in a highlighted table
+   - Includes per-host breakdown when draining data exists
+   - Gracefully handles periods with no draining data
+
+Testing confirmed:
+- Daily reports (24h) show draining status ✓
+- Weekly reports (168h) show draining status ✓
+- Monthly reports include draining stats ✓
+- No-draining periods show appropriate message ✓
+- All linting and tests pass ✓
+
+The draining section appears in the email after the backfill slots table, providing clear visibility into ongoing GPU draining operations.
+<!-- SECTION:NOTES:END -->
