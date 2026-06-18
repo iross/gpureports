@@ -650,32 +650,38 @@ def filter_df_enhanced(df: pl.DataFrame, utilization: str = "", state: str = "",
                 & (~pl.col("Name").str.contains("backfill"))
             )
 
-    elif utilization == "Backfill-ResearcherOwned":
-        df = df.filter(
-            (pl.col("State") == state if state != "" else pl.lit(True))
-            & host_cond
-            & (pl.col("Name").str.contains("backfill"))
-            & (pl.col("PrioritizedProjects") != "")
-            & (pl.col("PrioritizedProjects").is_not_null())
-            & (~pl.col("Machine").is_in(list(chtc_owned_hosts)))
+    elif utilization in ["Backfill-ResearcherOwned", "Backfill-CHTCOwned", "Backfill-OpenCapacity"]:
+        # Classify backfill slots by machine's primary ownership, not the backfill slot's PrioritizedProjects
+        # First identify researcher-owned machines (machines with any non-empty PrioritizedProjects in primary slots)
+        primary_slots = df.filter(~pl.col("Name").str.contains("backfill"))
+        researcher_machines = set(
+            primary_slots.filter(
+                (pl.col("PrioritizedProjects") != "")
+                & (pl.col("PrioritizedProjects").is_not_null())
+                & (~pl.col("Machine").is_in(list(chtc_owned_hosts)))
+            )
+            .select(pl.col("Machine").unique())
+            .to_series()
+            .to_list()
         )
 
-    elif utilization == "Backfill-CHTCOwned":
-        df = df.filter(
-            (pl.col("State") == state if state != "" else pl.lit(True))
-            & host_cond
-            & (pl.col("Name").str.contains("backfill"))
-            & (pl.col("Machine").is_in(list(chtc_owned_hosts)))
-        )
+        # Filter to backfill slots only
+        df = df.filter(pl.col("Name").str.contains("backfill"))
+        if state != "":
+            df = df.filter(pl.col("State") == state)
+        if host != "":
+            df = df.filter(host_cond)
 
-    elif utilization == "Backfill-OpenCapacity":
-        df = df.filter(
-            (pl.col("State") == state if state != "" else pl.lit(True))
-            & host_cond
-            & (pl.col("Name").str.contains("backfill"))
-            & ((pl.col("PrioritizedProjects") == "") | (pl.col("PrioritizedProjects").is_null()))
-            & (~pl.col("Machine").is_in(list(chtc_owned_hosts)))
-        )
+        # Classify based on machine ownership
+        if utilization == "Backfill-ResearcherOwned":
+            df = df.filter(pl.col("Machine").is_in(list(researcher_machines)))
+        elif utilization == "Backfill-CHTCOwned":
+            df = df.filter(pl.col("Machine").is_in(list(chtc_owned_hosts)))
+        elif utilization == "Backfill-OpenCapacity":
+            df = df.filter(
+                (~pl.col("Machine").is_in(list(chtc_owned_hosts)))
+                & (~pl.col("Machine").is_in(list(researcher_machines)))
+            )
 
     elif utilization == "Shared":
         df = _apply_duplicate_cleanup(df)

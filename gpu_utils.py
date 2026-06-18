@@ -501,33 +501,32 @@ def filter_df_enhanced(df: pd.DataFrame, utilization: str = "", state: str = "",
                 & (df["Name"].str.contains(host) if host != "" else True)
                 & (~df["Name"].str.contains("backfill"))
             ]
-    elif utilization == "Backfill-ResearcherOwned":
-        # Backfill slots on researcher owned machines
-        df = df[
-            (df["State"] == state if state != "" else True)
-            & (df["Name"].str.contains(host) if host != "" else True)
-            & (df["Name"].str.contains("backfill"))
-            & (df["PrioritizedProjects"] != "")
-            & (df["PrioritizedProjects"].notna())
-            & (~df["Machine"].isin(chtc_owned_hosts))
-        ]
-    elif utilization == "Backfill-CHTCOwned":
-        # Backfill slots on hosted capacity machines
-        df = df[
-            (df["State"] == state if state != "" else True)
-            & (df["Name"].str.contains(host) if host != "" else True)
-            & (df["Name"].str.contains("backfill"))
-            & (df["Machine"].isin(chtc_owned_hosts))
-        ]
-    elif utilization == "Backfill-OpenCapacity":
-        # Backfill slots on open capacity machines (reclassified as Backfill-OpenCapacity)
-        df = df[
-            (df["State"] == state if state != "" else True)
-            & (df["Name"].str.contains(host) if host != "" else True)
-            & (df["Name"].str.contains("backfill"))
-            & ((df["PrioritizedProjects"] == "") | (df["PrioritizedProjects"].isna()))
-            & (~df["Machine"].isin(chtc_owned_hosts))
-        ]
+    elif utilization in ["Backfill-ResearcherOwned", "Backfill-CHTCOwned", "Backfill-OpenCapacity"]:
+        # Classify backfill slots by machine's primary ownership, not the backfill slot's PrioritizedProjects
+        # First identify researcher-owned machines (machines with any non-empty PrioritizedProjects in primary slots)
+        primary_slots = df[~df["Name"].str.contains("backfill")].copy()
+        researcher_machines = set(
+            primary_slots[
+                (primary_slots["PrioritizedProjects"] != "")
+                & (primary_slots["PrioritizedProjects"].notna())
+                & (~primary_slots["Machine"].isin(chtc_owned_hosts))
+            ]["Machine"].unique()
+        )
+
+        # Filter to backfill slots only
+        df = df[df["Name"].str.contains("backfill")].copy()
+        if state:
+            df = df[df["State"] == state]
+        if host:
+            df = df[df["Name"].str.contains(host)]
+
+        # Classify based on machine ownership
+        if utilization == "Backfill-ResearcherOwned":
+            df = df[df["Machine"].isin(researcher_machines)]
+        elif utilization == "Backfill-CHTCOwned":
+            df = df[df["Machine"].isin(chtc_owned_hosts)]
+        elif utilization == "Backfill-OpenCapacity":
+            df = df[(~df["Machine"].isin(chtc_owned_hosts)) & (~df["Machine"].isin(researcher_machines))]
     elif utilization == "Shared":
         # Apply same duplicate cleanup logic as Priority - shared GPUs can also appear in backfill slots
         duplicated_gpus = df[~df["AssignedGPUs"].isna()]["AssignedGPUs"].duplicated(keep=False)
