@@ -126,7 +126,6 @@ def calculate_allocation_usage_enhanced(df: pd.DataFrame, host: str = "") -> dic
         "Shared",
         "Backfill-CHTCOwned",
         "Backfill-ResearcherOwned",
-        "Backfill-OpenCapacity",
     ]
 
     for utilization_type in utilization_types:
@@ -261,7 +260,6 @@ def calculate_allocation_usage_by_device_enhanced(
         "Shared",
         "Backfill-CHTCOwned",
         "Backfill-ResearcherOwned",
-        "Backfill-OpenCapacity",
     ]
 
     # Pre-filter data by utilization type and device type to avoid repeated filtering
@@ -800,7 +798,6 @@ def calculate_h200_user_breakdown(df: pd.DataFrame, host: str = "", hours_back: 
                     "Shared": 0,
                     "Backfill-ResearcherOwned": 0,
                     "Backfill-CHTCOwned": 0,
-                    "Backfill-OpenCapacity": 0,
                 }
 
             user_stats[user][slot_type] = gpu_hours
@@ -901,7 +898,7 @@ def calculate_backfill_usage_by_user(
             gpu_hours = avg_gpus * actual_duration_hours
 
             if user not in user_stats:
-                user_stats[user] = {"Backfill-ResearcherOwned": 0, "Backfill-CHTCOwned": 0, "Backfill-OpenCapacity": 0}
+                user_stats[user] = {"Backfill-ResearcherOwned": 0, "Backfill-CHTCOwned": 0}
             user_stats[user][slot_type] = gpu_hours
 
     # Calculate final statistics

@@ -209,7 +209,7 @@ def send_email_report(
                     usage_parts.append(f"{percentage:.1f}%")
                 elif class_name == "Backfill":
                     # For Backfill, combine all backfill types
-                    backfill_types = ["Backfill-ResearcherOwned", "Backfill-CHTCOwned", "Backfill-OpenCapacity"]
+                    backfill_types = ["Backfill-ResearcherOwned", "Backfill-CHTCOwned"]
                     total_claimed = 0
                     total_available = 0
 
@@ -474,7 +474,7 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
     if class_totals:
         # Separate real slots from backfill slots
         real_slot_classes = ["Priority-ResearcherOwned", "Priority-CHTCOwned", "Shared"]
-        backfill_slot_classes = ["Backfill-ResearcherOwned", "Backfill-CHTCOwned", "Backfill-OpenCapacity"]
+        backfill_slot_classes = ["Backfill-ResearcherOwned", "Backfill-CHTCOwned"]
 
         # Calculate totals for real slots
         real_claimed = sum(class_totals[c]["claimed"] for c in real_slot_classes if c in class_totals)
@@ -1369,7 +1369,7 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
     if grand_totals:
         # Separate real slots from backfill slots
         real_slot_classes = ["Priority-ResearcherOwned", "Priority-CHTCOwned", "Shared"]
-        backfill_slot_classes = ["Backfill-ResearcherOwned", "Backfill-CHTCOwned", "Backfill-OpenCapacity"]
+        backfill_slot_classes = ["Backfill-ResearcherOwned", "Backfill-CHTCOwned"]
 
         # Calculate totals for real slots
         real_claimed = sum(grand_totals[c]["claimed"] for c in real_slot_classes if c in grand_totals)

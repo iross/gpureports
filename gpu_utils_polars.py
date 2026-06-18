@@ -26,10 +26,9 @@ CLASS_ORDER = [
     "Shared",
     "Backfill-ResearcherOwned",
     "Backfill-CHTCOwned",
-    "Backfill-OpenCapacity",
 ]
 UTILIZATION_TYPES = ["Priority", "Shared", "Backfill"]
-BACKFILL_SLOT_TYPES = ["Backfill-ResearcherOwned", "Backfill-CHTCOwned", "Backfill-OpenCapacity"]
+BACKFILL_SLOT_TYPES = ["Backfill-ResearcherOwned", "Backfill-CHTCOwned"]
 
 
 def load_chtc_owned_hosts(chtc_owned_file: str = "chtc_owned") -> set:
