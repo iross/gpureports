@@ -526,39 +526,53 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{real_total:.1f}</td>")
         html_parts.append("</tr>")
 
-        # Individual real slot classes (with Open Capacity broken into tiers)
-        for class_name in real_slot_classes:
+        # Prioritized subtotal row
+        priority_classes = ["Priority-ResearcherOwned", "Priority-CHTCOwned"]
+        pri_claimed = sum(class_totals[c]["claimed"] for c in priority_classes if c in class_totals)
+        pri_drained = sum(class_totals[c]["drained"] for c in priority_classes if c in class_totals)
+        pri_total = sum(class_totals[c]["total"] for c in priority_classes if c in class_totals)
+        pri_percent = (pri_claimed / pri_total * 100) if pri_total > 0 else 0
+        html_parts.append("<tr style='background-color: #e8e8e8;'>")
+        html_parts.append("<td style='font-weight: bold; padding-left: 8px;'>Prioritized (TOTAL)</td>")
+        html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_percent:.1f}%</td>")
+        html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_claimed:.1f}</td>")
+        html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_drained:.1f}</td>")
+        html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_total:.1f}</td>")
+        html_parts.append("</tr>")
+
+        # Individual priority rows
+        for class_name in priority_classes:
             if class_name in class_totals:
-                if class_name == "Shared":
-                    # Show Open Capacity broken down by tier
-                    for tier in ["Flagship", "Standard"]:
-                        tier_data = open_capacity_tiers[tier]
-                        if tier_data["total"] > 0:
-                            html_parts.append("<tr>")
-                            html_parts.append(f"<td style='font-weight: bold;'>Open Capacity ({tier})</td>")
-                            html_parts.append(
-                                f"<td style='text-align: right; font-weight: bold;'>{tier_data['percent']:.1f}%</td>"
-                            )
-                            html_parts.append(
-                                f"<td style='text-align: right; font-weight: bold;'>{tier_data['claimed']:.1f}</td>"
-                            )
-                            html_parts.append(
-                                f"<td style='text-align: right; font-weight: bold;'>{tier_data['drained']:.1f}</td>"
-                            )
-                            html_parts.append(
-                                f"<td style='text-align: right; font-weight: bold;'>{tier_data['total']:.1f}</td>"
-                            )
-                            html_parts.append("</tr>")
-                else:
-                    totals = class_totals[class_name]
+                totals = class_totals[class_name]
+                html_parts.append("<tr>")
+                html_parts.append(f"<td style='padding-left: 16px;'>{get_display_name(class_name)}</td>")
+                html_parts.append(f"<td style='text-align: right;'>{totals['percent']:.1f}%</td>")
+                html_parts.append(f"<td style='text-align: right;'>{totals['claimed']:.1f}</td>")
+                html_parts.append(f"<td style='text-align: right;'>{totals['drained']:.1f}</td>")
+                html_parts.append(f"<td style='text-align: right;'>{totals['total']:.1f}</td>")
+                html_parts.append("</tr>")
+
+        # Open Capacity subtotal row
+        if "Shared" in class_totals:
+            oc_totals = class_totals["Shared"]
+            html_parts.append("<tr style='background-color: #e8e8e8;'>")
+            html_parts.append("<td style='font-weight: bold; padding-left: 8px;'>Open Capacity (TOTAL)</td>")
+            html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{oc_totals['percent']:.1f}%</td>")
+            html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{oc_totals['claimed']:.1f}</td>")
+            html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{oc_totals['drained']:.1f}</td>")
+            html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{oc_totals['total']:.1f}</td>")
+            html_parts.append("</tr>")
+
+            # Open Capacity broken down by tier
+            for tier in ["Flagship", "Standard"]:
+                tier_data = open_capacity_tiers[tier]
+                if tier_data["total"] > 0:
                     html_parts.append("<tr>")
-                    html_parts.append(f"<td style='font-weight: bold;'>{get_display_name(class_name)}</td>")
-                    html_parts.append(
-                        f"<td style='text-align: right; font-weight: bold;'>{totals['percent']:.1f}%</td>"
-                    )
-                    html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{totals['claimed']:.1f}</td>")
-                    html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{totals['drained']:.1f}</td>")
-                    html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{totals['total']:.1f}</td>")
+                    html_parts.append(f"<td style='padding-left: 16px;'>Open Capacity ({tier})</td>")
+                    html_parts.append(f"<td style='text-align: right;'>{tier_data['percent']:.1f}%</td>")
+                    html_parts.append(f"<td style='text-align: right;'>{tier_data['claimed']:.1f}</td>")
+                    html_parts.append(f"<td style='text-align: right;'>{tier_data['drained']:.1f}</td>")
+                    html_parts.append(f"<td style='text-align: right;'>{tier_data['total']:.1f}</td>")
                     html_parts.append("</tr>")
 
         # Add separator row and backfill slots to the same table
