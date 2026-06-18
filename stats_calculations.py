@@ -595,6 +595,11 @@ def calculate_allocation_usage_by_memory(df: pd.DataFrame, host: str = "", inclu
     # Add memory category column based on GPUs_GlobalMemoryMb
     df["memory_category"] = df["GPUs_GlobalMemoryMb"].apply(get_memory_category_from_mb)
 
+    # Filter out old/uncommon GPU types for consistency with device-based reporting
+    if not include_all_devices:
+        old_gpus = ["GTX 1080", "P100", "Quadro", "A30", "A40"]
+        df = df[~df["GPUs_DeviceName"].str.contains("|".join(old_gpus), na=False)]
+
     # Get unique memory categories
     memory_categories = df["memory_category"].dropna().unique()
 
