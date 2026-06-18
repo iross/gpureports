@@ -455,14 +455,17 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
             device_data = device_stats.get(class_name, {})
             if device_data:
                 total_claimed = 0
+                total_drained = 0
                 total_available = 0
                 for _device_type, stats in device_data.items():
                     total_claimed += stats["avg_claimed"]
+                    total_drained += stats.get("avg_drained", 0.0)
                     total_available += stats["avg_total_available"]
 
                 if total_available > 0:
                     class_totals[class_name] = {
                         "claimed": total_claimed,
+                        "drained": total_drained,
                         "total": total_available,
                         "percent": (total_claimed / total_available) * 100,
                     }
@@ -475,21 +478,27 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
 
         # Calculate totals for real slots
         real_claimed = sum(class_totals[c]["claimed"] for c in real_slot_classes if c in class_totals)
+        real_drained = sum(class_totals[c]["drained"] for c in real_slot_classes if c in class_totals)
         real_total = sum(class_totals[c]["total"] for c in real_slot_classes if c in class_totals)
         real_percent = (real_claimed / real_total * 100) if real_total > 0 else 0
 
         # Calculate totals for backfill slots
         backfill_claimed = sum(class_totals[c]["claimed"] for c in backfill_slot_classes if c in class_totals)
+        backfill_drained = sum(class_totals[c]["drained"] for c in backfill_slot_classes if c in class_totals)
         backfill_total = sum(class_totals[c]["total"] for c in backfill_slot_classes if c in class_totals)
         backfill_percent = (backfill_claimed / backfill_total * 100) if backfill_total > 0 else 0
 
         # Calculate Open Capacity breakdown by performance tier (Flagship vs Standard)
-        open_capacity_tiers = {"Flagship": {"claimed": 0, "total": 0}, "Standard": {"claimed": 0, "total": 0}}
+        open_capacity_tiers = {
+            "Flagship": {"claimed": 0, "drained": 0, "total": 0},
+            "Standard": {"claimed": 0, "drained": 0, "total": 0},
+        }
         if "Shared" in device_stats:
             shared_device_data = device_stats["Shared"]
             for device_type, stats in shared_device_data.items():
                 tier = get_gpu_performance_tier(device_type)
                 open_capacity_tiers[tier]["claimed"] += stats["avg_claimed"]
+                open_capacity_tiers[tier]["drained"] += stats.get("avg_drained", 0.0)
                 open_capacity_tiers[tier]["total"] += stats["avg_total_available"]
 
         # Calculate percentages for each tier
@@ -505,7 +514,7 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
         html_parts.append("<h2>Real Slots</h2>")
         html_parts.append("<table border='1' style='margin-top: 20px;'>")
         html_parts.append(
-            "<tr style='background-color: #e0e0e0;'><th>Class</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>"
+            "<tr style='background-color: #e0e0e0;'><th>Class</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Drained (avg.)</th><th>Available (avg.)</th></tr>"
         )
 
         # Total row for real slots
@@ -513,6 +522,7 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
         html_parts.append("<td style='font-weight: bold;'>TOTAL</td>")
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{real_percent:.1f}%</td>")
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{real_claimed:.1f}</td>")
+        html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{real_drained:.1f}</td>")
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{real_total:.1f}</td>")
         html_parts.append("</tr>")
 
@@ -533,6 +543,9 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
                                 f"<td style='text-align: right; font-weight: bold;'>{tier_data['claimed']:.1f}</td>"
                             )
                             html_parts.append(
+                                f"<td style='text-align: right; font-weight: bold;'>{tier_data['drained']:.1f}</td>"
+                            )
+                            html_parts.append(
                                 f"<td style='text-align: right; font-weight: bold;'>{tier_data['total']:.1f}</td>"
                             )
                             html_parts.append("</tr>")
@@ -544,17 +557,19 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
                         f"<td style='text-align: right; font-weight: bold;'>{totals['percent']:.1f}%</td>"
                     )
                     html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{totals['claimed']:.1f}</td>")
+                    html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{totals['drained']:.1f}</td>")
                     html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{totals['total']:.1f}</td>")
                     html_parts.append("</tr>")
 
         # Add separator row and backfill slots to the same table
-        html_parts.append("<tr style='background-color: #f0f0f0;'><td colspan='4' style='height: 10px;'></td></tr>")
+        html_parts.append("<tr style='background-color: #f0f0f0;'><td colspan='5' style='height: 10px;'></td></tr>")
 
         # Backfill section header
         html_parts.append("<tr style='background-color: #d0d0d0; font-weight: bold;'>")
         html_parts.append("<td style='font-weight: bold;'>BACKFILL TOTAL</td>")
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{backfill_percent:.1f}%</td>")
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{backfill_claimed:.1f}</td>")
+        html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{backfill_drained:.1f}</td>")
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{backfill_total:.1f}</td>")
         html_parts.append("</tr>")
 
@@ -566,6 +581,7 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
                 html_parts.append(f"<td style='font-weight: bold;'>{get_display_name(class_name)}</td>")
                 html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{totals['percent']:.1f}%</td>")
                 html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{totals['claimed']:.1f}</td>")
+                html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{totals['drained']:.1f}</td>")
                 html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{totals['total']:.1f}</td>")
                 html_parts.append("</tr>")
 
