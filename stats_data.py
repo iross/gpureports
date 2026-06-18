@@ -275,3 +275,117 @@ def get_time_filtered_data_multi_db(
 
     # Load and combine data
     return get_multi_db_data(db_paths, start_time, end_time)
+
+
+def get_draining_data(db_path: str, hours_back: int = 24, end_time: datetime.datetime | None = None) -> pd.DataFrame:
+    """
+    Get GPU draining data (State='Drained') for the specified time range.
+    Only includes GPUs that are drained and NOT claimed by any slot at that timestamp.
+
+    Args:
+        db_path: Path to SQLite database
+        hours_back: Number of hours to look back from end_time
+        end_time: End time for the range (defaults to latest timestamp in database)
+
+    Returns:
+        DataFrame with draining data (Machine, AssignedGPUs, timestamp)
+    """
+    from pathlib import Path
+
+    db_path_obj = Path(db_path)
+    base_dir = str(db_path_obj.parent) if db_path_obj.parent != Path(".") else "."
+
+    # If end_time is not provided, use the latest timestamp
+    if end_time is None:
+        from gpu_utils import get_latest_timestamp_from_most_recent_db
+
+        end_time = get_latest_timestamp_from_most_recent_db(base_dir)
+        if end_time is None:
+            try:
+                conn = sqlite3.connect(db_path)
+                df_temp = pd.read_sql_query("SELECT MAX(timestamp) as max_time FROM gpu_state", conn)
+                conn.close()
+                if len(df_temp) > 0 and df_temp["max_time"].iloc[0] is not None:
+                    end_time = pd.to_datetime(df_temp["max_time"].iloc[0])
+                else:
+                    end_time = datetime.datetime.now()
+            except Exception:
+                end_time = datetime.datetime.now()
+
+    start_time = end_time - datetime.timedelta(hours=hours_back)
+
+    # Get database paths covering the time range
+    try:
+        db_paths = get_required_databases(start_time, end_time, base_dir)
+    except Exception:
+        db_paths = [db_path_obj]
+
+    all_data = []
+
+    for db_file in db_paths:
+        try:
+            conn = sqlite3.connect(str(db_file))
+
+            # Query to find GPUs with Drained state, excluding those also claimed at same timestamp
+            query = """
+            WITH DrainedGPUs AS (
+                SELECT DISTINCT
+                    Machine,
+                    AssignedGPUs,
+                    timestamp
+                FROM gpu_state
+                WHERE timestamp >= ?
+                    AND timestamp <= ?
+                    AND State = 'Drained'
+                    AND AssignedGPUs IS NOT NULL
+            ),
+            ClaimedGPUs AS (
+                SELECT DISTINCT
+                    Machine,
+                    AssignedGPUs,
+                    timestamp
+                FROM gpu_state
+                WHERE timestamp >= ?
+                    AND timestamp <= ?
+                    AND State = 'Claimed'
+                    AND AssignedGPUs IS NOT NULL
+            )
+            SELECT
+                d.Machine,
+                d.AssignedGPUs,
+                d.timestamp
+            FROM DrainedGPUs d
+            LEFT JOIN ClaimedGPUs c
+                ON d.Machine = c.Machine
+                AND d.AssignedGPUs = c.AssignedGPUs
+                AND d.timestamp = c.timestamp
+            WHERE c.AssignedGPUs IS NULL
+            ORDER BY d.Machine, d.timestamp
+            """
+
+            df = pd.read_sql_query(
+                query,
+                conn,
+                params=(
+                    start_time.isoformat(),
+                    end_time.isoformat(),
+                    start_time.isoformat(),
+                    end_time.isoformat(),
+                ),
+            )
+
+            if not df.empty:
+                all_data.append(df)
+
+            conn.close()
+
+        except sqlite3.Error:
+            continue
+
+    if not all_data:
+        return pd.DataFrame()
+
+    combined_df = pd.concat(all_data, ignore_index=True)
+    combined_df["timestamp"] = pd.to_datetime(combined_df["timestamp"])
+
+    return combined_df
