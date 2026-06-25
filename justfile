@@ -12,5 +12,8 @@ dashboard:
     uv run uvicorn dashboard.server:app --reload --port 8051
 last-hour:
     uv run usage_stats_polars.py --exclude-hosts-yaml masked_hosts.yaml --hours-back 1 --group-by-device
-sync-dbs:
-    scp "deepdivesubmit2000.chtc.wisc.edu:/home/iaross/gpureports/*$(date +%Y-%m).db" .
+sync-dbs month=`date +%Y-%m`:
+    scp "deepdivesubmit2000.chtc.wisc.edu:/home/iaross/gpureports/*{{month}}.db" .
+
+isye-report hours="168" exclude="tvang9":
+    uv run python scripts/host_report.py --host isye --hours-back {{hours}} --exclude-users {{exclude}}
