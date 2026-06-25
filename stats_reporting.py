@@ -487,21 +487,21 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
         pri_secondary_total = sum(class_totals[c]["total"] for c in secondary_classes if c in class_totals)
         pri_secondary_pct = (pri_secondary_claimed / pri_secondary_total * 100) if pri_secondary_total > 0 else 0
 
-        # Prioritized (TOTAL) = primary + secondary
+        # Prioritized (TOTAL): claimed = primary + secondary, but available = primary only
+        # (secondary runs on the same physical GPUs — adding secondary total would double-count)
         pri_total_claimed = pri_primary_claimed + pri_secondary_claimed
         pri_total_drained = pri_primary_drained + pri_secondary_drained
-        pri_total_avail = pri_primary_total + pri_secondary_total
-        pri_total_pct = (pri_total_claimed / pri_total_avail * 100) if pri_total_avail > 0 else 0
+        pri_total_pct = (pri_total_claimed / pri_primary_total * 100) if pri_primary_total > 0 else 0
 
         # Open Capacity
         oc_claimed = class_totals.get("Shared", {}).get("claimed", 0)
         oc_drained = class_totals.get("Shared", {}).get("drained", 0)
         oc_total_avail = class_totals.get("Shared", {}).get("total", 0)
 
-        # Grand TOTAL = Prioritized (primary + secondary) + Open Capacity
+        # Grand TOTAL: available = primary physical GPUs + open capacity (no double-count)
         grand_claimed = pri_total_claimed + oc_claimed
         grand_drained = pri_total_drained + oc_drained
-        grand_total_avail = pri_total_avail + oc_total_avail
+        grand_total_avail = pri_primary_total + oc_total_avail
         grand_pct = (grand_claimed / grand_total_avail * 100) if grand_total_avail > 0 else 0
 
         # Calculate Open Capacity breakdown by performance tier (Flagship vs Standard)
@@ -548,7 +548,7 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_total_pct:.1f}%</td>")
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_total_claimed:.1f}</td>")
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_total_drained:.1f}</td>")
-        html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_total_avail:.1f}</td>")
+        html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_primary_total:.1f}</td>")
         html_parts.append("</tr>")
 
         # Primary sub-subtotal
@@ -1401,13 +1401,13 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
         oc_claimed = grand_totals.get("Shared", {}).get("claimed", 0)
         oc_total = grand_totals.get("Shared", {}).get("total", 0)
 
-        grand_claimed = pri_primary_claimed + pri_secondary_claimed + oc_claimed
-        grand_total = pri_primary_total + pri_secondary_total + oc_total
+        # Available = primary physical GPUs + open capacity; secondary runs on the same GPUs as primary
+        pri_total_claimed = pri_primary_claimed + pri_secondary_claimed
+        grand_claimed = pri_total_claimed + oc_claimed
+        grand_total = pri_primary_total + oc_total
         grand_percent = (grand_claimed / grand_total * 100) if grand_total > 0 else 0
 
-        pri_total_claimed = pri_primary_claimed + pri_secondary_claimed
-        pri_total_avail = pri_primary_total + pri_secondary_total
-        pri_total_pct = (pri_total_claimed / pri_total_avail * 100) if pri_total_avail > 0 else 0
+        pri_total_pct = (pri_total_claimed / pri_primary_total * 100) if pri_primary_total > 0 else 0
         pri_primary_pct = (pri_primary_claimed / pri_primary_total * 100) if pri_primary_total > 0 else 0
         pri_secondary_pct = (pri_secondary_claimed / pri_secondary_total * 100) if pri_secondary_total > 0 else 0
 
@@ -1415,7 +1415,7 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
         print(f"{'-' * 70}")
         print(f"  TOTAL (primary + secondary): {grand_percent:.1f}% ({grand_claimed:.1f}/{grand_total:.1f} GPUs)")
         print(
-            f"  Prioritized (TOTAL):          {pri_total_pct:.1f}% ({pri_total_claimed:.1f}/{pri_total_avail:.1f} GPUs)"
+            f"  Prioritized (TOTAL):          {pri_total_pct:.1f}% ({pri_total_claimed:.1f}/{pri_primary_total:.1f} GPUs)"
         )
         print(
             f"    Primary:                    {pri_primary_pct:.1f}% ({pri_primary_claimed:.1f}/{pri_primary_total:.1f} GPUs)"
