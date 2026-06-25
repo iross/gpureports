@@ -397,15 +397,15 @@ def get_display_name(class_name: str) -> str:
     """Convert internal class names to user-friendly display names."""
     display_names = {
         "Priority": "Prioritized service",  # Legacy support
-        "Priority-ResearcherOwned": "Prioritized (Researcher Owned)",
-        "Priority-CHTCOwned": "Prioritized (CHTC Owned)",
+        "Priority-ResearcherOwned": "Researcher-Owned Hardware",
+        "Priority-CHTCOwned": "Researcher-Reserved Capacity",
         "Shared": "Open Capacity",
-        "Backfill": "Backfill",  # Legacy support
-        "Backfill-ResearcherOwned": "Backfill (Researcher Owned)",
-        "Backfill-CHTCOwned": "Backfill (CHTC Owned)",
-        "Backfill-OpenCapacity": "Backfill (Open Capacity)",
-        "CHTC Owned": "CHTC Owned",
-        "Researcher Owned": "Researcher Owned",
+        "Backfill": "Secondary (Backfill)",  # Legacy support
+        "Backfill-ResearcherOwned": "Researcher-Owned Hardware",
+        "Backfill-CHTCOwned": "Researcher-Reserved Capacity",
+        "Backfill-OpenCapacity": "Secondary (Backfill) — Open Capacity",
+        "CHTC Owned": "Researcher-Reserved Capacity",
+        "Researcher Owned": "Researcher-Owned Hardware",
         "Open Capacity": "Open Capacity",
     }
     return display_names.get(class_name, class_name)
