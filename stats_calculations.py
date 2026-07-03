@@ -1203,7 +1203,7 @@ def get_gpu_models_at_time(data_dir: str, target_time: datetime.datetime, window
     end_str = end_time.strftime("%Y-%m-%d %H:%M:%S")
     # Note: datetime strings are derived from internal datetime objects, not user input.
     query = (
-        f"SELECT DISTINCT GPUs_DeviceName FROM parquet_scan('{glob}', hive_partitioning=false) "
+        f"SELECT DISTINCT GPUs_DeviceName FROM parquet_scan('{glob}', hive_partitioning=false, union_by_name=true) "
         f"WHERE GPUs_DeviceName IS NOT NULL AND timestamp BETWEEN '{start_str}' AND '{end_str}' "
         "ORDER BY GPUs_DeviceName"
     )
@@ -1242,7 +1242,7 @@ def get_gpu_model_activity_at_time(
     query = (
         "SELECT timestamp, Name, AssignedGPUs, State, GPUs_DeviceName, "
         "GPUsAverageUsage, Machine, RemoteOwner, GlobalJobId, PrioritizedProjects "
-        f"FROM parquet_scan('{glob}', hive_partitioning=false) "
+        f"FROM parquet_scan('{glob}', hive_partitioning=false, union_by_name=true) "
         f"WHERE GPUs_DeviceName = ? AND timestamp BETWEEN '{start_str}' AND '{end_str}' "
         "ORDER BY timestamp DESC, Machine, AssignedGPUs"
     )

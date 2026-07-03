@@ -94,7 +94,9 @@ def get_latest_timestamp(data_dir: str) -> datetime.datetime | None:
     glob = parquet_glob(data_dir)
     try:
         con = duckdb.connect()
-        row = con.execute(f"SELECT MAX(timestamp) FROM parquet_scan('{glob}', hive_partitioning=false)").fetchone()
+        row = con.execute(
+            f"SELECT MAX(timestamp) FROM parquet_scan('{glob}', hive_partitioning=false, union_by_name=true)"
+        ).fetchone()
         con.close()
         if row and row[0] is not None:
             ts = pd.to_datetime(row[0])
@@ -132,7 +134,7 @@ def get_time_filtered_data(
     end_str = end_time.strftime("%Y-%m-%d %H:%M:%S")
     # Note: datetime strings are derived from internal datetime objects, not user input.
     query = (
-        f"SELECT * FROM parquet_scan('{glob}', hive_partitioning=false) "
+        f"SELECT * FROM parquet_scan('{glob}', hive_partitioning=false, union_by_name=true) "
         f"WHERE timestamp >= '{start_str}' AND timestamp <= '{end_str}' "
         f"ORDER BY timestamp"
     )
@@ -175,13 +177,13 @@ def get_draining_data(data_dir: str, hours_back: int = 24, end_time: datetime.da
     query = f"""
     WITH DrainedGPUs AS (
         SELECT DISTINCT Machine, AssignedGPUs, timestamp
-        FROM parquet_scan('{glob}', hive_partitioning=false)
+        FROM parquet_scan('{glob}', hive_partitioning=false, union_by_name=true)
         WHERE timestamp >= '{start_str}' AND timestamp <= '{end_str}'
             AND State = 'Drained' AND AssignedGPUs IS NOT NULL
     ),
     ClaimedGPUs AS (
         SELECT DISTINCT Machine, AssignedGPUs, timestamp
-        FROM parquet_scan('{glob}', hive_partitioning=false)
+        FROM parquet_scan('{glob}', hive_partitioning=false, union_by_name=true)
         WHERE timestamp >= '{start_str}' AND timestamp <= '{end_str}'
             AND State = 'Claimed' AND AssignedGPUs IS NOT NULL
     )
