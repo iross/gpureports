@@ -147,12 +147,16 @@ def filter_df(df: pd.DataFrame, utilization: str = "", state: str = "", host: st
         if duplicated_gpus.any():
             # Create a temporary rank column to sort out duplicates.
             # Prefer primary slots over backfill slots to ensure accurate total counts.
-            df["_rank"] = 0  # Default rank for Backfill Unclaimed
-            df.loc[(df["State"] == "Claimed") & (~df["Name"].str.contains("backfill")), "_rank"] = 3  # Primary Claimed
-            df.loc[(df["State"] == "Unclaimed") & (~df["Name"].str.contains("backfill")), "_rank"] = (
-                2  # Primary Unclaimed
-            )
-            df.loc[(df["State"] == "Claimed") & (df["Name"].str.contains("backfill")), "_rank"] = 1  # Backfill Claimed
+            # All primary ranks (3–5) beat all backfill ranks (0–2) so a Drained primary slot is
+            # not displaced by a Drained backfill slot and then incorrectly excluded by the filter.
+            is_primary = ~df["Name"].str.contains("backfill")
+            is_backfill = df["Name"].str.contains("backfill")
+            df["_rank"] = 0  # Backfill Drained / other (lowest)
+            df.loc[is_backfill & (df["State"] == "Unclaimed"), "_rank"] = 1  # Backfill Unclaimed
+            df.loc[is_backfill & (df["State"] == "Claimed"), "_rank"] = 2  # Backfill Claimed
+            df.loc[is_primary, "_rank"] = 3  # Primary Drained / other
+            df.loc[is_primary & (df["State"] == "Unclaimed"), "_rank"] = 4  # Primary Unclaimed
+            df.loc[is_primary & (df["State"] == "Claimed"), "_rank"] = 5  # Primary Claimed
 
             # Sort by AssignedGPUs and rank (keeping highest rank first)
             df = df.sort_values(["AssignedGPUs", "_rank"], ascending=[True, False])
@@ -200,12 +204,16 @@ def filter_df(df: pd.DataFrame, utilization: str = "", state: str = "", host: st
         if duplicated_gpus.any():
             # Create a temporary rank column to sort out duplicates.
             # Prefer primary slots over backfill slots to ensure accurate total counts.
-            df["_rank"] = 0  # Default rank for Backfill Unclaimed
-            df.loc[(df["State"] == "Claimed") & (~df["Name"].str.contains("backfill")), "_rank"] = 3  # Primary Claimed
-            df.loc[(df["State"] == "Unclaimed") & (~df["Name"].str.contains("backfill")), "_rank"] = (
-                2  # Primary Unclaimed
-            )
-            df.loc[(df["State"] == "Claimed") & (df["Name"].str.contains("backfill")), "_rank"] = 1  # Backfill Claimed
+            # All primary ranks (3–5) beat all backfill ranks (0–2) so a Drained primary slot is
+            # not displaced by a Drained backfill slot and then incorrectly excluded by the filter.
+            is_primary = ~df["Name"].str.contains("backfill")
+            is_backfill = df["Name"].str.contains("backfill")
+            df["_rank"] = 0  # Backfill Drained / other (lowest)
+            df.loc[is_backfill & (df["State"] == "Unclaimed"), "_rank"] = 1  # Backfill Unclaimed
+            df.loc[is_backfill & (df["State"] == "Claimed"), "_rank"] = 2  # Backfill Claimed
+            df.loc[is_primary, "_rank"] = 3  # Primary Drained / other
+            df.loc[is_primary & (df["State"] == "Unclaimed"), "_rank"] = 4  # Primary Unclaimed
+            df.loc[is_primary & (df["State"] == "Claimed"), "_rank"] = 5  # Primary Claimed
 
             # Sort by AssignedGPUs and rank (keeping highest rank first)
             df = df.sort_values(["AssignedGPUs", "_rank"], ascending=[True, False])
@@ -395,12 +403,16 @@ def filter_df_enhanced(df: pd.DataFrame, utilization: str = "", state: str = "",
         if duplicated_gpus.any():
             # Create a temporary rank column to sort out duplicates.
             # Prefer primary slots over backfill slots to ensure accurate total counts.
-            df["_rank"] = 0  # Default rank for Backfill Unclaimed
-            df.loc[(df["State"] == "Claimed") & (~df["Name"].str.contains("backfill")), "_rank"] = 3  # Primary Claimed
-            df.loc[(df["State"] == "Unclaimed") & (~df["Name"].str.contains("backfill")), "_rank"] = (
-                2  # Primary Unclaimed
-            )
-            df.loc[(df["State"] == "Claimed") & (df["Name"].str.contains("backfill")), "_rank"] = 1  # Backfill Claimed
+            # All primary ranks (3–5) beat all backfill ranks (0–2) so a Drained primary slot is
+            # not displaced by a Drained backfill slot and then incorrectly excluded by the filter.
+            is_primary = ~df["Name"].str.contains("backfill")
+            is_backfill = df["Name"].str.contains("backfill")
+            df["_rank"] = 0  # Backfill Drained / other (lowest)
+            df.loc[is_backfill & (df["State"] == "Unclaimed"), "_rank"] = 1  # Backfill Unclaimed
+            df.loc[is_backfill & (df["State"] == "Claimed"), "_rank"] = 2  # Backfill Claimed
+            df.loc[is_primary, "_rank"] = 3  # Primary Drained / other
+            df.loc[is_primary & (df["State"] == "Unclaimed"), "_rank"] = 4  # Primary Unclaimed
+            df.loc[is_primary & (df["State"] == "Claimed"), "_rank"] = 5  # Primary Claimed
 
             # Sort by AssignedGPUs and rank (keeping highest rank first)
             df = df.sort_values(["AssignedGPUs", "_rank"], ascending=[True, False])
@@ -452,12 +464,16 @@ def filter_df_enhanced(df: pd.DataFrame, utilization: str = "", state: str = "",
         if duplicated_gpus.any():
             # Create a temporary rank column to sort out duplicates.
             # Prefer primary slots over backfill slots to ensure accurate total counts.
-            df["_rank"] = 0  # Default rank for Backfill Unclaimed
-            df.loc[(df["State"] == "Claimed") & (~df["Name"].str.contains("backfill")), "_rank"] = 3  # Primary Claimed
-            df.loc[(df["State"] == "Unclaimed") & (~df["Name"].str.contains("backfill")), "_rank"] = (
-                2  # Primary Unclaimed
-            )
-            df.loc[(df["State"] == "Claimed") & (df["Name"].str.contains("backfill")), "_rank"] = 1  # Backfill Claimed
+            # All primary ranks (3–5) beat all backfill ranks (0–2) so a Drained primary slot is
+            # not displaced by a Drained backfill slot and then incorrectly excluded by the filter.
+            is_primary = ~df["Name"].str.contains("backfill")
+            is_backfill = df["Name"].str.contains("backfill")
+            df["_rank"] = 0  # Backfill Drained / other (lowest)
+            df.loc[is_backfill & (df["State"] == "Unclaimed"), "_rank"] = 1  # Backfill Unclaimed
+            df.loc[is_backfill & (df["State"] == "Claimed"), "_rank"] = 2  # Backfill Claimed
+            df.loc[is_primary, "_rank"] = 3  # Primary Drained / other
+            df.loc[is_primary & (df["State"] == "Unclaimed"), "_rank"] = 4  # Primary Unclaimed
+            df.loc[is_primary & (df["State"] == "Claimed"), "_rank"] = 5  # Primary Claimed
 
             # Sort by AssignedGPUs and rank (keeping highest rank first)
             df = df.sort_values(["AssignedGPUs", "_rank"], ascending=[True, False])
@@ -534,12 +550,16 @@ def filter_df_enhanced(df: pd.DataFrame, utilization: str = "", state: str = "",
         if duplicated_gpus.any():
             # Create a temporary rank column to sort out duplicates.
             # Prefer primary slots over backfill slots to ensure accurate total counts.
-            df["_rank"] = 0  # Default rank for Backfill Unclaimed
-            df.loc[(df["State"] == "Claimed") & (~df["Name"].str.contains("backfill")), "_rank"] = 3  # Primary Claimed
-            df.loc[(df["State"] == "Unclaimed") & (~df["Name"].str.contains("backfill")), "_rank"] = (
-                2  # Primary Unclaimed
-            )
-            df.loc[(df["State"] == "Claimed") & (df["Name"].str.contains("backfill")), "_rank"] = 1  # Backfill Claimed
+            # All primary ranks (3–5) beat all backfill ranks (0–2) so a Drained primary slot is
+            # not displaced by a Drained backfill slot and then incorrectly excluded by the filter.
+            is_primary = ~df["Name"].str.contains("backfill")
+            is_backfill = df["Name"].str.contains("backfill")
+            df["_rank"] = 0  # Backfill Drained / other (lowest)
+            df.loc[is_backfill & (df["State"] == "Unclaimed"), "_rank"] = 1  # Backfill Unclaimed
+            df.loc[is_backfill & (df["State"] == "Claimed"), "_rank"] = 2  # Backfill Claimed
+            df.loc[is_primary, "_rank"] = 3  # Primary Drained / other
+            df.loc[is_primary & (df["State"] == "Unclaimed"), "_rank"] = 4  # Primary Unclaimed
+            df.loc[is_primary & (df["State"] == "Claimed"), "_rank"] = 5  # Primary Claimed
 
             # Sort by AssignedGPUs and rank (keeping highest rank first)
             df = df.sort_values(["AssignedGPUs", "_rank"], ascending=[True, False])
@@ -587,12 +607,16 @@ def filter_df_enhanced(df: pd.DataFrame, utilization: str = "", state: str = "",
         if duplicated_gpus.any():
             # Create a temporary rank column to sort out duplicates.
             # Prefer primary slots over backfill slots to ensure accurate total counts.
-            df["_rank"] = 0  # Default rank for Backfill Unclaimed
-            df.loc[(df["State"] == "Claimed") & (~df["Name"].str.contains("backfill")), "_rank"] = 3  # Primary Claimed
-            df.loc[(df["State"] == "Unclaimed") & (~df["Name"].str.contains("backfill")), "_rank"] = (
-                2  # Primary Unclaimed
-            )
-            df.loc[(df["State"] == "Claimed") & (df["Name"].str.contains("backfill")), "_rank"] = 1  # Backfill Claimed
+            # All primary ranks (3–5) beat all backfill ranks (0–2) so a Drained primary slot is
+            # not displaced by a Drained backfill slot and then incorrectly excluded by the filter.
+            is_primary = ~df["Name"].str.contains("backfill")
+            is_backfill = df["Name"].str.contains("backfill")
+            df["_rank"] = 0  # Backfill Drained / other (lowest)
+            df.loc[is_backfill & (df["State"] == "Unclaimed"), "_rank"] = 1  # Backfill Unclaimed
+            df.loc[is_backfill & (df["State"] == "Claimed"), "_rank"] = 2  # Backfill Claimed
+            df.loc[is_primary, "_rank"] = 3  # Primary Drained / other
+            df.loc[is_primary & (df["State"] == "Unclaimed"), "_rank"] = 4  # Primary Unclaimed
+            df.loc[is_primary & (df["State"] == "Claimed"), "_rank"] = 5  # Primary Claimed
 
             # Sort by AssignedGPUs and rank (keeping highest rank first)
             df = df.sort_values(["AssignedGPUs", "_rank"], ascending=[True, False])
@@ -681,15 +705,15 @@ def get_display_name(class_name: str) -> str:
     """Convert internal class names to user-friendly display names."""
     display_names = {
         "Priority": "Prioritized service",  # Legacy support
-        "Priority-ResearcherOwned": "Prioritized (Researcher Owned)",
-        "Priority-CHTCOwned": "Prioritized (CHTC Owned)",
+        "Priority-ResearcherOwned": "Researcher-Owned Hardware",
+        "Priority-CHTCOwned": "Researcher-Reserved Capacity",
         "Shared": "Open Capacity",
-        "Backfill": "Backfill",  # Legacy support
-        "Backfill-ResearcherOwned": "Backfill (Researcher Owned)",
-        "Backfill-CHTCOwned": "Backfill (CHTC Owned)",
-        "Backfill-OpenCapacity": "Backfill (Open Capacity)",
-        "CHTC Owned": "CHTC Owned",
-        "Researcher Owned": "Researcher Owned",
+        "Backfill": "Secondary (Backfill)",  # Legacy support
+        "Backfill-ResearcherOwned": "Researcher-Owned Hardware",
+        "Backfill-CHTCOwned": "Researcher-Reserved Capacity",
+        "Backfill-OpenCapacity": "Secondary (Backfill) — Open Capacity",
+        "CHTC Owned": "Researcher-Reserved Capacity",
+        "Researcher Owned": "Researcher-Owned Hardware",
         "Open Capacity": "Open Capacity",
         # New tier-based display names for Open Capacity breakdown
         "Open Capacity (Flagship)": "Open Capacity (Flagship)",

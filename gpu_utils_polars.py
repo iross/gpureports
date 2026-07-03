@@ -397,15 +397,15 @@ def get_display_name(class_name: str) -> str:
     """Convert internal class names to user-friendly display names."""
     display_names = {
         "Priority": "Prioritized service",  # Legacy support
-        "Priority-ResearcherOwned": "Prioritized (Researcher Owned)",
-        "Priority-CHTCOwned": "Prioritized (CHTC Owned)",
+        "Priority-ResearcherOwned": "Researcher-Owned Hardware",
+        "Priority-CHTCOwned": "Researcher-Reserved Capacity",
         "Shared": "Open Capacity",
-        "Backfill": "Backfill",  # Legacy support
-        "Backfill-ResearcherOwned": "Backfill (Researcher Owned)",
-        "Backfill-CHTCOwned": "Backfill (CHTC Owned)",
-        "Backfill-OpenCapacity": "Backfill (Open Capacity)",
-        "CHTC Owned": "CHTC Owned",
-        "Researcher Owned": "Researcher Owned",
+        "Backfill": "Secondary (Backfill)",  # Legacy support
+        "Backfill-ResearcherOwned": "Researcher-Owned Hardware",
+        "Backfill-CHTCOwned": "Researcher-Reserved Capacity",
+        "Backfill-OpenCapacity": "Secondary (Backfill) — Open Capacity",
+        "CHTC Owned": "Researcher-Reserved Capacity",
+        "Researcher Owned": "Researcher-Owned Hardware",
         "Open Capacity": "Open Capacity",
     }
     return display_names.get(class_name, class_name)
@@ -512,16 +512,20 @@ def _apply_duplicate_cleanup(df: pl.DataFrame) -> pl.DataFrame:
         return df
 
     # Create a rank column to sort out duplicates.
-    # Prefer primary slots over backfill slots, and claimed over unclaimed within the same type.
-    # This matches the pandas version: Primary Claimed > Primary Unclaimed > Backfill Claimed > Backfill Unclaimed.
-    # IMPORTANT: Primary Unclaimed (rank 2) must beat Backfill Claimed (rank 1) so that idle GPUs
-    # that are also offered as backfill are not dropped from the denominator after the backfill filter.
+    # Prefer primary slots over backfill slots; within each type, prefer Claimed > Unclaimed > Drained.
+    # All primary ranks (3–5) beat all backfill ranks (0–2) so that a Drained primary slot is not
+    # displaced by a Drained backfill slot and then incorrectly excluded by the "not backfill" filter.
+    is_backfill = pl.col("Name").str.contains("backfill")
     df = df.with_columns(
-        pl.when((pl.col("State") == "Claimed") & (~pl.col("Name").str.contains("backfill")))
+        pl.when((pl.col("State") == "Claimed") & (~is_backfill))
+        .then(5)
+        .when((pl.col("State") == "Unclaimed") & (~is_backfill))
+        .then(4)
+        .when(~is_backfill)
         .then(3)
-        .when((pl.col("State") == "Unclaimed") & (~pl.col("Name").str.contains("backfill")))
+        .when((pl.col("State") == "Claimed") & is_backfill)
         .then(2)
-        .when((pl.col("State") == "Claimed") & (pl.col("Name").str.contains("backfill")))
+        .when((pl.col("State") == "Unclaimed") & is_backfill)
         .then(1)
         .otherwise(0)
         .alias("_rank")
