@@ -528,12 +528,41 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
                 open_capacity_tiers[tier]["percent"] = 0
 
         # Real Slots Table
+        pj = results.get("prevent_jobs_stats", {})
+        pca = pj.get("per_class_avg", {})
+
+        def _pj(class_name):
+            """Return formatted blocked-GPU cell value for a single class."""
+            v = pca.get(class_name, 0.0)
+            return f"{v:.1f}" if v > 0 else "—"
+
+        def _pj_sum(*class_names):
+            """Sum blocked-GPU averages across multiple classes; return '—' if zero."""
+            v = sum(pca.get(c, 0.0) for c in class_names)
+            return f"{v:.1f}" if v > 0 else "—"
+
         html_parts.append("<h2>Real Slots</h2>")
         html_parts.append("<table border='1' style='margin-top: 20px;'>")
         html_parts.append(
             "<tr style='background-color: #e0e0e0;'><th>Class</th><th>Allocated %</th><th>Allocated (avg.)</th>"
-            "<th>Drained (avg.)</th><th>Available (avg.)</th></tr>"
+            "<th>Drained (avg.)</th><th>Blocked (avg.)</th><th>Available (avg.)</th></tr>"
         )
+
+        pri_blocked = _pj_sum("Priority-ResearcherOwned", "Priority-CHTCOwned")
+        sec_blocked = _pj_sum("Backfill-ResearcherOwned", "Backfill-CHTCOwned")
+        pri_total_blocked_val = sum(
+            pca.get(c, 0.0)
+            for c in [
+                "Priority-ResearcherOwned",
+                "Priority-CHTCOwned",
+                "Backfill-ResearcherOwned",
+                "Backfill-CHTCOwned",
+            ]
+        )
+        oc_blocked = _pj("Shared")
+        grand_blocked_val = pri_total_blocked_val + pca.get("Shared", 0.0)
+        grand_blocked = f"{grand_blocked_val:.1f}" if grand_blocked_val > 0 else "—"
+        pri_total_blocked = f"{pri_total_blocked_val:.1f}" if pri_total_blocked_val > 0 else "—"
 
         # Grand TOTAL row (primary + secondary + open capacity)
         html_parts.append("<tr style='background-color: #d0d0d0; font-weight: bold;'>")
@@ -541,6 +570,7 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{grand_pct:.1f}%</td>")
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{grand_claimed:.1f}</td>")
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{grand_drained:.1f}</td>")
+        html_parts.append(f"<td style='text-align: right; font-weight: bold; color: #e65100;'>{grand_blocked}</td>")
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{grand_total_avail:.1f}</td>")
         html_parts.append("</tr>")
 
@@ -550,6 +580,7 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_total_pct:.1f}%</td>")
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_total_claimed:.1f}</td>")
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_total_drained:.1f}</td>")
+        html_parts.append(f"<td style='text-align: right; font-weight: bold; color: #e65100;'>{pri_total_blocked}</td>")
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_primary_total:.1f}</td>")
         html_parts.append("</tr>")
 
@@ -559,6 +590,7 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_primary_pct:.1f}%</td>")
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_primary_claimed:.1f}</td>")
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_primary_drained:.1f}</td>")
+        html_parts.append(f"<td style='text-align: right; font-weight: bold; color: #e65100;'>{pri_blocked}</td>")
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_primary_total:.1f}</td>")
         html_parts.append("</tr>")
 
@@ -570,6 +602,7 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
                 html_parts.append(f"<td style='text-align: right;'>{totals['percent']:.1f}%</td>")
                 html_parts.append(f"<td style='text-align: right;'>{totals['claimed']:.1f}</td>")
                 html_parts.append(f"<td style='text-align: right;'>{totals['drained']:.1f}</td>")
+                html_parts.append(f"<td style='text-align: right; color: #e65100;'>{_pj(class_name)}</td>")
                 html_parts.append(f"<td style='text-align: right;'>{totals['total']:.1f}</td>")
                 html_parts.append("</tr>")
 
@@ -580,6 +613,7 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
             html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_secondary_pct:.1f}%</td>")
             html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_secondary_claimed:.1f}</td>")
             html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_secondary_drained:.1f}</td>")
+            html_parts.append(f"<td style='text-align: right; font-weight: bold; color: #e65100;'>{sec_blocked}</td>")
             html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_secondary_total:.1f}</td>")
             html_parts.append("</tr>")
 
@@ -591,6 +625,7 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
                     html_parts.append(f"<td style='text-align: right;'>{totals['percent']:.1f}%</td>")
                     html_parts.append(f"<td style='text-align: right;'>{totals['claimed']:.1f}</td>")
                     html_parts.append(f"<td style='text-align: right;'>{totals['drained']:.1f}</td>")
+                    html_parts.append(f"<td style='text-align: right; color: #e65100;'>{_pj(class_name)}</td>")
                     html_parts.append(f"<td style='text-align: right;'>{totals['total']:.1f}</td>")
                     html_parts.append("</tr>")
 
@@ -602,6 +637,7 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
             html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{oc_totals['percent']:.1f}%</td>")
             html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{oc_totals['claimed']:.1f}</td>")
             html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{oc_totals['drained']:.1f}</td>")
+            html_parts.append(f"<td style='text-align: right; font-weight: bold; color: #e65100;'>{oc_blocked}</td>")
             html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{oc_totals['total']:.1f}</td>")
             html_parts.append("</tr>")
 
@@ -613,6 +649,7 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
                     html_parts.append(f"<td style='text-align: right;'>{tier_data['percent']:.1f}%</td>")
                     html_parts.append(f"<td style='text-align: right;'>{tier_data['claimed']:.1f}</td>")
                     html_parts.append(f"<td style='text-align: right;'>{tier_data['drained']:.1f}</td>")
+                    html_parts.append("<td style='text-align: right;'>—</td>")
                     html_parts.append(f"<td style='text-align: right;'>{tier_data['total']:.1f}</td>")
                     html_parts.append("</tr>")
 

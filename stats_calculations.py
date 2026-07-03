@@ -1378,15 +1378,32 @@ def calculate_prevent_jobs_stats(df: pd.DataFrame) -> dict:
         df: Main GPU state DataFrame (full time window)
 
     Returns:
-        Dictionary with per-host breakdown and reason groupings
+        Dictionary with per-host breakdown, reason groupings, and per-class averages
+        (per_class_avg) for the Real Slots table Blocked column.
     """
+    _CLASS_NAMES = [
+        "Priority-ResearcherOwned",
+        "Priority-CHTCOwned",
+        "Shared",
+        "Backfill-ResearcherOwned",
+        "Backfill-CHTCOwned",
+    ]
+    _empty = {
+        "has_prevent_jobs": False,
+        "num_hosts": 0,
+        "num_unique_gpus": 0,
+        "per_host": {},
+        "by_reason": {},
+        "per_class_avg": {c: 0.0 for c in _CLASS_NAMES},
+    }
+
     if "PreventJobsReason" not in df.columns:
-        return {"has_prevent_jobs": False, "num_hosts": 0, "num_unique_gpus": 0, "per_host": {}, "by_reason": {}}
+        return _empty
 
     filtered = df[df["PreventJobsReason"].notna() & (df["PreventJobsReason"].astype(str).str.strip() != "")].copy()
 
     if filtered.empty:
-        return {"has_prevent_jobs": False, "num_hosts": 0, "num_unique_gpus": 0, "per_host": {}, "by_reason": {}}
+        return _empty
 
     per_host = {}
     for machine, grp in filtered.groupby("Machine"):
@@ -1402,12 +1419,33 @@ def calculate_prevent_jobs_stats(df: pd.DataFrame) -> dict:
             "num_gpus": grp["AssignedGPUs"].nunique(),
         }
 
+    # Per-class averages: for each 15-min bucket count unique blocked GPUs per class,
+    # then average across buckets — same methodology as the Drained column.
+    df_bucketed = df.copy()
+    df_bucketed["timestamp"] = pd.to_datetime(df_bucketed["timestamp"])
+    df_bucketed["15min_bucket"] = df_bucketed["timestamp"].dt.floor("15min")
+    buckets = df_bucketed["15min_bucket"].unique()
+    num_buckets = len(buckets)
+
+    per_class_avg = {}
+    for class_name in _CLASS_NAMES:
+        class_df = filter_df_enhanced(df_bucketed, class_name, "", "")
+        prevented = class_df[
+            class_df["PreventJobsReason"].notna() & (class_df["PreventJobsReason"].astype(str).str.strip() != "")
+        ]
+        if prevented.empty or num_buckets == 0:
+            per_class_avg[class_name] = 0.0
+        else:
+            total = sum(prevented[prevented["15min_bucket"] == b]["AssignedGPUs"].nunique() for b in buckets)
+            per_class_avg[class_name] = total / num_buckets
+
     return {
         "has_prevent_jobs": True,
         "num_hosts": filtered["Machine"].nunique(),
         "num_unique_gpus": filtered["AssignedGPUs"].nunique(),
         "per_host": per_host,
         "by_reason": by_reason,
+        "per_class_avg": per_class_avg,
     }
 
 
