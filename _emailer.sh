@@ -28,6 +28,7 @@ case "$MODE" in
             --hours-back 24 \
             --group-by-device \
             --data-dir /data \
+            --email-subject-prefix "[DEV] CHTC GPU Allocation" \
             --email-to "$RECIPIENTS"
         ;;
     weekly)
@@ -36,6 +37,7 @@ case "$MODE" in
             --hours-back 168 \
             --group-by-device \
             --data-dir /data \
+            --email-subject-prefix "[DEV] CHTC GPU Allocation" \
             --email-to "$RECIPIENTS"
         ;;
     monthly)
@@ -43,6 +45,7 @@ case "$MODE" in
             --exclude-hosts-yaml masked_hosts.yaml \
             --analysis-type monthly \
             --data-dir /data \
+            --email-subject-prefix "[DEV] CHTC GPU Allocation" \
             --email-to "$RECIPIENTS"
         ;;
     test)
@@ -51,6 +54,7 @@ case "$MODE" in
             --hours-back 24 \
             --group-by-device \
             --data-dir /data \
+            --email-subject-prefix "[DEV] CHTC GPU Allocation" \
             --email-to "$TEST_RECIPIENT"
         ;;
     *)

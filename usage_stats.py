@@ -168,6 +168,7 @@ def main(
     smtp_port: int = typer.Option(25, help="SMTP server port (25 for standard SMTP, 587 for submission)"),
     email_timeout: int = typer.Option(30, help="SMTP connection timeout in seconds"),
     email_debug: bool = typer.Option(False, help="Enable SMTP debug output"),
+    email_subject_prefix: str = typer.Option("CHTC GPU Allocation", help="Prefix prepended to the email subject line"),
 ):
     """
     Calculate GPU usage statistics for Priority, Shared, and Backfill classes.
@@ -278,6 +279,7 @@ def main(
             from_email=email_from,
             smtp_server=smtp_server,
             smtp_port=smtp_port,
+            subject_prefix=email_subject_prefix,
             usage_percentages=usage_percentages,
             lookback_hours=hours_back,
             timeout=email_timeout,
