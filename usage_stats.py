@@ -24,6 +24,7 @@ from stats_calculations import (
     calculate_h200_user_breakdown,
     calculate_machines_with_zero_active_gpus,
     calculate_monthly_summary,
+    calculate_prevent_jobs_stats,
     calculate_time_series_usage,
     get_gpu_models_at_time,
 )
@@ -125,6 +126,21 @@ def run_analysis(
             result["monthly_stats"]["draining_stats"] = {"has_draining": False}
         else:
             result["draining_stats"] = {"has_draining": False}
+
+    # Add PreventJobsReason stats
+    try:
+        prevent_jobs_stats = calculate_prevent_jobs_stats(df)
+        if analysis_type == "monthly" and "monthly_stats" in result and "error" not in result["monthly_stats"]:
+            result["monthly_stats"]["prevent_jobs_stats"] = prevent_jobs_stats
+        else:
+            result["prevent_jobs_stats"] = prevent_jobs_stats
+    except Exception as e:
+        print(f"Warning: Could not calculate PreventJobsReason stats: {e}", file=__import__("sys").stderr)
+        fallback = {"has_prevent_jobs": False, "num_hosts": 0, "num_unique_gpus": 0, "per_host": {}, "by_reason": {}}
+        if analysis_type == "monthly" and "monthly_stats" in result and "error" not in result["monthly_stats"]:
+            result["monthly_stats"]["prevent_jobs_stats"] = fallback
+        else:
+            result["prevent_jobs_stats"] = fallback
 
     # Add runtime information to metadata
     analysis_end_time = time.time()

@@ -405,6 +405,8 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
             regular_results["h200_user_stats"] = monthly_stats["h200_user_stats"]
         if "draining_stats" in monthly_stats:
             regular_results["draining_stats"] = monthly_stats["draining_stats"]
+        if "prevent_jobs_stats" in monthly_stats:
+            regular_results["prevent_jobs_stats"] = monthly_stats["prevent_jobs_stats"]
         if "raw_data" in monthly_stats:
             regular_results["raw_data"] = monthly_stats["raw_data"]
         if "host_filter" in monthly_stats:
@@ -1191,6 +1193,42 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
         html_parts.append("<h2>GPU Draining Status</h2>")
         html_parts.append("<p><em>No GPUs were drained during this period.</em></p>")
 
+    # PreventJobsReason Status
+    prevent_jobs_stats = results.get("prevent_jobs_stats", {})
+    if prevent_jobs_stats.get("has_prevent_jobs", False):
+        html_parts.append("<h2 style='color: #e65100;'>GPUs with PreventJobsReason Set</h2>")
+        html_parts.append("<table border='1' style='background-color: #fff3e0;'>")
+        html_parts.append("<tr style='background-color: #ffe0b2;'><th>Metric</th><th>Value</th></tr>")
+        html_parts.append("<tr>")
+        html_parts.append("<td><strong>Hosts affected</strong></td>")
+        html_parts.append(f"<td style='text-align: right;'>{prevent_jobs_stats['num_hosts']}</td>")
+        html_parts.append("</tr>")
+        html_parts.append("<tr>")
+        html_parts.append("<td><strong>Unique GPUs affected</strong></td>")
+        html_parts.append(f"<td style='text-align: right;'>{prevent_jobs_stats['num_unique_gpus']}</td>")
+        html_parts.append("</tr>")
+        html_parts.append("</table>")
+
+        per_host = prevent_jobs_stats.get("per_host", {})
+        if per_host:
+            html_parts.append("<h3>Per-Host Breakdown</h3>")
+            html_parts.append("<table border='1'>")
+            html_parts.append(
+                "<tr style='background-color: #e0e0e0;'><th>Host</th><th>GPUs</th><th>Reason(s)</th></tr>"
+            )
+            for host_name in sorted(per_host):
+                d = per_host[host_name]
+                reasons = "; ".join(d["reasons"]) or "—"
+                html_parts.append("<tr>")
+                html_parts.append(f"<td><strong>{host_name}</strong></td>")
+                html_parts.append(f"<td style='text-align: right;'>{d['num_gpus']}</td>")
+                html_parts.append(f"<td>{reasons}</td>")
+                html_parts.append("</tr>")
+            html_parts.append("</table>")
+    elif prevent_jobs_stats:
+        html_parts.append("<h2>GPUs with PreventJobsReason Set</h2>")
+        html_parts.append("<p><em>No GPUs have PreventJobsReason set during this period.</em></p>")
+
     # Excluded hosts
     excluded_hosts = metadata.get("excluded_hosts", {})
     if excluded_hosts:
@@ -1713,6 +1751,20 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
                 f"Backfill {row['backfill_usage_percent']:.1f}% "
                 f"({int(row['backfill_claimed'])}/{int(row['backfill_total'])})"
             )
+
+    # PreventJobsReason summary
+    prevent_jobs_stats = results.get("prevent_jobs_stats", {})
+    if prevent_jobs_stats.get("has_prevent_jobs", False):
+        print(f"\n{'=' * 70}")
+        print("GPUs WITH PreventJobsReason SET:")
+        print(f"  Hosts affected:       {prevent_jobs_stats['num_hosts']}")
+        print(f"  Unique GPUs affected: {prevent_jobs_stats['num_unique_gpus']}")
+        per_host = prevent_jobs_stats.get("per_host", {})
+        if per_host:
+            for host_name in sorted(per_host):
+                d = per_host[host_name]
+                reasons = "; ".join(d["reasons"]) or "—"
+                print(f"  {host_name}: {d['num_gpus']} GPU(s) — {reasons}")
 
     # Show host exclusion information at the bottom
     excluded_hosts = metadata.get("excluded_hosts", {})

@@ -23,6 +23,7 @@ import polars as pl
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from stats_calculations import calculate_prevent_jobs_stats  # noqa: E402
 from stats_data import get_draining_data, get_time_filtered_data  # noqa: E402
 from stats_reporting import generate_html_report  # noqa: E402
 
@@ -38,11 +39,12 @@ _SCHEMA = {
     "Machine": pl.Utf8,
     "RemoteOwner": pl.Utf8,
     "GlobalJobId": pl.Utf8,
+    "PreventJobsReason": pl.Utf8,
     "timestamp": pl.Datetime("us"),
 }
 
 
-def _row(ts, machine, gpu, state, mem_mb=40960):
+def _row(ts, machine, gpu, state, mem_mb=40960, prevent_jobs_reason=None):
     return {
         "Name": f"slot@{machine}",
         "AssignedGPUs": gpu,
@@ -55,6 +57,7 @@ def _row(ts, machine, gpu, state, mem_mb=40960):
         "Machine": machine,
         "RemoteOwner": None,
         "GlobalJobId": None,
+        "PreventJobsReason": prevent_jobs_reason,
         "timestamp": ts,
     }
 
@@ -149,3 +152,98 @@ class TestMemoryCategorySortDeterminism:
             i_lt, i_eq = html.find(lt), html.find(eq)
             assert i_lt != -1 and i_eq != -1, f"memory rows missing for insertion {order}"
             assert i_lt < i_eq, f"'<48GB' must render before '48GB' for insertion {order}"
+
+
+class TestPreventJobsStats:
+    """calculate_prevent_jobs_stats correctly detects and counts blocked GPUs."""
+
+    _ts = datetime.datetime(2026, 7, 2, 12, 0, 0)
+
+    def _make_df(self, rows):
+        import pandas as pd
+
+        return pd.DataFrame(rows).astype(
+            {
+                "Name": "object",
+                "AssignedGPUs": "object",
+                "State": "object",
+                "Machine": "object",
+                "PreventJobsReason": "object",
+            }
+        )
+
+    def test_detect_prevent_jobs_reason(self):
+        """Rows with PreventJobsReason are counted; rows without are excluded."""
+        df = self._make_df(
+            [
+                _row(self._ts, "hostA", "GPU-1", "Claimed", prevent_jobs_reason="GPUHealthy == False"),
+                _row(self._ts, "hostA", "GPU-2", "Claimed", prevent_jobs_reason="GPUHealthy == False"),
+                _row(self._ts, "hostB", "GPU-3", "Unclaimed"),  # no reason → excluded
+            ]
+        )
+        result = calculate_prevent_jobs_stats(df)
+        assert result["has_prevent_jobs"] is True
+        assert result["num_hosts"] == 1
+        assert result["num_unique_gpus"] == 2
+        assert "hostA" in result["per_host"]
+        assert result["per_host"]["hostA"]["num_gpus"] == 2
+        assert "GPUHealthy == False" in result["per_host"]["hostA"]["reasons"]
+
+    def test_empty_string_excluded(self):
+        """PreventJobsReason='' is treated the same as absent."""
+        df = self._make_df(
+            [
+                _row(self._ts, "hostA", "GPU-1", "Claimed", prevent_jobs_reason=""),
+                _row(self._ts, "hostA", "GPU-1", "Claimed", prevent_jobs_reason="   "),
+            ]
+        )
+        result = calculate_prevent_jobs_stats(df)
+        assert result["has_prevent_jobs"] is False
+
+    def test_missing_column_returns_false(self):
+        """DataFrame without PreventJobsReason column returns has_prevent_jobs=False."""
+        import pandas as pd
+
+        df = pd.DataFrame([{"AssignedGPUs": "GPU-1", "Machine": "hostA", "State": "Claimed"}])
+        result = calculate_prevent_jobs_stats(df)
+        assert result["has_prevent_jobs"] is False
+        assert result["num_hosts"] == 0
+
+    def test_html_section_rendered(self):
+        """HTML report includes PreventJobsReason section with orange header and host table."""
+        results = {
+            "metadata": {
+                "hours_back": 24,
+                "start_time": "2026-07-02 08:40:00",
+                "end_time": "2026-07-03 08:35:00",
+                "num_intervals": 97,
+                "total_records": 1,
+                "excluded_hosts": {},
+                "filtered_hosts_info": [],
+            },
+            "device_stats": {
+                "Priority-CHTCOwned": {
+                    "NVIDIA A100-SXM4-80GB": {
+                        "avg_claimed": 1.0,
+                        "avg_total_available": 2.0,
+                        "avg_drained": 0.0,
+                    }
+                }
+            },
+            "memory_stats": {},
+            "draining_stats": {"has_draining": False},
+            "prevent_jobs_stats": {
+                "has_prevent_jobs": True,
+                "num_hosts": 1,
+                "num_unique_gpus": 2,
+                "per_host": {
+                    "hostA": {"num_gpus": 2, "reasons": ["GPUHealthy == False"]},
+                },
+                "by_reason": {"GPUHealthy == False": {"num_hosts": 1, "num_gpus": 2}},
+            },
+        }
+        html = generate_html_report(results)
+        assert "PreventJobsReason" in html
+        assert "e65100" in html  # orange colour
+        assert "hostA" in html
+        assert "GPUHealthy == False" in html

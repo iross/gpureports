@@ -1370,6 +1370,47 @@ def analyze_gpu_model_at_time(
     }
 
 
+def calculate_prevent_jobs_stats(df: pd.DataFrame) -> dict:
+    """
+    Calculate summary statistics for GPUs with PreventJobsReason set.
+
+    Args:
+        df: Main GPU state DataFrame (full time window)
+
+    Returns:
+        Dictionary with per-host breakdown and reason groupings
+    """
+    if "PreventJobsReason" not in df.columns:
+        return {"has_prevent_jobs": False, "num_hosts": 0, "num_unique_gpus": 0, "per_host": {}, "by_reason": {}}
+
+    filtered = df[df["PreventJobsReason"].notna() & (df["PreventJobsReason"].astype(str).str.strip() != "")].copy()
+
+    if filtered.empty:
+        return {"has_prevent_jobs": False, "num_hosts": 0, "num_unique_gpus": 0, "per_host": {}, "by_reason": {}}
+
+    per_host = {}
+    for machine, grp in filtered.groupby("Machine"):
+        per_host[machine] = {
+            "num_gpus": grp["AssignedGPUs"].nunique(),
+            "reasons": sorted(grp["PreventJobsReason"].dropna().unique().tolist()),
+        }
+
+    by_reason = {}
+    for reason, grp in filtered.groupby("PreventJobsReason"):
+        by_reason[str(reason)] = {
+            "num_hosts": grp["Machine"].nunique(),
+            "num_gpus": grp["AssignedGPUs"].nunique(),
+        }
+
+    return {
+        "has_prevent_jobs": True,
+        "num_hosts": filtered["Machine"].nunique(),
+        "num_unique_gpus": filtered["AssignedGPUs"].nunique(),
+        "per_host": per_host,
+        "by_reason": by_reason,
+    }
+
+
 def calculate_draining_stats(df: pd.DataFrame) -> dict:
     """
     Calculate summary statistics for drained GPUs.
