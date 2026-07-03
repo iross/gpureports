@@ -26,10 +26,9 @@ CLASS_ORDER = [
     "Shared",
     "Backfill-ResearcherOwned",
     "Backfill-CHTCOwned",
-    "Backfill-OpenCapacity",
 ]
 UTILIZATION_TYPES = ["Priority", "Shared", "Backfill"]
-BACKFILL_SLOT_TYPES = ["Backfill-ResearcherOwned", "Backfill-CHTCOwned", "Backfill-OpenCapacity"]
+BACKFILL_SLOT_TYPES = ["Backfill-ResearcherOwned", "Backfill-CHTCOwned"]
 
 
 def load_chtc_owned_hosts(chtc_owned_file: str = "chtc_owned") -> set:
@@ -398,15 +397,15 @@ def get_display_name(class_name: str) -> str:
     """Convert internal class names to user-friendly display names."""
     display_names = {
         "Priority": "Prioritized service",  # Legacy support
-        "Priority-ResearcherOwned": "Prioritized (Researcher Owned)",
-        "Priority-CHTCOwned": "Prioritized (CHTC Owned)",
+        "Priority-ResearcherOwned": "Researcher-Owned Hardware",
+        "Priority-CHTCOwned": "Researcher-Reserved Capacity",
         "Shared": "Open Capacity",
-        "Backfill": "Backfill",  # Legacy support
-        "Backfill-ResearcherOwned": "Backfill (Researcher Owned)",
-        "Backfill-CHTCOwned": "Backfill (CHTC Owned)",
-        "Backfill-OpenCapacity": "Backfill (Open Capacity)",
-        "CHTC Owned": "CHTC Owned",
-        "Researcher Owned": "Researcher Owned",
+        "Backfill": "Secondary (Backfill)",  # Legacy support
+        "Backfill-ResearcherOwned": "Researcher-Owned Hardware",
+        "Backfill-CHTCOwned": "Researcher-Reserved Capacity",
+        "Backfill-OpenCapacity": "Secondary (Backfill) — Open Capacity",
+        "CHTC Owned": "Researcher-Reserved Capacity",
+        "Researcher Owned": "Researcher-Owned Hardware",
         "Open Capacity": "Open Capacity",
     }
     return display_names.get(class_name, class_name)
@@ -562,16 +561,20 @@ def _apply_duplicate_cleanup(df: pl.DataFrame) -> pl.DataFrame:
         return df
 
     # Create a rank column to sort out duplicates.
-    # Prefer primary slots over backfill slots, and claimed over unclaimed within the same type.
-    # This matches the pandas version: Primary Claimed > Primary Unclaimed > Backfill Claimed > Backfill Unclaimed.
-    # IMPORTANT: Primary Unclaimed (rank 2) must beat Backfill Claimed (rank 1) so that idle GPUs
-    # that are also offered as backfill are not dropped from the denominator after the backfill filter.
+    # Prefer primary slots over backfill slots; within each type, prefer Claimed > Unclaimed > Drained.
+    # All primary ranks (3–5) beat all backfill ranks (0–2) so that a Drained primary slot is not
+    # displaced by a Drained backfill slot and then incorrectly excluded by the "not backfill" filter.
+    is_backfill = pl.col("Name").str.contains("backfill")
     df = df.with_columns(
-        pl.when((pl.col("State") == "Claimed") & (~pl.col("Name").str.contains("backfill")))
+        pl.when((pl.col("State") == "Claimed") & (~is_backfill))
+        .then(5)
+        .when((pl.col("State") == "Unclaimed") & (~is_backfill))
+        .then(4)
+        .when(~is_backfill)
         .then(3)
-        .when((pl.col("State") == "Unclaimed") & (~pl.col("Name").str.contains("backfill")))
+        .when((pl.col("State") == "Claimed") & is_backfill)
         .then(2)
-        .when((pl.col("State") == "Claimed") & (pl.col("Name").str.contains("backfill")))
+        .when((pl.col("State") == "Unclaimed") & is_backfill)
         .then(1)
         .otherwise(0)
         .alias("_rank")
@@ -699,32 +702,38 @@ def filter_df_enhanced(df: pl.DataFrame, utilization: str = "", state: str = "",
                 & (~pl.col("Name").str.contains("backfill"))
             )
 
-    elif utilization == "Backfill-ResearcherOwned":
-        df = df.filter(
-            (pl.col("State") == state if state != "" else pl.lit(True))
-            & host_cond
-            & (pl.col("Name").str.contains("backfill"))
-            & (pl.col("PrioritizedProjects") != "")
-            & (pl.col("PrioritizedProjects").is_not_null())
-            & (~pl.col("Machine").is_in(list(chtc_owned_hosts)))
+    elif utilization in ["Backfill-ResearcherOwned", "Backfill-CHTCOwned", "Backfill-OpenCapacity"]:
+        # Classify backfill slots by machine's primary ownership, not the backfill slot's PrioritizedProjects
+        # First identify researcher-owned machines (machines with any non-empty PrioritizedProjects in primary slots)
+        primary_slots = df.filter(~pl.col("Name").str.contains("backfill"))
+        researcher_machines = set(
+            primary_slots.filter(
+                (pl.col("PrioritizedProjects") != "")
+                & (pl.col("PrioritizedProjects").is_not_null())
+                & (~pl.col("Machine").is_in(list(chtc_owned_hosts)))
+            )
+            .select(pl.col("Machine").unique())
+            .to_series()
+            .to_list()
         )
 
-    elif utilization == "Backfill-CHTCOwned":
-        df = df.filter(
-            (pl.col("State") == state if state != "" else pl.lit(True))
-            & host_cond
-            & (pl.col("Name").str.contains("backfill"))
-            & (pl.col("Machine").is_in(list(chtc_owned_hosts)))
-        )
+        # Filter to backfill slots only
+        df = df.filter(pl.col("Name").str.contains("backfill"))
+        if state != "":
+            df = df.filter(pl.col("State") == state)
+        if host != "":
+            df = df.filter(host_cond)
 
-    elif utilization == "Backfill-OpenCapacity":
-        df = df.filter(
-            (pl.col("State") == state if state != "" else pl.lit(True))
-            & host_cond
-            & (pl.col("Name").str.contains("backfill"))
-            & ((pl.col("PrioritizedProjects") == "") | (pl.col("PrioritizedProjects").is_null()))
-            & (~pl.col("Machine").is_in(list(chtc_owned_hosts)))
-        )
+        # Classify based on machine ownership
+        if utilization == "Backfill-ResearcherOwned":
+            df = df.filter(pl.col("Machine").is_in(list(researcher_machines)))
+        elif utilization == "Backfill-CHTCOwned":
+            df = df.filter(pl.col("Machine").is_in(list(chtc_owned_hosts)))
+        elif utilization == "Backfill-OpenCapacity":
+            df = df.filter(
+                (~pl.col("Machine").is_in(list(chtc_owned_hosts)))
+                & (~pl.col("Machine").is_in(list(researcher_machines)))
+            )
 
     elif utilization == "Shared":
         df = _apply_duplicate_cleanup(df)

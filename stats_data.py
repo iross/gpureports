@@ -85,13 +85,13 @@ def clear_dataframe_cache():
     _filtered_cache.clear()
 
 
-def _parquet_glob(base_dir: str) -> str:
+def parquet_glob(base_dir: str) -> str:
     return os.path.join(os.path.abspath(base_dir), "gpu_state_*.parquet")
 
 
 def get_latest_timestamp(data_dir: str) -> datetime.datetime | None:
     """Return the latest timestamp across all gpu_state Parquet files in data_dir."""
-    glob = _parquet_glob(data_dir)
+    glob = parquet_glob(data_dir)
     try:
         con = duckdb.connect()
         row = con.execute(f"SELECT MAX(timestamp) FROM parquet_scan('{glob}', hive_partitioning=false)").fetchone()
@@ -127,7 +127,7 @@ def get_time_filtered_data(
 
     start_time = end_time - datetime.timedelta(hours=hours_back)
 
-    glob = _parquet_glob(data_dir)
+    glob = parquet_glob(data_dir)
     start_str = start_time.strftime("%Y-%m-%d %H:%M:%S")
     end_str = end_time.strftime("%Y-%m-%d %H:%M:%S")
     # Note: datetime strings are derived from internal datetime objects, not user input.
@@ -145,4 +145,62 @@ def get_time_filtered_data(
         return df
     except Exception as e:
         print(f"Error: DuckDB parquet query failed: {e}")
+        return pd.DataFrame()
+
+
+def get_draining_data(data_dir: str, hours_back: int = 24, end_time: datetime.datetime | None = None) -> pd.DataFrame:
+    """
+    Get GPU draining data (State='Drained') for the specified time range from Parquet files.
+    Only includes GPUs that are drained and NOT claimed by any slot at that timestamp.
+
+    Args:
+        data_dir: Directory containing gpu_state_*.parquet files
+        hours_back: Number of hours to look back from end_time
+        end_time: End time for the range (defaults to latest timestamp across all Parquet files)
+
+    Returns:
+        DataFrame with draining data (Machine, AssignedGPUs, timestamp)
+    """
+    if end_time is None:
+        end_time = get_latest_timestamp(data_dir)
+        if end_time is None:
+            end_time = datetime.datetime.now()
+
+    start_time = end_time - datetime.timedelta(hours=hours_back)
+
+    glob = parquet_glob(data_dir)
+    start_str = start_time.strftime("%Y-%m-%d %H:%M:%S")
+    end_str = end_time.strftime("%Y-%m-%d %H:%M:%S")
+    # Note: datetime strings are derived from internal datetime objects, not user input.
+    query = f"""
+    WITH DrainedGPUs AS (
+        SELECT DISTINCT Machine, AssignedGPUs, timestamp
+        FROM parquet_scan('{glob}', hive_partitioning=false)
+        WHERE timestamp >= '{start_str}' AND timestamp <= '{end_str}'
+            AND State = 'Drained' AND AssignedGPUs IS NOT NULL
+    ),
+    ClaimedGPUs AS (
+        SELECT DISTINCT Machine, AssignedGPUs, timestamp
+        FROM parquet_scan('{glob}', hive_partitioning=false)
+        WHERE timestamp >= '{start_str}' AND timestamp <= '{end_str}'
+            AND State = 'Claimed' AND AssignedGPUs IS NOT NULL
+    )
+    SELECT d.Machine, d.AssignedGPUs, d.timestamp
+    FROM DrainedGPUs d
+    LEFT JOIN ClaimedGPUs c
+        ON d.Machine = c.Machine
+        AND d.AssignedGPUs = c.AssignedGPUs
+        AND d.timestamp = c.timestamp
+    WHERE c.AssignedGPUs IS NULL
+    ORDER BY d.Machine, d.timestamp
+    """
+    try:
+        con = duckdb.connect()
+        df = con.execute(query).df()
+        con.close()
+        if len(df) > 0:
+            df["timestamp"] = pd.to_datetime(df["timestamp"])
+        return df
+    except Exception as e:
+        print(f"Error: DuckDB draining query failed: {e}")
         return pd.DataFrame()

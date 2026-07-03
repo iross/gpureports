@@ -7,8 +7,8 @@ allocation usage, performance metrics, time series data, and device breakdowns.
 """
 
 import datetime
-import sqlite3
 
+import duckdb
 import pandas as pd
 
 import gpu_utils
@@ -25,6 +25,7 @@ from stats_data import (
     get_latest_timestamp,
     get_preprocessed_dataframe,
     get_time_filtered_data,
+    parquet_glob,
 )
 
 
@@ -126,7 +127,6 @@ def calculate_allocation_usage_enhanced(df: pd.DataFrame, host: str = "") -> dic
         "Shared",
         "Backfill-CHTCOwned",
         "Backfill-ResearcherOwned",
-        "Backfill-OpenCapacity",
     ]
 
     for utilization_type in utilization_types:
@@ -261,7 +261,6 @@ def calculate_allocation_usage_by_device_enhanced(
         "Shared",
         "Backfill-CHTCOwned",
         "Backfill-ResearcherOwned",
-        "Backfill-OpenCapacity",
     ]
 
     # Pre-filter data by utilization type and device type to avoid repeated filtering
@@ -595,6 +594,11 @@ def calculate_allocation_usage_by_memory(df: pd.DataFrame, host: str = "", inclu
     # Add memory category column based on GPUs_GlobalMemoryMb
     df["memory_category"] = df["GPUs_GlobalMemoryMb"].apply(get_memory_category_from_mb)
 
+    # Filter out old/uncommon GPU types for consistency with device-based reporting
+    if not include_all_devices:
+        old_gpus = ["GTX 1080", "P100", "Quadro", "A30", "A40"]
+        df = df[~df["GPUs_DeviceName"].str.contains("|".join(old_gpus), na=False)]
+
     # Get unique memory categories
     memory_categories = df["memory_category"].dropna().unique()
 
@@ -795,7 +799,6 @@ def calculate_h200_user_breakdown(df: pd.DataFrame, host: str = "", hours_back: 
                     "Shared": 0,
                     "Backfill-ResearcherOwned": 0,
                     "Backfill-CHTCOwned": 0,
-                    "Backfill-OpenCapacity": 0,
                 }
 
             user_stats[user][slot_type] = gpu_hours
@@ -896,7 +899,7 @@ def calculate_backfill_usage_by_user(
             gpu_hours = avg_gpus * actual_duration_hours
 
             if user not in user_stats:
-                user_stats[user] = {"Backfill-ResearcherOwned": 0, "Backfill-CHTCOwned": 0, "Backfill-OpenCapacity": 0}
+                user_stats[user] = {"Backfill-ResearcherOwned": 0, "Backfill-CHTCOwned": 0}
             user_stats[user][slot_type] = gpu_hours
 
     # Calculate final statistics
@@ -1179,46 +1182,47 @@ def calculate_monthly_summary(data_dir: str, end_time: datetime.datetime | None 
     }
 
 
-def get_gpu_models_at_time(db_path: str, target_time: datetime.datetime, window_minutes: int = 5) -> list:
+def get_gpu_models_at_time(data_dir: str, target_time: datetime.datetime, window_minutes: int = 5) -> list:
     """
     Get all GPU models available at a specific time.
 
     Args:
-        db_path: Path to SQLite database
+        data_dir: Directory containing gpu_state_*.parquet files
         target_time: Time to query for GPU models
         window_minutes: Time window around target_time to search (default: 5 minutes)
 
     Returns:
         List of GPU model names available at the specified time
     """
-    conn = sqlite3.connect(db_path)
-
     # Define time window
     start_time = target_time - datetime.timedelta(minutes=window_minutes)
     end_time = target_time + datetime.timedelta(minutes=window_minutes)
 
-    query = """
-    SELECT DISTINCT GPUs_DeviceName
-    FROM gpu_state
-    WHERE GPUs_DeviceName IS NOT NULL
-    AND timestamp BETWEEN ? AND ?
-    ORDER BY GPUs_DeviceName
-    """
+    glob = parquet_glob(data_dir)
+    start_str = start_time.strftime("%Y-%m-%d %H:%M:%S")
+    end_str = end_time.strftime("%Y-%m-%d %H:%M:%S")
+    # Note: datetime strings are derived from internal datetime objects, not user input.
+    query = (
+        f"SELECT DISTINCT GPUs_DeviceName FROM parquet_scan('{glob}', hive_partitioning=false) "
+        f"WHERE GPUs_DeviceName IS NOT NULL AND timestamp BETWEEN '{start_str}' AND '{end_str}' "
+        "ORDER BY GPUs_DeviceName"
+    )
 
-    df = pd.read_sql_query(query, conn, params=[start_time, end_time])
-    conn.close()
+    con = duckdb.connect()
+    df = con.execute(query).df()
+    con.close()
 
     return df["GPUs_DeviceName"].tolist()
 
 
 def get_gpu_model_activity_at_time(
-    db_path: str, gpu_model: str, target_time: datetime.datetime, window_minutes: int = 5
+    data_dir: str, gpu_model: str, target_time: datetime.datetime, window_minutes: int = 5
 ) -> pd.DataFrame:
     """
     Get detailed activity for a specific GPU model at a specific time.
 
     Args:
-        db_path: Path to SQLite database
+        data_dir: Directory containing gpu_state_*.parquet files
         gpu_model: GPU model name (e.g., 'NVIDIA A100-SXM4-80GB')
         target_time: Time to query for activity
         window_minutes: Time window around target_time to search (default: 5 minutes)
@@ -1226,24 +1230,26 @@ def get_gpu_model_activity_at_time(
     Returns:
         DataFrame with detailed GPU activity information
     """
-    conn = sqlite3.connect(db_path)
-
     # Define time window
     start_time = target_time - datetime.timedelta(minutes=window_minutes)
     end_time = target_time + datetime.timedelta(minutes=window_minutes)
 
-    query = """
-    SELECT timestamp, Name, AssignedGPUs, State, GPUs_DeviceName,
-           GPUsAverageUsage, Machine, RemoteOwner, GlobalJobId,
-           PrioritizedProjects
-    FROM gpu_state
-    WHERE GPUs_DeviceName = ?
-    AND timestamp BETWEEN ? AND ?
-    ORDER BY timestamp DESC, Machine, AssignedGPUs
-    """
+    glob = parquet_glob(data_dir)
+    start_str = start_time.strftime("%Y-%m-%d %H:%M:%S")
+    end_str = end_time.strftime("%Y-%m-%d %H:%M:%S")
+    # Note: timestamps are derived from internal datetime objects; gpu_model is user input
+    # and is bound as a query parameter below.
+    query = (
+        "SELECT timestamp, Name, AssignedGPUs, State, GPUs_DeviceName, "
+        "GPUsAverageUsage, Machine, RemoteOwner, GlobalJobId, PrioritizedProjects "
+        f"FROM parquet_scan('{glob}', hive_partitioning=false) "
+        f"WHERE GPUs_DeviceName = ? AND timestamp BETWEEN '{start_str}' AND '{end_str}' "
+        "ORDER BY timestamp DESC, Machine, AssignedGPUs"
+    )
 
-    df = pd.read_sql_query(query, conn, params=[gpu_model, start_time, end_time])
-    conn.close()
+    con = duckdb.connect()
+    df = con.execute(query, [gpu_model]).df()
+    con.close()
 
     if len(df) > 0:
         df["timestamp"] = pd.to_datetime(df["timestamp"])
@@ -1252,13 +1258,13 @@ def get_gpu_model_activity_at_time(
 
 
 def analyze_gpu_model_at_time(
-    db_path: str, gpu_model: str, target_time: datetime.datetime, window_minutes: int = 5
+    data_dir: str, gpu_model: str, target_time: datetime.datetime, window_minutes: int = 5
 ) -> dict:
     """
     Analyze what's happening with a specific GPU model at a specific time.
 
     Args:
-        db_path: Path to SQLite database
+        data_dir: Directory containing gpu_state_*.parquet files
         gpu_model: GPU model name
         target_time: Time to analyze
         window_minutes: Time window to search
@@ -1266,7 +1272,7 @@ def analyze_gpu_model_at_time(
     Returns:
         Dictionary with analysis results
     """
-    df = get_gpu_model_activity_at_time(db_path, gpu_model, target_time, window_minutes)
+    df = get_gpu_model_activity_at_time(data_dir, gpu_model, target_time, window_minutes)
 
     if len(df) == 0:
         return {"error": f"No data found for {gpu_model} around {target_time.strftime('%Y-%m-%d %H:%M:%S')}"}
@@ -1361,4 +1367,103 @@ def analyze_gpu_model_at_time(
         "active_jobs": active_jobs.to_dict("records") if len(active_jobs) > 0 else [],
         "inactive_gpus": inactive_gpus.to_dict("records") if len(inactive_gpus) > 0 else [],
         "raw_data": snapshot_df,
+    }
+
+
+def calculate_draining_stats(df: pd.DataFrame) -> dict:
+    """
+    Calculate summary statistics for drained GPUs.
+
+    Args:
+        df: DataFrame with draining data (Machine, AssignedGPUs, timestamp)
+
+    Returns:
+        Dictionary with draining summary and per-host breakdown
+    """
+    if df.empty:
+        return {
+            "has_draining": False,
+            "num_hosts": 0,
+            "num_unique_gpus": 0,
+            "num_intervals": 0,
+            "total_hours": 0.0,
+            "per_host": {},
+        }
+
+    # Group by machine+GPU and create intervals
+    draining_intervals = []
+    df = df.copy()
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+
+    for (machine, gpu_id), gpu_df in df.groupby(["Machine", "AssignedGPUs"]):
+        gpu_df = gpu_df.sort_values("timestamp").copy()
+        gpu_df["time_diff"] = gpu_df["timestamp"].diff()
+
+        # Start new interval if gap > 20 minutes
+        gpu_df["new_interval"] = gpu_df["time_diff"] > pd.Timedelta(minutes=20)
+        gpu_df["interval_id"] = gpu_df["new_interval"].cumsum()
+
+        for _interval_id, group in gpu_df.groupby("interval_id"):
+            start = group["timestamp"].min()
+            end = group["timestamp"].max()
+
+            # If single data point, assume 15 min duration
+            if start == end:
+                end = start + pd.Timedelta(minutes=15)
+
+            duration_hours = (end - start).total_seconds() / 3600
+            draining_intervals.append(
+                {
+                    "machine": machine,
+                    "gpu_id": gpu_id,
+                    "start": start,
+                    "end": end,
+                    "duration_hours": duration_hours,
+                }
+            )
+
+    if not draining_intervals:
+        return {
+            "has_draining": False,
+            "num_hosts": 0,
+            "num_unique_gpus": 0,
+            "num_intervals": 0,
+            "total_hours": 0.0,
+            "per_host": {},
+        }
+
+    intervals_df = pd.DataFrame(draining_intervals)
+
+    # Calculate totals
+    unique_hosts = intervals_df["machine"].nunique()
+    unique_gpus = intervals_df["gpu_id"].nunique()
+    total_intervals = len(intervals_df)
+    total_hours = intervals_df["duration_hours"].sum()
+
+    # Per-host breakdown
+    per_host = {}
+    for machine in sorted(intervals_df["machine"].unique()):
+        machine_data = intervals_df[intervals_df["machine"] == machine]
+        host_gpus = machine_data["gpu_id"].unique()
+
+        per_host[machine] = {
+            "num_gpus": len(host_gpus),
+            "num_intervals": len(machine_data),
+            "total_hours": machine_data["duration_hours"].sum(),
+            "gpu_details": {
+                str(gpu_id): {
+                    "num_intervals": len(machine_data[machine_data["gpu_id"] == gpu_id]),
+                    "total_hours": machine_data[machine_data["gpu_id"] == gpu_id]["duration_hours"].sum(),
+                }
+                for gpu_id in sorted(host_gpus)
+            },
+        }
+
+    return {
+        "has_draining": True,
+        "num_hosts": unique_hosts,
+        "num_unique_gpus": unique_gpus,
+        "num_intervals": total_intervals,
+        "total_hours": total_hours,
+        "per_host": per_host,
     }

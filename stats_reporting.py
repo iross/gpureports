@@ -78,7 +78,7 @@ def print_gpu_model_analysis(analysis: dict):
             usage_pct = (stats["claimed"] / stats["total"] * 100) if stats["total"] > 0 else 0
             print(f"  {class_name}: {stats['claimed']}/{stats['total']} ({usage_pct:.1f}%)")
 
-    print("\nBACKFILL SLOTS:")
+    print("\nSECONDARY (BACKFILL) SLOTS:")
     print(f"{'-' * 40}")
     print(f"  TOTAL: {backfill_claimed}/{backfill_total} ({backfill_usage_pct:.1f}%)")
     print(f"{'-' * 40}")
@@ -209,7 +209,7 @@ def send_email_report(
                     usage_parts.append(f"{percentage:.1f}%")
                 elif class_name == "Backfill":
                     # For Backfill, combine all backfill types
-                    backfill_types = ["Backfill-ResearcherOwned", "Backfill-CHTCOwned", "Backfill-OpenCapacity"]
+                    backfill_types = ["Backfill-ResearcherOwned", "Backfill-CHTCOwned"]
                     total_claimed = 0
                     total_available = 0
 
@@ -403,6 +403,8 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
             regular_results["memory_stats"] = monthly_stats["memory_stats"]
         if "h200_user_stats" in monthly_stats:
             regular_results["h200_user_stats"] = monthly_stats["h200_user_stats"]
+        if "draining_stats" in monthly_stats:
+            regular_results["draining_stats"] = monthly_stats["draining_stats"]
         if "raw_data" in monthly_stats:
             regular_results["raw_data"] = monthly_stats["raw_data"]
         if "host_filter" in monthly_stats:
@@ -453,44 +455,68 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
             device_data = device_stats.get(class_name, {})
             if device_data:
                 total_claimed = 0
+                total_drained = 0
                 total_available = 0
                 for _device_type, stats in device_data.items():
                     total_claimed += stats["avg_claimed"]
+                    total_drained += stats.get("avg_drained", 0.0)
                     total_available += stats["avg_total_available"]
 
                 if total_available > 0:
                     class_totals[class_name] = {
                         "claimed": total_claimed,
+                        "drained": total_drained,
                         "total": total_available,
                         "percent": (total_claimed / total_available) * 100,
                     }
 
-    # Cluster summary at the top with real slots and backfill slots separated
+    # Cluster summary at the top — Prioritized rows include both primary and secondary (backfill)
     if class_totals:
-        # Separate real slots from backfill slots
-        real_slot_classes = ["Priority-ResearcherOwned", "Priority-CHTCOwned", "Shared"]
-        backfill_slot_classes = ["Backfill-ResearcherOwned", "Backfill-CHTCOwned", "Backfill-OpenCapacity"]
+        primary_classes = ["Priority-ResearcherOwned", "Priority-CHTCOwned"]
+        secondary_classes = ["Backfill-ResearcherOwned", "Backfill-CHTCOwned"]
 
-        # Calculate totals for real slots
-        real_claimed = sum(class_totals[c]["claimed"] for c in real_slot_classes if c in class_totals)
-        real_total = sum(class_totals[c]["total"] for c in real_slot_classes if c in class_totals)
-        real_percent = (real_claimed / real_total * 100) if real_total > 0 else 0
+        # Primary subtotal (priority slots only)
+        pri_primary_claimed = sum(class_totals[c]["claimed"] for c in primary_classes if c in class_totals)
+        pri_primary_drained = sum(class_totals[c]["drained"] for c in primary_classes if c in class_totals)
+        pri_primary_total = sum(class_totals[c]["total"] for c in primary_classes if c in class_totals)
+        pri_primary_pct = (pri_primary_claimed / pri_primary_total * 100) if pri_primary_total > 0 else 0
 
-        # Calculate totals for backfill slots
-        backfill_claimed = sum(class_totals[c]["claimed"] for c in backfill_slot_classes if c in class_totals)
-        backfill_total = sum(class_totals[c]["total"] for c in backfill_slot_classes if c in class_totals)
-        backfill_percent = (backfill_claimed / backfill_total * 100) if backfill_total > 0 else 0
+        # Secondary subtotal (backfill on prioritized machines)
+        pri_secondary_claimed = sum(class_totals[c]["claimed"] for c in secondary_classes if c in class_totals)
+        pri_secondary_drained = sum(class_totals[c]["drained"] for c in secondary_classes if c in class_totals)
+        pri_secondary_total = sum(class_totals[c]["total"] for c in secondary_classes if c in class_totals)
+        pri_secondary_pct = (pri_secondary_claimed / pri_secondary_total * 100) if pri_secondary_total > 0 else 0
+
+        # Prioritized (TOTAL): claimed = primary + secondary, but available = primary only
+        # (secondary runs on the same physical GPUs — adding secondary total would double-count)
+        pri_total_claimed = pri_primary_claimed + pri_secondary_claimed
+        pri_total_drained = pri_primary_drained + pri_secondary_drained
+        pri_total_pct = (pri_total_claimed / pri_primary_total * 100) if pri_primary_total > 0 else 0
+
+        # Open Capacity
+        oc_claimed = class_totals.get("Shared", {}).get("claimed", 0)
+        oc_drained = class_totals.get("Shared", {}).get("drained", 0)
+        oc_total_avail = class_totals.get("Shared", {}).get("total", 0)
+
+        # Grand TOTAL: available = primary physical GPUs + open capacity (no double-count)
+        grand_claimed = pri_total_claimed + oc_claimed
+        grand_drained = pri_total_drained + oc_drained
+        grand_total_avail = pri_primary_total + oc_total_avail
+        grand_pct = (grand_claimed / grand_total_avail * 100) if grand_total_avail > 0 else 0
 
         # Calculate Open Capacity breakdown by performance tier (Flagship vs Standard)
-        open_capacity_tiers = {"Flagship": {"claimed": 0, "total": 0}, "Standard": {"claimed": 0, "total": 0}}
+        open_capacity_tiers = {
+            "Flagship": {"claimed": 0, "drained": 0, "total": 0},
+            "Standard": {"claimed": 0, "drained": 0, "total": 0},
+        }
         if "Shared" in device_stats:
             shared_device_data = device_stats["Shared"]
             for device_type, stats in shared_device_data.items():
                 tier = get_gpu_performance_tier(device_type)
                 open_capacity_tiers[tier]["claimed"] += stats["avg_claimed"]
+                open_capacity_tiers[tier]["drained"] += stats.get("avg_drained", 0.0)
                 open_capacity_tiers[tier]["total"] += stats["avg_total_available"]
 
-        # Calculate percentages for each tier
         for tier in open_capacity_tiers:
             if open_capacity_tiers[tier]["total"] > 0:
                 open_capacity_tiers[tier]["percent"] = (
@@ -503,69 +529,90 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
         html_parts.append("<h2>Real Slots</h2>")
         html_parts.append("<table border='1' style='margin-top: 20px;'>")
         html_parts.append(
-            "<tr style='background-color: #e0e0e0;'><th>Class</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>"
+            "<tr style='background-color: #e0e0e0;'><th>Class</th><th>Allocated %</th><th>Allocated (avg.)</th>"
+            "<th>Drained (avg.)</th><th>Available (avg.)</th></tr>"
         )
 
-        # Total row for real slots
+        # Grand TOTAL row (primary + secondary + open capacity)
         html_parts.append("<tr style='background-color: #d0d0d0; font-weight: bold;'>")
-        html_parts.append("<td style='font-weight: bold;'>TOTAL</td>")
-        html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{real_percent:.1f}%</td>")
-        html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{real_claimed:.1f}</td>")
-        html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{real_total:.1f}</td>")
+        html_parts.append("<td style='font-weight: bold;'>TOTAL (primary + secondary)</td>")
+        html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{grand_pct:.1f}%</td>")
+        html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{grand_claimed:.1f}</td>")
+        html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{grand_drained:.1f}</td>")
+        html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{grand_total_avail:.1f}</td>")
         html_parts.append("</tr>")
 
-        # Individual real slot classes (with Open Capacity broken into tiers)
-        for class_name in real_slot_classes:
-            if class_name in class_totals:
-                if class_name == "Shared":
-                    # Show Open Capacity broken down by tier
-                    for tier in ["Flagship", "Standard"]:
-                        tier_data = open_capacity_tiers[tier]
-                        if tier_data["total"] > 0:
-                            html_parts.append("<tr>")
-                            html_parts.append(f"<td style='font-weight: bold;'>Open Capacity ({tier})</td>")
-                            html_parts.append(
-                                f"<td style='text-align: right; font-weight: bold;'>{tier_data['percent']:.1f}%</td>"
-                            )
-                            html_parts.append(
-                                f"<td style='text-align: right; font-weight: bold;'>{tier_data['claimed']:.1f}</td>"
-                            )
-                            html_parts.append(
-                                f"<td style='text-align: right; font-weight: bold;'>{tier_data['total']:.1f}</td>"
-                            )
-                            html_parts.append("</tr>")
-                else:
-                    totals = class_totals[class_name]
-                    html_parts.append("<tr>")
-                    html_parts.append(f"<td style='font-weight: bold;'>{get_display_name(class_name)}</td>")
-                    html_parts.append(
-                        f"<td style='text-align: right; font-weight: bold;'>{totals['percent']:.1f}%</td>"
-                    )
-                    html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{totals['claimed']:.1f}</td>")
-                    html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{totals['total']:.1f}</td>")
-                    html_parts.append("</tr>")
-
-        # Add separator row and backfill slots to the same table
-        html_parts.append("<tr style='background-color: #f0f0f0;'><td colspan='4' style='height: 10px;'></td></tr>")
-
-        # Backfill section header
-        html_parts.append("<tr style='background-color: #d0d0d0; font-weight: bold;'>")
-        html_parts.append("<td style='font-weight: bold;'>BACKFILL TOTAL</td>")
-        html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{backfill_percent:.1f}%</td>")
-        html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{backfill_claimed:.1f}</td>")
-        html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{backfill_total:.1f}</td>")
+        # Prioritized (TOTAL) subtotal = primary + secondary
+        html_parts.append("<tr style='background-color: #e8e8e8;'>")
+        html_parts.append("<td style='font-weight: bold; padding-left: 8px;'>Prioritized (TOTAL)</td>")
+        html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_total_pct:.1f}%</td>")
+        html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_total_claimed:.1f}</td>")
+        html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_total_drained:.1f}</td>")
+        html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_primary_total:.1f}</td>")
         html_parts.append("</tr>")
 
-        # Individual backfill slot classes
-        for class_name in backfill_slot_classes:
+        # Primary sub-subtotal
+        html_parts.append("<tr style='background-color: #eeeeee;'>")
+        html_parts.append("<td style='font-weight: bold; padding-left: 16px;'>Primary</td>")
+        html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_primary_pct:.1f}%</td>")
+        html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_primary_claimed:.1f}</td>")
+        html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_primary_drained:.1f}</td>")
+        html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_primary_total:.1f}</td>")
+        html_parts.append("</tr>")
+
+        for class_name in primary_classes:
             if class_name in class_totals:
                 totals = class_totals[class_name]
                 html_parts.append("<tr>")
-                html_parts.append(f"<td style='font-weight: bold;'>{get_display_name(class_name)}</td>")
-                html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{totals['percent']:.1f}%</td>")
-                html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{totals['claimed']:.1f}</td>")
-                html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{totals['total']:.1f}</td>")
+                html_parts.append(f"<td style='padding-left: 24px;'>{get_display_name(class_name)}</td>")
+                html_parts.append(f"<td style='text-align: right;'>{totals['percent']:.1f}%</td>")
+                html_parts.append(f"<td style='text-align: right;'>{totals['claimed']:.1f}</td>")
+                html_parts.append(f"<td style='text-align: right;'>{totals['drained']:.1f}</td>")
+                html_parts.append(f"<td style='text-align: right;'>{totals['total']:.1f}</td>")
                 html_parts.append("</tr>")
+
+        # Secondary (Backfill) sub-subtotal
+        if pri_secondary_total > 0:
+            html_parts.append("<tr style='background-color: #eeeeee;'>")
+            html_parts.append("<td style='font-weight: bold; padding-left: 16px;'>Secondary (Backfill)</td>")
+            html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_secondary_pct:.1f}%</td>")
+            html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_secondary_claimed:.1f}</td>")
+            html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_secondary_drained:.1f}</td>")
+            html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_secondary_total:.1f}</td>")
+            html_parts.append("</tr>")
+
+            for class_name in secondary_classes:
+                if class_name in class_totals:
+                    totals = class_totals[class_name]
+                    html_parts.append("<tr>")
+                    html_parts.append(f"<td style='padding-left: 24px;'>{get_display_name(class_name)}</td>")
+                    html_parts.append(f"<td style='text-align: right;'>{totals['percent']:.1f}%</td>")
+                    html_parts.append(f"<td style='text-align: right;'>{totals['claimed']:.1f}</td>")
+                    html_parts.append(f"<td style='text-align: right;'>{totals['drained']:.1f}</td>")
+                    html_parts.append(f"<td style='text-align: right;'>{totals['total']:.1f}</td>")
+                    html_parts.append("</tr>")
+
+        # Open Capacity subtotal row (unchanged structure)
+        if "Shared" in class_totals:
+            oc_totals = class_totals["Shared"]
+            html_parts.append("<tr style='background-color: #e8e8e8;'>")
+            html_parts.append("<td style='font-weight: bold; padding-left: 8px;'>Open Capacity (TOTAL)</td>")
+            html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{oc_totals['percent']:.1f}%</td>")
+            html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{oc_totals['claimed']:.1f}</td>")
+            html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{oc_totals['drained']:.1f}</td>")
+            html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{oc_totals['total']:.1f}</td>")
+            html_parts.append("</tr>")
+
+            for tier in ["Flagship", "Standard"]:
+                tier_data = open_capacity_tiers[tier]
+                if tier_data["total"] > 0:
+                    html_parts.append("<tr>")
+                    html_parts.append(f"<td style='padding-left: 16px;'>Open Capacity ({tier})</td>")
+                    html_parts.append(f"<td style='text-align: right;'>{tier_data['percent']:.1f}%</td>")
+                    html_parts.append(f"<td style='text-align: right;'>{tier_data['claimed']:.1f}</td>")
+                    html_parts.append(f"<td style='text-align: right;'>{tier_data['drained']:.1f}</td>")
+                    html_parts.append(f"<td style='text-align: right;'>{tier_data['total']:.1f}</td>")
+                    html_parts.append("</tr>")
 
         html_parts.append("</table>")
 
@@ -961,21 +1008,21 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
 
                 html_parts.append("</table>")
 
-        # Cluster summary with real slots and backfill slots separated
+        # Cluster summary with real slots and secondary (backfill) slots separated
         if class_totals:
-            # Separate real slots from backfill slots (using simplified class names)
-            real_slot_classes = ["Shared", "Priority"]
-            backfill_slot_classes = ["Backfill"]
+            primary_slot_classes = ["Shared", "Priority"]
+            secondary_slot_classes = ["Backfill"]
 
-            # Calculate totals for real slots
-            real_claimed = sum(class_totals[c]["claimed"] for c in real_slot_classes if c in class_totals)
-            real_total = sum(class_totals[c]["total"] for c in real_slot_classes if c in class_totals)
-            real_percent = (real_claimed / real_total * 100) if real_total > 0 else 0
+            # Grand TOTAL = primary + secondary
+            primary_claimed = sum(class_totals[c]["claimed"] for c in primary_slot_classes if c in class_totals)
+            primary_total = sum(class_totals[c]["total"] for c in primary_slot_classes if c in class_totals)
+            secondary_claimed = sum(class_totals[c]["claimed"] for c in secondary_slot_classes if c in class_totals)
+            secondary_total = sum(class_totals[c]["total"] for c in secondary_slot_classes if c in class_totals)
+            grand_claimed = primary_claimed + secondary_claimed
+            grand_total = primary_total + secondary_total
+            grand_percent = (grand_claimed / grand_total * 100) if grand_total > 0 else 0
 
-            # Calculate totals for backfill slots
-            backfill_claimed = sum(class_totals[c]["claimed"] for c in backfill_slot_classes if c in class_totals)
-            backfill_total = sum(class_totals[c]["total"] for c in backfill_slot_classes if c in class_totals)
-            backfill_percent = (backfill_claimed / backfill_total * 100) if backfill_total > 0 else 0
+            secondary_percent = (secondary_claimed / secondary_total * 100) if secondary_total > 0 else 0
 
             # Real Slots Table
             html_parts.append("<h2>Real Slots</h2>")
@@ -984,16 +1031,16 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
                 "<tr><th>Class</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>"
             )
 
-            # Total row for real slots
+            # Grand TOTAL row (primary + secondary)
             html_parts.append("<tr style='font-weight: bold; background-color: #f0f0f0;'>")
-            html_parts.append("<td>TOTAL</td>")
-            html_parts.append(f"<td style='text-align: right'>{real_percent:.1f}%</td>")
-            html_parts.append(f"<td style='text-align: right'>{real_claimed:.1f}</td>")
-            html_parts.append(f"<td style='text-align: right'>{real_total:.1f}</td>")
+            html_parts.append("<td>TOTAL (primary + secondary)</td>")
+            html_parts.append(f"<td style='text-align: right'>{grand_percent:.1f}%</td>")
+            html_parts.append(f"<td style='text-align: right'>{grand_claimed:.1f}</td>")
+            html_parts.append(f"<td style='text-align: right'>{grand_total:.1f}</td>")
             html_parts.append("</tr>")
 
-            # Individual real slot classes
-            for class_name in real_slot_classes:
+            # Individual primary slot classes
+            for class_name in primary_slot_classes:
                 if class_name in class_totals:
                     stats = class_totals[class_name]
                     html_parts.append("<tr>")
@@ -1002,6 +1049,26 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
                     html_parts.append(f"<td style='text-align: right'>{stats['claimed']:.1f}</td>")
                     html_parts.append(f"<td style='text-align: right'>{stats['total']:.1f}</td>")
                     html_parts.append("</tr>")
+
+            # Secondary (Backfill) rows
+            if secondary_total > 0:
+                html_parts.append("<tr style='font-weight: bold; background-color: #f0f0f0;'>")
+                html_parts.append("<td>Secondary (Backfill)</td>")
+                html_parts.append(f"<td style='text-align: right'>{secondary_percent:.1f}%</td>")
+                html_parts.append(f"<td style='text-align: right'>{secondary_claimed:.1f}</td>")
+                html_parts.append(f"<td style='text-align: right'>{secondary_total:.1f}</td>")
+                html_parts.append("</tr>")
+
+                for class_name in secondary_slot_classes:
+                    if class_name in class_totals:
+                        stats = class_totals[class_name]
+                        html_parts.append("<tr>")
+                        html_parts.append(f"<td style='padding-left: 16px;'>{get_display_name(class_name)}</td>")
+                        html_parts.append(f"<td style='text-align: right'>{stats['percent']:.1f}%</td>")
+                        html_parts.append(f"<td style='text-align: right'>{stats['claimed']:.1f}</td>")
+                        html_parts.append(f"<td style='text-align: right'>{stats['total']:.1f}</td>")
+                        html_parts.append("</tr>")
+
             html_parts.append("</table>")
 
             # Real Slots by Memory Category Table
@@ -1067,32 +1134,59 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
 
                     html_parts.append("</table>")
 
-            # Backfill Slots Table
-            html_parts.append("<h2>Backfill Slots</h2>")
+    # Draining Status
+    draining_stats = results.get("draining_stats", {})
+    if draining_stats.get("has_draining", False):
+        html_parts.append("<h2 style='color: #d32f2f;'>GPU Draining Status</h2>")
+        html_parts.append("<table border='1' style='background-color: #ffebee;'>")
+        html_parts.append("<tr style='background-color: #ffcdd2;'><th>Metric</th><th>Value</th></tr>")
+
+        html_parts.append("<tr>")
+        html_parts.append("<td><strong>Hosts with drained GPUs</strong></td>")
+        html_parts.append(f"<td style='text-align: right;'>{draining_stats['num_hosts']}</td>")
+        html_parts.append("</tr>")
+
+        html_parts.append("<tr>")
+        html_parts.append("<td><strong>Unique GPUs drained</strong></td>")
+        html_parts.append(f"<td style='text-align: right;'>{draining_stats['num_unique_gpus']}</td>")
+        html_parts.append("</tr>")
+
+        html_parts.append("<tr>")
+        html_parts.append("<td><strong>Total draining intervals</strong></td>")
+        html_parts.append(f"<td style='text-align: right;'>{draining_stats['num_intervals']}</td>")
+        html_parts.append("</tr>")
+
+        html_parts.append("<tr style='background-color: #ffcdd2; font-weight: bold;'>")
+        html_parts.append("<td><strong>Total draining time</strong></td>")
+        html_parts.append(
+            f"<td style='text-align: right; font-weight: bold;'>{draining_stats['total_hours']:.2f} hours</td>"
+        )
+        html_parts.append("</tr>")
+
+        html_parts.append("</table>")
+
+        # Per-host breakdown if available
+        per_host = draining_stats.get("per_host", {})
+        if per_host:
+            html_parts.append("<h3>Per-Host Breakdown</h3>")
             html_parts.append("<table border='1'>")
             html_parts.append(
-                "<tr><th>Class</th><th>Allocated %</th><th>Allocated (avg.)</th><th>Available (avg.)</th></tr>"
+                "<tr style='background-color: #e0e0e0;'><th>Host</th><th>Drained GPUs</th><th>Intervals</th><th>Total Hours</th></tr>"
             )
 
-            # Total row for backfill slots
-            html_parts.append("<tr style='font-weight: bold; background-color: #f0f0f0;'>")
-            html_parts.append("<td>TOTAL</td>")
-            html_parts.append(f"<td style='text-align: right'>{backfill_percent:.1f}%</td>")
-            html_parts.append(f"<td style='text-align: right'>{backfill_claimed:.1f}</td>")
-            html_parts.append(f"<td style='text-align: right'>{backfill_total:.1f}</td>")
-            html_parts.append("</tr>")
+            for host_name in sorted(per_host.keys()):
+                host_data = per_host[host_name]
+                html_parts.append("<tr>")
+                html_parts.append(f"<td><strong>{host_name}</strong></td>")
+                html_parts.append(f"<td style='text-align: right;'>{host_data['num_gpus']}</td>")
+                html_parts.append(f"<td style='text-align: right;'>{host_data['num_intervals']}</td>")
+                html_parts.append(f"<td style='text-align: right;'>{host_data['total_hours']:.2f}</td>")
+                html_parts.append("</tr>")
 
-            # Individual backfill slot classes
-            for class_name in backfill_slot_classes:
-                if class_name in class_totals:
-                    stats = class_totals[class_name]
-                    html_parts.append("<tr>")
-                    html_parts.append(f"<td>{get_display_name(class_name)}</td>")
-                    html_parts.append(f"<td style='text-align: right'>{stats['percent']:.1f}%</td>")
-                    html_parts.append(f"<td style='text-align: right'>{stats['claimed']:.1f}</td>")
-                    html_parts.append(f"<td style='text-align: right'>{stats['total']:.1f}</td>")
-                    html_parts.append("</tr>")
             html_parts.append("</table>")
+    elif draining_stats:
+        html_parts.append("<h2>GPU Draining Status</h2>")
+        html_parts.append("<p><em>No GPUs were drained during this period.</em></p>")
 
     # Excluded hosts
     excluded_hosts = metadata.get("excluded_hosts", {})
@@ -1293,33 +1387,61 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
                         "percent": (total_claimed / total_available) * 100,
                     }
 
-    # Show cluster summary at the top with real slots and backfill slots separated
+    # Show cluster summary at the top — Prioritized includes primary and secondary (backfill)
     if grand_totals:
-        # Separate real slots from backfill slots
-        real_slot_classes = ["Priority-ResearcherOwned", "Priority-CHTCOwned", "Shared"]
-        backfill_slot_classes = ["Backfill-ResearcherOwned", "Backfill-CHTCOwned", "Backfill-OpenCapacity"]
+        primary_classes = ["Priority-ResearcherOwned", "Priority-CHTCOwned"]
+        secondary_classes = ["Backfill-ResearcherOwned", "Backfill-CHTCOwned"]
 
-        # Calculate totals for real slots
-        real_claimed = sum(grand_totals[c]["claimed"] for c in real_slot_classes if c in grand_totals)
-        real_total = sum(grand_totals[c]["total"] for c in real_slot_classes if c in grand_totals)
-        real_percent = (real_claimed / real_total * 100) if real_total > 0 else 0
+        pri_primary_claimed = sum(grand_totals[c]["claimed"] for c in primary_classes if c in grand_totals)
+        pri_primary_total = sum(grand_totals[c]["total"] for c in primary_classes if c in grand_totals)
 
-        # Calculate totals for backfill slots
-        backfill_claimed = sum(grand_totals[c]["claimed"] for c in backfill_slot_classes if c in grand_totals)
-        backfill_total = sum(grand_totals[c]["total"] for c in backfill_slot_classes if c in grand_totals)
-        backfill_percent = (backfill_claimed / backfill_total * 100) if backfill_total > 0 else 0
+        pri_secondary_claimed = sum(grand_totals[c]["claimed"] for c in secondary_classes if c in grand_totals)
+        pri_secondary_total = sum(grand_totals[c]["total"] for c in secondary_classes if c in grand_totals)
+
+        oc_claimed = grand_totals.get("Shared", {}).get("claimed", 0)
+        oc_total = grand_totals.get("Shared", {}).get("total", 0)
+
+        # Available = primary physical GPUs + open capacity; secondary runs on the same GPUs as primary
+        pri_total_claimed = pri_primary_claimed + pri_secondary_claimed
+        grand_claimed = pri_total_claimed + oc_claimed
+        grand_total = pri_primary_total + oc_total
+        grand_percent = (grand_claimed / grand_total * 100) if grand_total > 0 else 0
+
+        pri_total_pct = (pri_total_claimed / pri_primary_total * 100) if pri_primary_total > 0 else 0
+        pri_primary_pct = (pri_primary_claimed / pri_primary_total * 100) if pri_primary_total > 0 else 0
+        pri_secondary_pct = (pri_secondary_claimed / pri_secondary_total * 100) if pri_secondary_total > 0 else 0
 
         print("\nREAL SLOTS:")
         print(f"{'-' * 70}")
-        print(f"  TOTAL: {real_percent:.1f}% ({real_claimed:.1f}/{real_total:.1f} GPUs)")
+        print(f"  TOTAL (primary + secondary): {grand_percent:.1f}% ({grand_claimed:.1f}/{grand_total:.1f} GPUs)")
+        print(
+            f"  Prioritized (TOTAL):          {pri_total_pct:.1f}% ({pri_total_claimed:.1f}/{pri_primary_total:.1f} GPUs)"
+        )
+        print(
+            f"    Primary:                    {pri_primary_pct:.1f}% ({pri_primary_claimed:.1f}/{pri_primary_total:.1f} GPUs)"
+        )
         print(f"{'-' * 70}")
-        for class_name in real_slot_classes:
+        for class_name in primary_classes:
             if class_name in grand_totals:
                 totals = grand_totals[class_name]
                 print(
-                    f"  {get_display_name(class_name)}: {totals['percent']:.1f}% "
+                    f"      {get_display_name(class_name)}: {totals['percent']:.1f}% "
                     f"({totals['claimed']:.1f}/{totals['total']:.1f} GPUs)"
                 )
+        if pri_secondary_total > 0:
+            print(
+                f"    Secondary (Backfill):       {pri_secondary_pct:.1f}% ({pri_secondary_claimed:.1f}/{pri_secondary_total:.1f} GPUs)"
+            )
+            for class_name in secondary_classes:
+                if class_name in grand_totals:
+                    totals = grand_totals[class_name]
+                    print(
+                        f"      {get_display_name(class_name)}: {totals['percent']:.1f}% "
+                        f"({totals['claimed']:.1f}/{totals['total']:.1f} GPUs)"
+                    )
+        if oc_total > 0:
+            oc_pct = grand_totals["Shared"]["percent"]
+            print(f"  Open Capacity: {oc_pct:.1f}% ({oc_claimed:.1f}/{oc_total:.1f} GPUs)")
 
         # Real Slots by Memory Category
         if "memory_stats" in results:
@@ -1378,18 +1500,6 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
                         f"  {memory_cat}: {allocated_pct:.1f}% "
                         f"({allocated:.1f}/{stats['avg_total_available']:.1f} GPUs)"
                     )
-
-        print("\nBACKFILL SLOTS:")
-        print(f"{'-' * 70}")
-        print(f"  TOTAL: {backfill_percent:.1f}% ({backfill_claimed:.1f}/{backfill_total:.1f} GPUs)")
-        print(f"{'-' * 70}")
-        for class_name in backfill_slot_classes:
-            if class_name in grand_totals:
-                totals = grand_totals[class_name]
-                print(
-                    f"  {get_display_name(class_name)}: {totals['percent']:.1f}% "
-                    f"({totals['claimed']:.1f}/{totals['total']:.1f} GPUs)"
-                )
 
         # H200 Usage by Slot Type
         if "h200_user_stats" in results:

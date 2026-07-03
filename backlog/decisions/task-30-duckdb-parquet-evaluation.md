@@ -58,26 +58,19 @@ Row counts are identical (verified: both have 4,887,205 rows for April).
 
 ## Write strategy recommendation
 
-**Keep SQLite for intraday collection; compact to Parquet nightly.**
+**Originally recommended:** keep SQLite for intraday collection, compact to Parquet
+nightly, and route dashboard queries per-month between the two formats. In
+implementation this was replaced with a simpler direct-write approach (see below) to
+avoid maintaining two read paths and a compaction cron job indefinitely.
 
-The existing collector (`get_gpu_state_polars.py`) appends every few minutes to the
-current month's SQLite file. Changing it to write Parquet directly would require either:
-- Writing many tiny Parquet files (fragmentation, complex glob queries), or
-- Reading + rewriting the entire month's Parquet on each collection cycle (~5 MB write
-  every 5 minutes — manageable but unnecessary churn)
-
-The simpler and safer strategy:
-
-1. **Collector unchanged** — continues appending to `gpu_state_YYYY-MM.db`.
-2. **Nightly compaction** — a cron job (e.g. 01:00) exports the previous day's data from
-   the current SQLite to a monthly Parquet file, or at month rollover exports the entire
-   completed month and deletes the SQLite.
-3. **Dashboard routing** — query Parquet for months with a completed Parquet file; fall
-   back to SQLite for the current (in-progress) month.
-
-This preserves the existing collection pattern completely. The only new code is:
-- A compaction script (SQLite → Parquet export via DuckDB, ~10 lines)
-- A routing helper in `data.py` that selects Parquet vs SQLite per month
+**As implemented:** the collector (`collector.py`, formerly `get_gpu_state_polars.py`)
+writes directly to the current month's Parquet file on every collection cycle, via a
+read-concat-atomic-rename cycle (write to `.tmp`, then `os.replace()`, so the live file
+is never partially written). Historical SQLite files are converted once via
+`scripts/migrate_sqlite_to_parquet.py` and then kept only as an offline backup — there
+is no ongoing dual-write or per-month routing logic. All readers (`stats_data.py`,
+`stats_calculations.py`, `dashboard/data.py`) glob `gpu_state_*.parquet` in a single
+DuckDB query, covering all months in one pass with no per-file loop.
 
 ## Recommendation
 
@@ -87,7 +80,9 @@ This preserves the existing collection pattern completely. The only new code is:
 - **Query speed**: 17× improvement on the hot dashboard path
 - **Risk**: Low — Parquet export is lossless and verified row-for-row; SQLite files can
   remain as backup until Parquet coverage is confirmed correct over multiple months
-- **Collector disruption**: None — collector code is unchanged
+- **Collector disruption**: Collector now writes Parquet directly instead of SQLite
+  (see "As implemented" above) — a bigger change than originally scoped, but it avoids
+  running two storage formats side by side indefinitely.
 
 **Do not** migrate to DuckDB-over-SQLite (attach path) — it adds latency without benefit.
 
