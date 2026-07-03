@@ -27,7 +27,7 @@ case "$MODE" in
             --exclude-hosts-yaml masked_hosts.yaml \
             --hours-back 24 \
             --group-by-device \
-            --data_dir=/data \
+            --data-dir /data \
             --email-to "$RECIPIENTS"
         ;;
     weekly)
@@ -35,14 +35,14 @@ case "$MODE" in
             --exclude-hosts-yaml masked_hosts.yaml \
             --hours-back 168 \
             --group-by-device \
-            --data_dir=/data \
+            --data-dir /data \
             --email-to "$RECIPIENTS"
         ;;
     monthly)
         uv run usage_stats.py \
             --exclude-hosts-yaml masked_hosts.yaml \
             --analysis-type monthly \
-            --data_dir=/data \
+            --data-dir /data \
             --email-to "$RECIPIENTS"
         ;;
     test)
@@ -50,7 +50,7 @@ case "$MODE" in
             --exclude-hosts-yaml masked_hosts.yaml \
             --hours-back 24 \
             --group-by-device \
-            --data_dir=/data \
+            --data-dir /data \
             --email-to "$TEST_RECIPIENT"
         ;;
     *)
