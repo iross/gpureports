@@ -654,7 +654,10 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
                             return 999  # Put Unknown at the end
                         elif cat.startswith("<"):
                             # Handle <48GB - extract the number after <
-                            return float(cat[1:-2])  # Remove "<" and "GB"
+                            # Remove "<" and "GB"; subtract a small epsilon so "<48GB"
+                            # sorts deterministically before an exact "48GB" (equal keys
+                            # otherwise fall back to non-deterministic input row order).
+                            return float(cat[1:-2]) - 0.1
                         elif cat.startswith(">"):
                             # Handle >80GB - extract the number after >
                             return float(cat[1:-2]) + 0.1  # Add 0.1 to sort after exact values
@@ -1470,7 +1473,10 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
                             return 999  # Put Unknown at the end
                         elif cat.startswith("<"):
                             # Handle <48GB - extract the number after <
-                            return float(cat[1:-2])  # Remove "<" and "GB"
+                            # Remove "<" and "GB"; subtract a small epsilon so "<48GB"
+                            # sorts deterministically before an exact "48GB" (equal keys
+                            # otherwise fall back to non-deterministic input row order).
+                            return float(cat[1:-2]) - 0.1
                         elif cat.startswith(">"):
                             # Handle >80GB - extract the number after >
                             return float(cat[1:-2]) + 0.1  # Add 0.1 to sort after exact values
