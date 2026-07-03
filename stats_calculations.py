@@ -1395,6 +1395,7 @@ def calculate_prevent_jobs_stats(df: pd.DataFrame) -> dict:
         "per_host": {},
         "by_reason": {},
         "per_class_avg": {c: 0.0 for c in _CLASS_NAMES},
+        "per_class_device_avg": {c: {} for c in _CLASS_NAMES},
     }
 
     if "PreventJobsReason" not in df.columns:
@@ -1428,6 +1429,7 @@ def calculate_prevent_jobs_stats(df: pd.DataFrame) -> dict:
     num_buckets = len(buckets)
 
     per_class_avg = {}
+    per_class_device_avg: dict[str, dict[str, float]] = {}
     for class_name in _CLASS_NAMES:
         class_df = filter_df_enhanced(df_bucketed, class_name, "", "")
         prevented = class_df[
@@ -1435,9 +1437,18 @@ def calculate_prevent_jobs_stats(df: pd.DataFrame) -> dict:
         ]
         if prevented.empty or num_buckets == 0:
             per_class_avg[class_name] = 0.0
+            per_class_device_avg[class_name] = {}
         else:
             total = sum(prevented[prevented["15min_bucket"] == b]["AssignedGPUs"].nunique() for b in buckets)
             per_class_avg[class_name] = total / num_buckets
+
+            # Per-device breakdown within this class (used for Flagship/Standard tier split)
+            device_avgs: dict[str, float] = {}
+            for device_type, dev_grp in prevented.groupby("GPUs_DeviceName"):
+                dev_total = sum(dev_grp[dev_grp["15min_bucket"] == b]["AssignedGPUs"].nunique() for b in buckets)
+                if dev_total > 0:
+                    device_avgs[str(device_type)] = dev_total / num_buckets
+            per_class_device_avg[class_name] = device_avgs
 
     return {
         "has_prevent_jobs": True,
@@ -1446,6 +1457,7 @@ def calculate_prevent_jobs_stats(df: pd.DataFrame) -> dict:
         "per_host": per_host,
         "by_reason": by_reason,
         "per_class_avg": per_class_avg,
+        "per_class_device_avg": per_class_device_avg,
     }
 
 

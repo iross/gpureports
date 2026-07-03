@@ -530,6 +530,7 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
         # Real Slots Table
         pj = results.get("prevent_jobs_stats", {})
         pca = pj.get("per_class_avg", {})
+        pcda = pj.get("per_class_device_avg", {})
 
         def _pj(class_name):
             """Return formatted blocked-GPU cell value for a single class."""
@@ -539,6 +540,15 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
         def _pj_sum(*class_names):
             """Sum blocked-GPU averages across multiple classes; return '—' if zero."""
             v = sum(pca.get(c, 0.0) for c in class_names)
+            return f"{v:.1f}" if v > 0 else "—"
+
+        def _pj_tier(class_name, tier):
+            """Sum blocked-GPU averages for a specific performance tier within a class."""
+            v = sum(
+                avg
+                for device_type, avg in pcda.get(class_name, {}).items()
+                if get_gpu_performance_tier(device_type) == tier
+            )
             return f"{v:.1f}" if v > 0 else "—"
 
         html_parts.append("<h2>Real Slots</h2>")
@@ -644,12 +654,13 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
             for tier in ["Flagship", "Standard"]:
                 tier_data = open_capacity_tiers[tier]
                 if tier_data["total"] > 0:
+                    tier_blocked = _pj_tier("Shared", tier)
                     html_parts.append("<tr>")
                     html_parts.append(f"<td style='padding-left: 16px;'>Open Capacity ({tier})</td>")
                     html_parts.append(f"<td style='text-align: right;'>{tier_data['percent']:.1f}%</td>")
                     html_parts.append(f"<td style='text-align: right;'>{tier_data['claimed']:.1f}</td>")
                     html_parts.append(f"<td style='text-align: right;'>{tier_data['drained']:.1f}</td>")
-                    html_parts.append("<td style='text-align: right;'>—</td>")
+                    html_parts.append(f"<td style='text-align: right; color: #e65100;'>{tier_blocked}</td>")
                     html_parts.append(f"<td style='text-align: right;'>{tier_data['total']:.1f}</td>")
                     html_parts.append("</tr>")
 
