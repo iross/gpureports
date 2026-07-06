@@ -1396,6 +1396,10 @@ def calculate_prevent_jobs_stats(df: pd.DataFrame) -> dict:
         "by_reason": {},
         "per_class_avg": {c: 0.0 for c in _CLASS_NAMES},
         "per_class_device_avg": {c: {} for c in _CLASS_NAMES},
+        "per_class_current": {c: 0 for c in _CLASS_NAMES},
+        "per_class_device_current": {c: {} for c in _CLASS_NAMES},
+        "pj_buckets": 0,
+        "total_buckets": 0,
     }
 
     if "PreventJobsReason" not in df.columns:
@@ -1420,16 +1424,27 @@ def calculate_prevent_jobs_stats(df: pd.DataFrame) -> dict:
             "num_gpus": grp["AssignedGPUs"].nunique(),
         }
 
-    # Per-class averages: for each 15-min bucket count unique blocked GPUs per class,
-    # then average across buckets — same methodology as the Drained column.
     df_bucketed = df.copy()
     df_bucketed["timestamp"] = pd.to_datetime(df_bucketed["timestamp"])
     df_bucketed["15min_bucket"] = df_bucketed["timestamp"].dt.floor("15min")
     buckets = df_bucketed["15min_bucket"].unique()
     num_buckets = len(buckets)
 
-    per_class_avg = {}
+    # Buckets that have any PreventJobsReason data at all (across all machines/classes).
+    # Used to assess data coverage and to find the most recent point-in-time snapshot.
+    pj_mask = df_bucketed["PreventJobsReason"].notna() & (
+        df_bucketed["PreventJobsReason"].astype(str).str.strip() != ""
+    )
+    pj_buckets_global = sorted(df_bucketed[pj_mask]["15min_bucket"].unique())
+    num_pj_buckets = len(pj_buckets_global)
+    last_pj_bucket = pj_buckets_global[-1] if pj_buckets_global else None
+
+    per_class_avg: dict[str, float] = {}
     per_class_device_avg: dict[str, dict[str, float]] = {}
+    # Point-in-time counts from the most recent bucket that has any PJ data.
+    per_class_current: dict[str, int] = {}
+    per_class_device_current: dict[str, dict[str, int]] = {}
+
     for class_name in _CLASS_NAMES:
         class_df = filter_df_enhanced(df_bucketed, class_name, "", "")
         prevented = class_df[
@@ -1438,9 +1453,25 @@ def calculate_prevent_jobs_stats(df: pd.DataFrame) -> dict:
         if prevented.empty or num_buckets == 0:
             per_class_avg[class_name] = 0.0
             per_class_device_avg[class_name] = {}
+            per_class_current[class_name] = 0
+            per_class_device_current[class_name] = {}
         else:
             total = sum(prevented[prevented["15min_bucket"] == b]["AssignedGPUs"].nunique() for b in buckets)
             per_class_avg[class_name] = total / num_buckets
+
+            # Point-in-time: count from the most recent bucket with any PJ data globally.
+            if last_pj_bucket is not None:
+                last_bucket_prevented = prevented[prevented["15min_bucket"] == last_pj_bucket]
+                per_class_current[class_name] = last_bucket_prevented["AssignedGPUs"].nunique()
+                device_current: dict[str, int] = {}
+                for device_type, dev_grp in last_bucket_prevented.groupby("GPUs_DeviceName"):
+                    n = dev_grp["AssignedGPUs"].nunique()
+                    if n > 0:
+                        device_current[str(device_type)] = n
+                per_class_device_current[class_name] = device_current
+            else:
+                per_class_current[class_name] = 0
+                per_class_device_current[class_name] = {}
 
             # Per-device breakdown within this class (used for Flagship/Standard tier split)
             device_avgs: dict[str, float] = {}
@@ -1458,6 +1489,10 @@ def calculate_prevent_jobs_stats(df: pd.DataFrame) -> dict:
         "by_reason": by_reason,
         "per_class_avg": per_class_avg,
         "per_class_device_avg": per_class_device_avg,
+        "per_class_current": per_class_current,
+        "per_class_device_current": per_class_device_current,
+        "pj_buckets": num_pj_buckets,
+        "total_buckets": num_buckets,
     }
 
 
