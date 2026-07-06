@@ -200,6 +200,44 @@ class TestPreventJobsStats:
         result = calculate_prevent_jobs_stats(df)
         assert result["has_prevent_jobs"] is False
 
+    def test_claimed_gpus_excluded_from_per_class_counts(self):
+        """A GPU running a job (Claimed on any slot) is Allocated, not Prevented.
+
+        PreventJobsReason does not evict running jobs — it only stops new ones —
+        so per_class_current must count only idle prevented GPUs. A GPU that is
+        prevented on its primary slot but Claimed on a backfill slot is busy and
+        must also be excluded.
+        """
+        import pandas as pd
+
+        rows = [
+            # Idle prevented GPU on a Shared machine -> counted
+            {
+                **_row(self._ts, "hostA", "GPU-idle", "Owner", prevent_jobs_reason="INF-1"),
+                "PrioritizedProjects": "",
+            },
+            # Prevented GPU that is Claimed (still finishing a job) -> excluded
+            {
+                **_row(self._ts, "hostA", "GPU-busy", "Claimed", prevent_jobs_reason="INF-1"),
+                "PrioritizedProjects": "",
+            },
+            # Prevented on primary slot, but the same GPU is Claimed on a backfill slot -> excluded
+            {
+                **_row(self._ts, "hostB", "GPU-bf", "Owner", prevent_jobs_reason="INF-2"),
+                "PrioritizedProjects": "",
+            },
+            {
+                **_row(self._ts, "hostB", "GPU-bf", "Claimed"),
+                "Name": "backfill1_1@hostB",
+                "PrioritizedProjects": "",
+            },
+        ]
+        df = pd.DataFrame(rows)
+        result = calculate_prevent_jobs_stats(df)
+        assert result["per_class_current"]["Shared"] == 1  # only GPU-idle
+        # The summary (attribute-is-set) counts still include all three GPUs
+        assert result["num_unique_gpus"] == 3
+
     def test_missing_column_returns_false(self):
         """DataFrame without PreventJobsReason column returns has_prevent_jobs=False."""
         import pandas as pd

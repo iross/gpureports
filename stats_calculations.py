@@ -1439,6 +1439,20 @@ def calculate_prevent_jobs_stats(df: pd.DataFrame) -> dict:
     num_pj_buckets = len(pj_buckets_global)
     last_pj_bucket = pj_buckets_global[-1] if pj_buckets_global else None
 
+    # PreventJobsReason does not evict running jobs — it only stops new ones. A GPU
+    # that is Claimed on ANY slot (primary or backfill) in a bucket is actively
+    # running a job and counts as Allocated, not Prevented. Build the set of
+    # (bucket, GPU) pairs that are Claimed anywhere, checked against the raw df so a
+    # backfill-slot claim excludes the GPU even when the prevented row is a primary slot.
+    claimed_rows = df_bucketed[df_bucketed["State"] == "Claimed"]
+    claimed_pairs = set(zip(claimed_rows["15min_bucket"], claimed_rows["AssignedGPUs"], strict=False))
+
+    def _drop_claimed(prevented_df: pd.DataFrame) -> pd.DataFrame:
+        if prevented_df.empty or not claimed_pairs:
+            return prevented_df
+        keys = pd.MultiIndex.from_arrays([prevented_df["15min_bucket"], prevented_df["AssignedGPUs"]])
+        return prevented_df[~keys.isin(claimed_pairs)]
+
     per_class_avg: dict[str, float] = {}
     per_class_device_avg: dict[str, dict[str, float]] = {}
     # Point-in-time counts from the most recent bucket that has any PJ data.
@@ -1450,6 +1464,7 @@ def calculate_prevent_jobs_stats(df: pd.DataFrame) -> dict:
         prevented = class_df[
             class_df["PreventJobsReason"].notna() & (class_df["PreventJobsReason"].astype(str).str.strip() != "")
         ]
+        prevented = _drop_claimed(prevented)
         if prevented.empty or num_buckets == 0:
             per_class_avg[class_name] = 0.0
             per_class_device_avg[class_name] = {}

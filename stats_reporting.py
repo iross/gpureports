@@ -1273,9 +1273,9 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
             "Backfill-CHTCOwned": "Researcher-Reserved Capacity (Backfill)",
         }
         if any(pcc.get(c, 0) > 0 for c in _pj_class_labels):
-            html_parts.append("<h3>GPUs with PreventJobsReason by Class (point-in-time)</h3>")
+            html_parts.append("<h3>Idle GPUs with PreventJobsReason by Class (point-in-time)</h3>")
             html_parts.append("<table border='1'>")
-            html_parts.append("<tr style='background-color: #e0e0e0;'><th>Class</th><th>GPUs (Owner-state)</th></tr>")
+            html_parts.append("<tr style='background-color: #e0e0e0;'><th>Class</th><th>Idle GPUs</th></tr>")
             for cls, label in _pj_class_labels.items():
                 n = pcc.get(cls, 0)
                 if n > 0:
@@ -1286,8 +1286,9 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
             html_parts.append("</table>")
             html_parts.append(
                 "<p style='font-size: 0.85em; color: #555;'>"
-                "These GPUs are in Owner state with PreventJobsReason set — they are registered with HTCondor "
-                "but cannot accept new jobs due to policy. They are not included in the Available counts above.</p>"
+                "These GPUs are idle with PreventJobsReason set — they cannot accept new jobs due to policy. "
+                "GPUs still finishing a job (PreventJobsReason does not evict running work) are counted as "
+                "Allocated instead. Idle prevented GPUs are not included in the Available counts above.</p>"
             )
 
         per_host = prevent_jobs_stats.get("per_host", {})
