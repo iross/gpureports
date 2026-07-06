@@ -527,17 +527,51 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
             else:
                 open_capacity_tiers[tier]["percent"] = 0
 
-        # Stash prevent_jobs stats for use in the PreventJobsReason section below.
+        # Prevent_jobs stats for the Real Slots table Prevented column and section below.
         pj = results.get("prevent_jobs_stats", {})
         pcc = pj.get("per_class_current", {})
+        pcdc = pj.get("per_class_device_current", {})
         pj_buckets_count = pj.get("pj_buckets", 0)
         total_buckets_count = pj.get("total_buckets", 0)
+
+        def _pj(class_name):
+            v = pcc.get(class_name, 0)
+            return str(v) if v > 0 else "—"
+
+        def _pj_sum(*class_names):
+            v = sum(pcc.get(c, 0) for c in class_names)
+            return str(v) if v > 0 else "—"
+
+        def _pj_tier(class_name, tier):
+            v = sum(
+                n
+                for device_type, n in pcdc.get(class_name, {}).items()
+                if get_gpu_performance_tier(device_type) == tier
+            )
+            return str(v) if v > 0 else "—"
+
+        grand_prevented = _pj_sum(
+            "Priority-ResearcherOwned",
+            "Priority-CHTCOwned",
+            "Shared",
+            "Backfill-ResearcherOwned",
+            "Backfill-CHTCOwned",
+        )
+        pri_total_prevented = _pj_sum(
+            "Priority-ResearcherOwned",
+            "Priority-CHTCOwned",
+            "Backfill-ResearcherOwned",
+            "Backfill-CHTCOwned",
+        )
+        pri_prevented = _pj_sum("Priority-ResearcherOwned", "Priority-CHTCOwned")
+        sec_prevented = _pj_sum("Backfill-ResearcherOwned", "Backfill-CHTCOwned")
+        oc_prevented = _pj("Shared")
 
         html_parts.append("<h2>Real Slots</h2>")
         html_parts.append("<table border='1' style='margin-top: 20px;'>")
         html_parts.append(
             "<tr style='background-color: #e0e0e0;'><th>Class</th><th>Allocated %</th><th>Allocated (avg.)</th>"
-            "<th>Drained (avg.)</th><th>Available (avg.)</th></tr>"
+            "<th>Drained (avg.)</th><th>Available (avg.)</th><th>Prevented</th></tr>"
         )
 
         # Grand TOTAL row (primary + secondary + open capacity)
@@ -547,6 +581,7 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{grand_claimed:.1f}</td>")
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{grand_drained:.1f}</td>")
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{grand_total_avail:.1f}</td>")
+        html_parts.append(f"<td style='text-align: right; font-weight: bold; color: #e65100;'>{grand_prevented}</td>")
         html_parts.append("</tr>")
 
         # Prioritized (TOTAL) subtotal = primary + secondary
@@ -556,6 +591,9 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_total_claimed:.1f}</td>")
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_total_drained:.1f}</td>")
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_primary_total:.1f}</td>")
+        html_parts.append(
+            f"<td style='text-align: right; font-weight: bold; color: #e65100;'>{pri_total_prevented}</td>"
+        )
         html_parts.append("</tr>")
 
         # Primary sub-subtotal
@@ -565,6 +603,7 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_primary_claimed:.1f}</td>")
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_primary_drained:.1f}</td>")
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_primary_total:.1f}</td>")
+        html_parts.append(f"<td style='text-align: right; font-weight: bold; color: #e65100;'>{pri_prevented}</td>")
         html_parts.append("</tr>")
 
         for class_name in primary_classes:
@@ -576,6 +615,7 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
                 html_parts.append(f"<td style='text-align: right;'>{totals['claimed']:.1f}</td>")
                 html_parts.append(f"<td style='text-align: right;'>{totals['drained']:.1f}</td>")
                 html_parts.append(f"<td style='text-align: right;'>{totals['total']:.1f}</td>")
+                html_parts.append(f"<td style='text-align: right; color: #e65100;'>{_pj(class_name)}</td>")
                 html_parts.append("</tr>")
 
         # Secondary (Backfill) sub-subtotal
@@ -586,6 +626,7 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
             html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_secondary_claimed:.1f}</td>")
             html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_secondary_drained:.1f}</td>")
             html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_secondary_total:.1f}</td>")
+            html_parts.append(f"<td style='text-align: right; font-weight: bold; color: #e65100;'>{sec_prevented}</td>")
             html_parts.append("</tr>")
 
             for class_name in secondary_classes:
@@ -597,6 +638,7 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
                     html_parts.append(f"<td style='text-align: right;'>{totals['claimed']:.1f}</td>")
                     html_parts.append(f"<td style='text-align: right;'>{totals['drained']:.1f}</td>")
                     html_parts.append(f"<td style='text-align: right;'>{totals['total']:.1f}</td>")
+                    html_parts.append(f"<td style='text-align: right; color: #e65100;'>{_pj(class_name)}</td>")
                     html_parts.append("</tr>")
 
         # Open Capacity subtotal row
@@ -608,6 +650,7 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
             html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{oc_totals['claimed']:.1f}</td>")
             html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{oc_totals['drained']:.1f}</td>")
             html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{oc_totals['total']:.1f}</td>")
+            html_parts.append(f"<td style='text-align: right; font-weight: bold; color: #e65100;'>{oc_prevented}</td>")
             html_parts.append("</tr>")
 
             for tier in ["Flagship", "Standard"]:
@@ -619,6 +662,7 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
                     html_parts.append(f"<td style='text-align: right;'>{tier_data['claimed']:.1f}</td>")
                     html_parts.append(f"<td style='text-align: right;'>{tier_data['drained']:.1f}</td>")
                     html_parts.append(f"<td style='text-align: right;'>{tier_data['total']:.1f}</td>")
+                    html_parts.append(f"<td style='text-align: right; color: #e65100;'>{_pj_tier('Shared', tier)}</td>")
                     html_parts.append("</tr>")
 
         html_parts.append("</table>")
