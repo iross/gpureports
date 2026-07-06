@@ -527,59 +527,18 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
             else:
                 open_capacity_tiers[tier]["percent"] = 0
 
-        # Real Slots Table — "Prevented" column uses point-in-time counts from the most
-        # recent bucket with PreventJobsReason data (not a 24h average), because this is
-        # a persistent policy state rather than a transient operational one.
+        # Stash prevent_jobs stats for use in the PreventJobsReason section below.
         pj = results.get("prevent_jobs_stats", {})
         pcc = pj.get("per_class_current", {})
-        pcdc = pj.get("per_class_device_current", {})
-        pj_buckets = pj.get("pj_buckets", 0)
-        total_buckets = pj.get("total_buckets", 0)
-        # Coverage flag: if PJ data covers < 25% of the window, add a note.
-        pj_sparse = pj_buckets > 0 and total_buckets > 0 and (pj_buckets / total_buckets) < 0.25
+        pj_buckets_count = pj.get("pj_buckets", 0)
+        total_buckets_count = pj.get("total_buckets", 0)
 
-        def _pj(class_name):
-            """Return formatted prevented-GPU cell value for a single class."""
-            v = pcc.get(class_name, 0)
-            return str(v) if v > 0 else "—"
-
-        def _pj_sum(*class_names):
-            """Sum prevented-GPU counts across multiple classes; return '—' if zero."""
-            v = sum(pcc.get(c, 0) for c in class_names)
-            return str(v) if v > 0 else "—"
-
-        def _pj_tier(class_name, tier):
-            """Sum prevented-GPU counts for a specific performance tier within a class."""
-            v = sum(
-                n
-                for device_type, n in pcdc.get(class_name, {}).items()
-                if get_gpu_performance_tier(device_type) == tier
-            )
-            return str(v) if v > 0 else "—"
-
-        prevented_header = "Prevented *" if pj_sparse else "Prevented"
         html_parts.append("<h2>Real Slots</h2>")
         html_parts.append("<table border='1' style='margin-top: 20px;'>")
         html_parts.append(
-            f"<tr style='background-color: #e0e0e0;'><th>Class</th><th>Allocated %</th><th>Allocated (avg.)</th>"
-            f"<th>Drained (avg.)</th><th>{prevented_header}</th><th>Available (avg.)</th></tr>"
+            "<tr style='background-color: #e0e0e0;'><th>Class</th><th>Allocated %</th><th>Allocated (avg.)</th>"
+            "<th>Drained (avg.)</th><th>Available (avg.)</th></tr>"
         )
-
-        pri_blocked = _pj_sum("Priority-ResearcherOwned", "Priority-CHTCOwned")
-        sec_blocked = _pj_sum("Backfill-ResearcherOwned", "Backfill-CHTCOwned")
-        pri_total_blocked_val = sum(
-            pcc.get(c, 0)
-            for c in [
-                "Priority-ResearcherOwned",
-                "Priority-CHTCOwned",
-                "Backfill-ResearcherOwned",
-                "Backfill-CHTCOwned",
-            ]
-        )
-        oc_blocked = _pj("Shared")
-        grand_blocked_val = pri_total_blocked_val + pcc.get("Shared", 0)
-        grand_blocked = str(grand_blocked_val) if grand_blocked_val > 0 else "—"
-        pri_total_blocked = str(pri_total_blocked_val) if pri_total_blocked_val > 0 else "—"
 
         # Grand TOTAL row (primary + secondary + open capacity)
         html_parts.append("<tr style='background-color: #d0d0d0; font-weight: bold;'>")
@@ -587,7 +546,6 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{grand_pct:.1f}%</td>")
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{grand_claimed:.1f}</td>")
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{grand_drained:.1f}</td>")
-        html_parts.append(f"<td style='text-align: right; font-weight: bold; color: #e65100;'>{grand_blocked}</td>")
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{grand_total_avail:.1f}</td>")
         html_parts.append("</tr>")
 
@@ -597,7 +555,6 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_total_pct:.1f}%</td>")
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_total_claimed:.1f}</td>")
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_total_drained:.1f}</td>")
-        html_parts.append(f"<td style='text-align: right; font-weight: bold; color: #e65100;'>{pri_total_blocked}</td>")
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_primary_total:.1f}</td>")
         html_parts.append("</tr>")
 
@@ -607,7 +564,6 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_primary_pct:.1f}%</td>")
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_primary_claimed:.1f}</td>")
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_primary_drained:.1f}</td>")
-        html_parts.append(f"<td style='text-align: right; font-weight: bold; color: #e65100;'>{pri_blocked}</td>")
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_primary_total:.1f}</td>")
         html_parts.append("</tr>")
 
@@ -619,7 +575,6 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
                 html_parts.append(f"<td style='text-align: right;'>{totals['percent']:.1f}%</td>")
                 html_parts.append(f"<td style='text-align: right;'>{totals['claimed']:.1f}</td>")
                 html_parts.append(f"<td style='text-align: right;'>{totals['drained']:.1f}</td>")
-                html_parts.append(f"<td style='text-align: right; color: #e65100;'>{_pj(class_name)}</td>")
                 html_parts.append(f"<td style='text-align: right;'>{totals['total']:.1f}</td>")
                 html_parts.append("</tr>")
 
@@ -630,7 +585,6 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
             html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_secondary_pct:.1f}%</td>")
             html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_secondary_claimed:.1f}</td>")
             html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_secondary_drained:.1f}</td>")
-            html_parts.append(f"<td style='text-align: right; font-weight: bold; color: #e65100;'>{sec_blocked}</td>")
             html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_secondary_total:.1f}</td>")
             html_parts.append("</tr>")
 
@@ -642,11 +596,10 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
                     html_parts.append(f"<td style='text-align: right;'>{totals['percent']:.1f}%</td>")
                     html_parts.append(f"<td style='text-align: right;'>{totals['claimed']:.1f}</td>")
                     html_parts.append(f"<td style='text-align: right;'>{totals['drained']:.1f}</td>")
-                    html_parts.append(f"<td style='text-align: right; color: #e65100;'>{_pj(class_name)}</td>")
                     html_parts.append(f"<td style='text-align: right;'>{totals['total']:.1f}</td>")
                     html_parts.append("</tr>")
 
-        # Open Capacity subtotal row (unchanged structure)
+        # Open Capacity subtotal row
         if "Shared" in class_totals:
             oc_totals = class_totals["Shared"]
             html_parts.append("<tr style='background-color: #e8e8e8;'>")
@@ -654,30 +607,21 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
             html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{oc_totals['percent']:.1f}%</td>")
             html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{oc_totals['claimed']:.1f}</td>")
             html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{oc_totals['drained']:.1f}</td>")
-            html_parts.append(f"<td style='text-align: right; font-weight: bold; color: #e65100;'>{oc_blocked}</td>")
             html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{oc_totals['total']:.1f}</td>")
             html_parts.append("</tr>")
 
             for tier in ["Flagship", "Standard"]:
                 tier_data = open_capacity_tiers[tier]
                 if tier_data["total"] > 0:
-                    tier_blocked = _pj_tier("Shared", tier)
                     html_parts.append("<tr>")
                     html_parts.append(f"<td style='padding-left: 16px;'>Open Capacity ({tier})</td>")
                     html_parts.append(f"<td style='text-align: right;'>{tier_data['percent']:.1f}%</td>")
                     html_parts.append(f"<td style='text-align: right;'>{tier_data['claimed']:.1f}</td>")
                     html_parts.append(f"<td style='text-align: right;'>{tier_data['drained']:.1f}</td>")
-                    html_parts.append(f"<td style='text-align: right; color: #e65100;'>{tier_blocked}</td>")
                     html_parts.append(f"<td style='text-align: right;'>{tier_data['total']:.1f}</td>")
                     html_parts.append("</tr>")
 
         html_parts.append("</table>")
-        if pj_sparse:
-            html_parts.append(
-                f"<p style='font-size: 0.85em; color: #888;'>* Prevented counts are point-in-time from the most "
-                f"recent collection interval. PreventJobsReason data covers only {pj_buckets} of "
-                f"{total_buckets} intervals in this window (collector recently updated).</p>"
-            )
 
         # Real Slots by Memory Category Table
         if "memory_stats" in results:
@@ -1257,7 +1201,13 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
     # PreventJobsReason Status
     prevent_jobs_stats = results.get("prevent_jobs_stats", {})
     if prevent_jobs_stats.get("has_prevent_jobs", False):
-        html_parts.append("<h2 style='color: #e65100;'>GPUs with PreventJobsReason Set</h2>")
+        pj_sparse_note = ""
+        if pj_buckets_count > 0 and total_buckets_count > 0 and (pj_buckets_count / total_buckets_count) < 0.25:
+            pj_sparse_note = (
+                f" <span style='font-size:0.8em; color:#888;'>"
+                f"(data from {pj_buckets_count}/{total_buckets_count} intervals — collector recently updated)</span>"
+            )
+        html_parts.append(f"<h2 style='color: #e65100;'>GPUs with PreventJobsReason Set{pj_sparse_note}</h2>")
         html_parts.append("<table border='1' style='background-color: #fff3e0;'>")
         html_parts.append("<tr style='background-color: #ffe0b2;'><th>Metric</th><th>Value</th></tr>")
         html_parts.append("<tr>")
@@ -1269,6 +1219,32 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
         html_parts.append(f"<td style='text-align: right;'>{prevent_jobs_stats['num_unique_gpus']}</td>")
         html_parts.append("</tr>")
         html_parts.append("</table>")
+
+        # Per-class breakdown (point-in-time from most recent collection with PJ data)
+        _pj_class_labels = {
+            "Priority-ResearcherOwned": "Researcher-Owned Hardware (Primary)",
+            "Priority-CHTCOwned": "Researcher-Reserved Capacity (Primary)",
+            "Shared": "Open Capacity",
+            "Backfill-ResearcherOwned": "Researcher-Owned Hardware (Backfill)",
+            "Backfill-CHTCOwned": "Researcher-Reserved Capacity (Backfill)",
+        }
+        if any(pcc.get(c, 0) > 0 for c in _pj_class_labels):
+            html_parts.append("<h3>GPUs with PreventJobsReason by Class (point-in-time)</h3>")
+            html_parts.append("<table border='1'>")
+            html_parts.append("<tr style='background-color: #e0e0e0;'><th>Class</th><th>GPUs (Owner-state)</th></tr>")
+            for cls, label in _pj_class_labels.items():
+                n = pcc.get(cls, 0)
+                if n > 0:
+                    html_parts.append(
+                        f"<tr><td>{label}</td>"
+                        f"<td style='text-align: right; color: #e65100;'><strong>{n}</strong></td></tr>"
+                    )
+            html_parts.append("</table>")
+            html_parts.append(
+                "<p style='font-size: 0.85em; color: #555;'>"
+                "These GPUs are in Owner state with PreventJobsReason set — they are registered with HTCondor "
+                "but cannot accept new jobs due to policy. They are not included in the Available counts above.</p>"
+            )
 
         per_host = prevent_jobs_stats.get("per_host", {})
         if per_host:
