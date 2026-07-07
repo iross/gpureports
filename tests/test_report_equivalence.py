@@ -238,6 +238,29 @@ class TestPreventJobsStats:
         # The summary (attribute-is-set) counts still include all three GPUs
         assert result["num_unique_gpus"] == 3
 
+    def test_idle_backfill_duplicate_does_not_hide_prevented_gpu(self):
+        """An idle prevented GPU also offered as an idle backfill slot is still Prevented.
+
+        The dedup ranking must keep the prevented primary row over an idle backfill
+        row; only a Claimed backfill slot may displace it.
+        """
+        import pandas as pd
+
+        rows = [
+            {
+                **_row(self._ts, "hostA", "GPU-1", "Unclaimed", prevent_jobs_reason="INF-1"),
+                "PrioritizedProjects": "",
+            },
+            {
+                **_row(self._ts, "hostA", "GPU-1", "Unclaimed"),
+                "Name": "backfill1_1@hostA",
+                "PrioritizedProjects": "",
+            },
+        ]
+        df = pd.DataFrame(rows)
+        result = calculate_prevent_jobs_stats(df)
+        assert result["per_class_current"]["Shared"] == 1
+
     def test_missing_column_returns_false(self):
         """DataFrame without PreventJobsReason column returns has_prevent_jobs=False."""
         import pandas as pd

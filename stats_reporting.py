@@ -1288,7 +1288,8 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
                 "<p style='font-size: 0.85em; color: #555;'>"
                 "These GPUs are idle with PreventJobsReason set — they cannot accept new jobs due to policy. "
                 "GPUs still finishing a job (PreventJobsReason does not evict running work) are counted as "
-                "Allocated instead. Idle prevented GPUs are not included in the Available counts above.</p>"
+                "Allocated instead. Idle prevented GPUs remain part of the class totals in the "
+                "Available (avg.) column.</p>"
             )
 
         per_host = prevent_jobs_stats.get("per_host", {})

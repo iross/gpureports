@@ -562,17 +562,30 @@ def _apply_duplicate_cleanup(df: pl.DataFrame) -> pl.DataFrame:
 
     # Create a rank column to sort out duplicates.
     # Prefer primary slots over backfill slots; within each type, prefer Claimed > Unclaimed > Drained.
-    # All primary ranks (3–5) beat all backfill ranks (0–2) so that a Drained primary slot is not
+    # Primary ranks (4–6) beat backfill ranks (0–3) so that a Drained primary slot is not
     # displaced by a Drained backfill slot and then incorrectly excluded by the "not backfill" filter.
+    # One exception: a primary slot that is idle with PreventJobsReason set (rank 2) loses to a
+    # Claimed backfill slot (rank 3), so a GPU still finishing a backfill job counts as Allocated
+    # in the backfill class rather than Prevented or Available.
     is_backfill = pl.col("Name").str.contains("backfill")
+    if "PreventJobsReason" in df.columns:
+        prevented_idle = (
+            pl.col("PreventJobsReason").is_not_null()
+            & (pl.col("PreventJobsReason").str.strip_chars() != "")
+            & (pl.col("State") != "Claimed")
+        )
+    else:
+        prevented_idle = pl.lit(False)
     df = df.with_columns(
         pl.when((pl.col("State") == "Claimed") & (~is_backfill))
+        .then(6)
+        .when((pl.col("State") == "Unclaimed") & (~is_backfill) & (~prevented_idle))
         .then(5)
-        .when((pl.col("State") == "Unclaimed") & (~is_backfill))
+        .when((~is_backfill) & (~prevented_idle))
         .then(4)
-        .when(~is_backfill)
-        .then(3)
         .when((pl.col("State") == "Claimed") & is_backfill)
+        .then(3)
+        .when(~is_backfill)
         .then(2)
         .when((pl.col("State") == "Unclaimed") & is_backfill)
         .then(1)
