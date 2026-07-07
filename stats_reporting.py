@@ -527,42 +527,38 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
             else:
                 open_capacity_tiers[tier]["percent"] = 0
 
-        # Prevent_jobs stats for the Real Slots table Prevented column and section below.
+        # Prevent_jobs stats for the Real Slots table Prevented (avg.) column and section
+        # below. The column shows window averages, matching the other (avg.) columns.
         pj = results.get("prevent_jobs_stats", {})
+        pca = pj.get("per_class_avg", {})
+        pcda = pj.get("per_class_device_avg", {})
         pcc = pj.get("per_class_current", {})
-        pcdc = pj.get("per_class_device_current", {})
         pj_buckets_count = pj.get("pj_buckets", 0)
         total_buckets_count = pj.get("total_buckets", 0)
 
+        def _pj_fmt(v):
+            return f"{v:.1f}" if v >= 0.05 else "—"
+
         def _pj(class_name):
-            v = pcc.get(class_name, 0)
-            return str(v) if v > 0 else "—"
+            return _pj_fmt(pca.get(class_name, 0.0))
 
         def _pj_sum(*class_names):
-            v = sum(pcc.get(c, 0) for c in class_names)
-            return str(v) if v > 0 else "—"
+            return _pj_fmt(sum(pca.get(c, 0.0) for c in class_names))
 
         def _pj_tier(class_name, tier):
             v = sum(
                 n
-                for device_type, n in pcdc.get(class_name, {}).items()
+                for device_type, n in pcda.get(class_name, {}).items()
                 if get_gpu_performance_tier(device_type) == tier
             )
-            return str(v) if v > 0 else "—"
+            return _pj_fmt(v)
 
-        grand_prevented = _pj_sum(
-            "Priority-ResearcherOwned",
-            "Priority-CHTCOwned",
-            "Shared",
-            "Backfill-ResearcherOwned",
-            "Backfill-CHTCOwned",
-        )
-        pri_total_prevented = _pj_sum(
-            "Priority-ResearcherOwned",
-            "Priority-CHTCOwned",
-            "Backfill-ResearcherOwned",
-            "Backfill-CHTCOwned",
-        )
+        # Backfill classes run on the same physical GPUs as the Priority classes, so the
+        # TOTAL rows count only primary + open capacity — the same convention the
+        # Available column uses. The Secondary (Backfill) rows still show their own
+        # class values.
+        grand_prevented = _pj_sum("Priority-ResearcherOwned", "Priority-CHTCOwned", "Shared")
+        pri_total_prevented = _pj_sum("Priority-ResearcherOwned", "Priority-CHTCOwned")
         pri_prevented = _pj_sum("Priority-ResearcherOwned", "Priority-CHTCOwned")
         sec_prevented = _pj_sum("Backfill-ResearcherOwned", "Backfill-CHTCOwned")
         oc_prevented = _pj("Shared")
@@ -571,7 +567,7 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
         html_parts.append("<table border='1' style='margin-top: 20px;'>")
         html_parts.append(
             "<tr style='background-color: #e0e0e0;'><th>Class</th><th>Allocated %</th><th>Allocated (avg.)</th>"
-            "<th>Drained (avg.)</th><th>Available (avg.)</th><th>Prevented</th></tr>"
+            "<th>Drained (avg.)</th><th>Available (avg.)</th><th>Prevented (avg.)</th></tr>"
         )
 
         # Grand TOTAL row (primary + secondary + open capacity)
@@ -1286,10 +1282,12 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
             html_parts.append("</table>")
             html_parts.append(
                 "<p style='font-size: 0.85em; color: #555;'>"
-                "These GPUs are idle with PreventJobsReason set — they cannot accept new jobs due to policy. "
-                "GPUs still finishing a job (PreventJobsReason does not evict running work) are counted as "
-                "Allocated instead. Idle prevented GPUs remain part of the class totals in the "
-                "Available (avg.) column.</p>"
+                "These GPUs are idle with PreventJobsReason set as of the most recent collection — "
+                "they cannot accept new jobs due to policy. GPUs still finishing a job "
+                "(PreventJobsReason does not evict running work) are counted as Allocated instead. "
+                "The Prevented (avg.) column in the Real Slots table averages these counts over the "
+                "full report window, so a reason lifted partway through still shows there. Idle "
+                "prevented GPUs remain part of the class totals in the Available (avg.) column.</p>"
             )
 
         per_host = prevent_jobs_stats.get("per_host", {})
@@ -1297,17 +1295,30 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
             html_parts.append("<h3>Per-Host Breakdown</h3>")
             html_parts.append("<table border='1'>")
             html_parts.append(
-                "<tr style='background-color: #e0e0e0;'><th>Host</th><th>GPUs</th><th>Reason(s)</th></tr>"
+                "<tr style='background-color: #e0e0e0;'><th>Host</th><th>GPUs</th><th>Reason(s)</th>"
+                "<th>Status</th><th>Last seen</th></tr>"
             )
             for host_name in sorted(per_host):
                 d = per_host[host_name]
                 reasons = "; ".join(d["reasons"]) or "—"
+                if d.get("active"):
+                    status = "<span style='color: #e65100; font-weight: bold;'>Active</span>"
+                else:
+                    status = "<span style='color: #888;'>Lifted</span>"
                 html_parts.append("<tr>")
                 html_parts.append(f"<td><strong>{host_name}</strong></td>")
                 html_parts.append(f"<td style='text-align: right;'>{d['num_gpus']}</td>")
                 html_parts.append(f"<td>{reasons}</td>")
+                html_parts.append(f"<td>{status}</td>")
+                html_parts.append(f"<td>{d.get('last_seen', '—')}</td>")
                 html_parts.append("</tr>")
             html_parts.append("</table>")
+            html_parts.append(
+                "<p style='font-size: 0.85em; color: #555;'>"
+                "This table covers the whole report window: a host is listed if any of its GPUs "
+                "had PreventJobsReason set at any point. Lifted means the reason was cleared "
+                "before the end of the window (last seen shows when).</p>"
+            )
     elif prevent_jobs_stats:
         html_parts.append("<h2>GPUs with PreventJobsReason Set</h2>")
         html_parts.append("<p><em>No GPUs have PreventJobsReason set during this period.</em></p>")
@@ -1847,7 +1858,8 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
             for host_name in sorted(per_host):
                 d = per_host[host_name]
                 reasons = "; ".join(d["reasons"]) or "—"
-                print(f"  {host_name}: {d['num_gpus']} GPU(s) — {reasons}")
+                status = "active" if d.get("active") else f"lifted, last seen {d.get('last_seen', '?')}"
+                print(f"  {host_name}: {d['num_gpus']} GPU(s) — {reasons} [{status}]")
 
     # Show host exclusion information at the bottom
     excluded_hosts = metadata.get("excluded_hosts", {})

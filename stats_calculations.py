@@ -1378,10 +1378,11 @@ def calculate_prevent_jobs_stats(df: pd.DataFrame) -> dict:
         df: Main GPU state DataFrame (full time window)
 
     Returns:
-        Dictionary with per-host breakdown, reason groupings, and per-class counts
-        (per_class_current / per_class_avg) for the Real Slots table Prevented column.
-        A GPU counts as Prevented only when its representative slot (after duplicate
-        cleanup) is idle with PreventJobsReason set.
+        Dictionary with per-host breakdown (including last_seen and whether the reason
+        is still active), reason groupings, and per-class counts: per_class_avg feeds
+        the Real Slots table Prevented (avg.) column, per_class_current the
+        point-in-time section. A GPU counts as Prevented only when its representative
+        slot (after duplicate cleanup) is idle with PreventJobsReason set.
     """
     _CLASS_NAMES = [
         "Priority-ResearcherOwned",
@@ -1412,13 +1413,6 @@ def calculate_prevent_jobs_stats(df: pd.DataFrame) -> dict:
     if filtered.empty:
         return _empty
 
-    per_host = {}
-    for machine, grp in filtered.groupby("Machine"):
-        per_host[machine] = {
-            "num_gpus": grp["AssignedGPUs"].nunique(),
-            "reasons": sorted(grp["PreventJobsReason"].dropna().unique().tolist()),
-        }
-
     by_reason = {}
     for reason, grp in filtered.groupby("PreventJobsReason"):
         by_reason[str(reason)] = {
@@ -1437,9 +1431,24 @@ def calculate_prevent_jobs_stats(df: pd.DataFrame) -> dict:
     pj_mask = df_bucketed["PreventJobsReason"].notna() & (
         df_bucketed["PreventJobsReason"].astype(str).str.strip() != ""
     )
-    pj_buckets_global = sorted(df_bucketed[pj_mask]["15min_bucket"].unique())
+    pj_rows = df_bucketed[pj_mask]
+    pj_buckets_global = sorted(pj_rows["15min_bucket"].unique())
     num_pj_buckets = len(pj_buckets_global)
     last_pj_bucket = pj_buckets_global[-1] if pj_buckets_global else None
+
+    # A host is "active" if its reason is still set in the most recent bucket with PJ
+    # data; otherwise the reason was lifted partway through the window.
+    active_machines = (
+        set(pj_rows.loc[pj_rows["15min_bucket"] == last_pj_bucket, "Machine"]) if last_pj_bucket is not None else set()
+    )
+    per_host = {}
+    for machine, grp in pj_rows.groupby("Machine"):
+        per_host[machine] = {
+            "num_gpus": grp["AssignedGPUs"].nunique(),
+            "reasons": sorted(grp["PreventJobsReason"].dropna().unique().tolist()),
+            "last_seen": grp["timestamp"].max().strftime("%Y-%m-%d %H:%M"),
+            "active": machine in active_machines,
+        }
 
     per_class_avg: dict[str, float] = {}
     per_class_device_avg: dict[str, dict[str, float]] = {}

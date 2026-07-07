@@ -188,6 +188,35 @@ class TestPreventJobsStats:
         assert "hostA" in result["per_host"]
         assert result["per_host"]["hostA"]["num_gpus"] == 2
         assert "GPUHealthy == False" in result["per_host"]["hostA"]["reasons"]
+        assert result["per_host"]["hostA"]["active"] is True
+        assert result["per_host"]["hostA"]["last_seen"] == "2026-07-02 12:00"
+
+    def test_lifted_reason_marked_inactive_but_kept_in_window_average(self):
+        """A reason lifted mid-window shows active=False and still feeds per_class_avg.
+
+        The host was idle+prevented in the first of two buckets only: per_host keeps it
+        (whole-window summary), active flips to False because a later bucket has PJ
+        data without it, and per_class_avg reflects the partial-window coverage while
+        per_class_current (last bucket only) drops it.
+        """
+        import pandas as pd
+
+        ts2 = self._ts + datetime.timedelta(minutes=15)
+        rows = [
+            # bucket 1: both hosts idle + prevented
+            {**_row(self._ts, "hostA", "GPU-A", "Unclaimed", prevent_jobs_reason="INF-1"), "PrioritizedProjects": ""},
+            {**_row(self._ts, "hostB", "GPU-B", "Unclaimed", prevent_jobs_reason="INF-2"), "PrioritizedProjects": ""},
+            # bucket 2: hostA's reason lifted (GPU back to work), hostB still prevented
+            {**_row(ts2, "hostA", "GPU-A", "Claimed"), "PrioritizedProjects": ""},
+            {**_row(ts2, "hostB", "GPU-B", "Unclaimed", prevent_jobs_reason="INF-2"), "PrioritizedProjects": ""},
+        ]
+        result = calculate_prevent_jobs_stats(pd.DataFrame(rows))
+        assert result["per_host"]["hostA"]["active"] is False
+        assert result["per_host"]["hostA"]["last_seen"] == "2026-07-02 12:00"
+        assert result["per_host"]["hostB"]["active"] is True
+        # current: only hostB's GPU; average: hostA 1/2 buckets + hostB 2/2 buckets
+        assert result["per_class_current"]["Shared"] == 1
+        assert result["per_class_avg"]["Shared"] == 1.5
 
     def test_empty_string_excluded(self):
         """PreventJobsReason='' is treated the same as absent."""
@@ -298,9 +327,15 @@ class TestPreventJobsStats:
                 "num_hosts": 1,
                 "num_unique_gpus": 2,
                 "per_host": {
-                    "hostA": {"num_gpus": 2, "reasons": ["GPUHealthy == False"]},
+                    "hostA": {
+                        "num_gpus": 2,
+                        "reasons": ["GPUHealthy == False"],
+                        "last_seen": "2026-07-02 12:00",
+                        "active": False,
+                    },
                 },
                 "by_reason": {"GPUHealthy == False": {"num_hosts": 1, "num_gpus": 2}},
+                "per_class_avg": {"Priority-CHTCOwned": 1.5},
             },
         }
         html = generate_html_report(results)
@@ -308,3 +343,7 @@ class TestPreventJobsStats:
         assert "e65100" in html  # orange colour
         assert "hostA" in html
         assert "GPUHealthy == False" in html
+        assert "Prevented (avg.)" in html
+        assert "Lifted" in html
+        assert "2026-07-02 12:00" in html
+        assert "1.5" in html  # per_class_avg rendered in the Prevented (avg.) column
