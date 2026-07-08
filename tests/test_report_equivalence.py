@@ -196,8 +196,7 @@ class TestPreventJobsStats:
 
         The host was idle+prevented in the first of two buckets only: per_host keeps it
         (whole-window summary), active flips to False because a later bucket has PJ
-        data without it, and per_class_avg reflects the partial-window coverage while
-        per_class_current (last bucket only) drops it.
+        data without it, and per_class_avg reflects the partial-window coverage.
         """
         import pandas as pd
 
@@ -214,8 +213,7 @@ class TestPreventJobsStats:
         assert result["per_host"]["hostA"]["active"] is False
         assert result["per_host"]["hostA"]["last_seen"] == "2026-07-02 12:00"
         assert result["per_host"]["hostB"]["active"] is True
-        # current: only hostB's GPU; average: hostA 1/2 buckets + hostB 2/2 buckets
-        assert result["per_class_current"]["Shared"] == 1
+        # average: hostA 1/2 buckets + hostB 2/2 buckets
         assert result["per_class_avg"]["Shared"] == 1.5
 
     def test_empty_string_excluded(self):
@@ -233,7 +231,7 @@ class TestPreventJobsStats:
         """A GPU running a job (Claimed on any slot) is Allocated, not Prevented.
 
         PreventJobsReason does not evict running jobs — it only stops new ones —
-        so per_class_current must count only idle prevented GPUs. A GPU that is
+        so per_class_avg must count only idle prevented GPUs. A GPU that is
         prevented on its primary slot but Claimed on a backfill slot is busy and
         must also be excluded.
         """
@@ -263,7 +261,7 @@ class TestPreventJobsStats:
         ]
         df = pd.DataFrame(rows)
         result = calculate_prevent_jobs_stats(df)
-        assert result["per_class_current"]["Shared"] == 1  # only GPU-idle
+        assert result["per_class_avg"]["Shared"] == 1.0  # only GPU-idle
         # The summary (attribute-is-set) counts still include all three GPUs
         assert result["num_unique_gpus"] == 3
 
@@ -288,7 +286,7 @@ class TestPreventJobsStats:
         ]
         df = pd.DataFrame(rows)
         result = calculate_prevent_jobs_stats(df)
-        assert result["per_class_current"]["Shared"] == 1
+        assert result["per_class_avg"]["Shared"] == 1.0
 
     def test_missing_column_returns_false(self):
         """DataFrame without PreventJobsReason column returns has_prevent_jobs=False."""
@@ -300,7 +298,7 @@ class TestPreventJobsStats:
         assert result["num_hosts"] == 0
 
     def test_html_section_rendered(self):
-        """HTML report includes PreventJobsReason section with orange header and host table."""
+        """HTML report includes PreventJobsReason section with host table."""
         results = {
             "metadata": {
                 "hours_back": 24,
@@ -340,7 +338,6 @@ class TestPreventJobsStats:
         }
         html = generate_html_report(results)
         assert "PreventJobsReason" in html
-        assert "e65100" in html  # orange colour
         assert "hostA" in html
         assert "GPUHealthy == False" in html
         assert "Prevented (avg.)" in html

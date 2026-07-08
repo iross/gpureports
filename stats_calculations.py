@@ -1380,9 +1380,9 @@ def calculate_prevent_jobs_stats(df: pd.DataFrame) -> dict:
     Returns:
         Dictionary with per-host breakdown (including last_seen and whether the reason
         is still active), reason groupings, and per-class counts: per_class_avg feeds
-        the Real Slots table Prevented (avg.) column, per_class_current the
-        point-in-time section. A GPU counts as Prevented only when its representative
-        slot (after duplicate cleanup) is idle with PreventJobsReason set.
+        the Real Slots table Prevented (avg.) column. A GPU counts as Prevented only
+        when its representative slot (after duplicate cleanup) is idle with
+        PreventJobsReason set.
     """
     _CLASS_NAMES = [
         "Priority-ResearcherOwned",
@@ -1399,8 +1399,6 @@ def calculate_prevent_jobs_stats(df: pd.DataFrame) -> dict:
         "by_reason": {},
         "per_class_avg": dict.fromkeys(_CLASS_NAMES, 0.0),
         "per_class_device_avg": {c: {} for c in _CLASS_NAMES},
-        "per_class_current": dict.fromkeys(_CLASS_NAMES, 0),
-        "per_class_device_current": {c: {} for c in _CLASS_NAMES},
         "pj_buckets": 0,
         "total_buckets": 0,
     }
@@ -1427,7 +1425,7 @@ def calculate_prevent_jobs_stats(df: pd.DataFrame) -> dict:
     num_buckets = len(buckets)
 
     # Buckets that have any PreventJobsReason data at all (across all machines/classes).
-    # Used to assess data coverage and to find the most recent point-in-time snapshot.
+    # Used to assess data coverage and to decide whether a host's reason is still active.
     pj_mask = df_bucketed["PreventJobsReason"].notna() & (
         df_bucketed["PreventJobsReason"].astype(str).str.strip() != ""
     )
@@ -1452,9 +1450,6 @@ def calculate_prevent_jobs_stats(df: pd.DataFrame) -> dict:
 
     per_class_avg: dict[str, float] = {}
     per_class_device_avg: dict[str, dict[str, float]] = {}
-    # Point-in-time counts from the most recent bucket that has any PJ data.
-    per_class_current: dict[str, int] = {}
-    per_class_device_current: dict[str, dict[str, int]] = {}
 
     # PreventJobsReason does not evict running jobs — it only stops new ones, so only
     # idle GPUs count as Prevented. The duplicate-cleanup ranking inside
@@ -1471,25 +1466,9 @@ def calculate_prevent_jobs_stats(df: pd.DataFrame) -> dict:
         if prevented.empty or num_buckets == 0:
             per_class_avg[class_name] = 0.0
             per_class_device_avg[class_name] = {}
-            per_class_current[class_name] = 0
-            per_class_device_current[class_name] = {}
         else:
             total = sum(prevented[prevented["15min_bucket"] == b]["AssignedGPUs"].nunique() for b in buckets)
             per_class_avg[class_name] = total / num_buckets
-
-            # Point-in-time: count from the most recent bucket with any PJ data globally.
-            if last_pj_bucket is not None:
-                last_bucket_prevented = prevented[prevented["15min_bucket"] == last_pj_bucket]
-                per_class_current[class_name] = last_bucket_prevented["AssignedGPUs"].nunique()
-                device_current: dict[str, int] = {}
-                for device_type, dev_grp in last_bucket_prevented.groupby("GPUs_DeviceName"):
-                    n = dev_grp["AssignedGPUs"].nunique()
-                    if n > 0:
-                        device_current[str(device_type)] = n
-                per_class_device_current[class_name] = device_current
-            else:
-                per_class_current[class_name] = 0
-                per_class_device_current[class_name] = {}
 
             # Per-device breakdown within this class (used for Flagship/Standard tier split)
             device_avgs: dict[str, float] = {}
@@ -1507,8 +1486,6 @@ def calculate_prevent_jobs_stats(df: pd.DataFrame) -> dict:
         "by_reason": by_reason,
         "per_class_avg": per_class_avg,
         "per_class_device_avg": per_class_device_avg,
-        "per_class_current": per_class_current,
-        "per_class_device_current": per_class_device_current,
         "pj_buckets": num_pj_buckets,
         "total_buckets": num_buckets,
     }
