@@ -72,6 +72,15 @@ def _load_masked_hosts(base_dir: str = ".") -> set[str]:
     return set()
 
 
+def _read_sqlite(path: str, query: str) -> pl.DataFrame:
+    """Run a query against a SQLite file and return the result as a Polars DataFrame."""
+    conn = sqlite3.connect(str(Path(path).resolve()))
+    try:
+        return pl.read_database(query, conn)
+    finally:
+        conn.close()
+
+
 def _query_dbs(file_specs: list[tuple[str, str]], start: datetime.datetime, end: datetime.datetime) -> pl.DataFrame:
     """Load data from Parquet and/or SQLite files and combine into one Polars DataFrame.
 
@@ -94,13 +103,12 @@ def _query_dbs(file_specs: list[tuple[str, str]], start: datetime.datetime, end:
                     .collect()
                 )
             else:
-                abs_path = str(Path(path).resolve())
                 query = (
                     f"SELECT {col_select} FROM gpu_state "
                     f"WHERE timestamp BETWEEN '{buffered_start.strftime('%Y-%m-%d %H:%M:%S.%f')}' "
                     f"  AND '{end.strftime('%Y-%m-%d %H:%M:%S.%f')}'"
                 )
-                df = pl.read_database_uri(query, f"sqlite:///{abs_path}")
+                df = _read_sqlite(path, query)
             if df.height > 0:
                 frames.append(df)
         except Exception as e:
@@ -440,14 +448,13 @@ def get_opencap_users_data(
                     .collect()
                 )
             else:
-                abs_path = str(Path(path).resolve())
                 query = (
                     f"SELECT {col_select} FROM gpu_state "
                     f"WHERE timestamp BETWEEN '{buffered_start.strftime('%Y-%m-%d %H:%M:%S.%f')}' "
                     f"  AND '{end.strftime('%Y-%m-%d %H:%M:%S.%f')}' "
                     f"  AND AssignedGPUs IS NOT NULL AND AssignedGPUs != ''"
                 )  # noqa: S608
-                df = pl.read_database_uri(query, f"sqlite:///{abs_path}")
+                df = _read_sqlite(path, query)
             if df.height > 0:
                 frames.append(df)
         except Exception as e:
@@ -658,13 +665,12 @@ def get_open_capacity_jobs_data(
                     .collect()
                 )
             else:
-                abs_path = str(Path(path).resolve())
                 query = (
                     f"SELECT {col_select} FROM gpu_state "
                     f"WHERE timestamp BETWEEN '{start.strftime('%Y-%m-%d %H:%M:%S.%f')}' "
                     f"  AND '{end.strftime('%Y-%m-%d %H:%M:%S.%f')}'"
                 )  # noqa: S608
-                df = pl.read_database_uri(query, f"sqlite:///{abs_path}")
+                df = _read_sqlite(path, query)
             if df.height > 0:
                 frames.append(df)
         except Exception as e:
