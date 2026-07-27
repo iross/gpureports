@@ -33,7 +33,7 @@ See [OPERATIONS.md](OPERATIONS.md) for crontab entries, log locations, and troub
 │   ├── plot_wait_times.py
 │   ├── plot_gpu_availability.py
 │   ├── weekly_summary.py
-│   ├── weekly_allocation_plot.py
+│   ├── plot_weekly_allocation.py
 │   ├── gap_analysis.py
 │   └── query.py
 ├── dashboard/                 # FastAPI real-time GPU state dashboard [WIP — not yet deployed]

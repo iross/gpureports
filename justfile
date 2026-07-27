@@ -5,7 +5,7 @@ last-day-html:
 weekly-overview:
     uv run weekly_gpu_hours_analysis.py --plot --databases  gpu_state_*.db
 weekly-allocation:
-    uv run scripts/weekly_allocation_plot.py --databases gpu_state_*.db
+    uv run scripts/plot_weekly_allocation.py
 week:
     uv run scripts/weekly_summary.py --databases gpu_state_*.db
 dashboard:

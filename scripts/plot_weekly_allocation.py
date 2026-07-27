@@ -2,504 +2,223 @@
 """
 Weekly Allocation Percentage Plot
 
-Plots allocation percentages over time grouped by week for:
-- Prioritized total (Priority-ResearcherOwned + Priority-CHTCOwned)
-- Open Capacity total (Shared slots)
-- Backfill total (all Backfill-* types)
+Plots weekly GPU allocation percentages from the gpu_state Parquet files for
+the three report headline categories:
+- Prioritized (Primary) (Priority-ResearcherOwned + Priority-CHTCOwned real slots)
+- Open Capacity (Shared real slots)
+- Secondary/Backfill (Backfill-ResearcherOwned + Backfill-CHTCOwned slots)
+
+A week's percentage is the mean over its 15-minute buckets of
+claimed / total unique GPUs, matching the report methodology. Partial weeks
+(fewer than 7 distinct days of data) are dropped.
 """
 
 import argparse
-import sqlite3
+import datetime
 import sys
 from pathlib import Path
 
+import matplotlib.dates as mdates
+import matplotlib.pyplot as plt
 import polars as pl
 
-try:
-    import matplotlib.dates as mdates
-    import matplotlib.pyplot as plt
-
-    MATPLOTLIB_AVAILABLE = True
-except ImportError:
-    MATPLOTLIB_AVAILABLE = False
-
-# Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from gpu_utils_polars import HOST_EXCLUSIONS, load_chtc_owned_hosts  # noqa: I001
+
+import gpu_utils  # noqa: E402
+from gpu_utils import load_host_exclusions  # noqa: E402
+from stats_calculations import (  # noqa: E402
+    _REAL_CLASS_EXPRS,
+    OLD_GPU_TYPES,
+    PreparedFrames,
+    _researcher_scope,
+    prepare_frames,
+)
+from stats_data import get_latest_timestamp, scan_time_filtered  # noqa: E402
+
+SURFACE = "#fcfcfb"
+TEXT_PRIMARY = "#0b0b0b"
+TEXT_SECONDARY = "#52514e"
+GRID = "#e5e4e0"
+
+# Categorical slots 1-3 (validated: scripts/validate_palette.js, light mode)
+CATEGORIES = [
+    ("Prioritized (Primary)", "#2a78d6"),
+    ("Open Capacity", "#1baf7a"),
+    ("Secondary (Backfill)", "#eda100"),
+]
 
 
-NEEDED_COLUMNS = ["Name", "AssignedGPUs", "State", "Machine", "PrioritizedProjects", "GPUs_DeviceName", "timestamp"]
-OLD_GPU_TYPES = ["GTX 1080", "P100", "Quadro", "A30", "A40"]
-NEEDED_COLUMNS_SQL = ", ".join(NEEDED_COLUMNS)
-
-
-def load_data_from_database(db_path: str) -> pl.DataFrame:
-    """Load data from a single database file, selecting only needed columns."""
-    if not Path(db_path).exists():
-        print(f"Warning: Database {db_path} not found, skipping")
-        return pl.DataFrame()
-
-    try:
-        conn = sqlite3.connect(db_path)
-        df = pl.read_database(f"SELECT {NEEDED_COLUMNS_SQL} FROM gpu_state", conn)
-        conn.close()
-
-        if len(df) > 0:
-            print(f"Loaded {len(df):,} rows from {db_path}")
-            if df["timestamp"].dtype == pl.Utf8:
-                df = df.with_columns(pl.col("timestamp").str.to_datetime())
-            return df
-    except Exception as e:
-        print(f"Error loading {db_path}: {e}")
-
-    return pl.DataFrame()
-
-
-def _apply_duplicate_cleanup(df: pl.DataFrame) -> pl.DataFrame:
-    """
-    Vectorized duplicate cleanup: for rows where the same GPU appears multiple times
-    in the same timestamp, keep the highest-priority version.
-    Rank: claimed+primary(3) > claimed+backfill(2) > unclaimed+primary(1) > unclaimed+backfill(0)
-    """
-    is_backfill = pl.col("Name").str.contains("backfill")
-    is_claimed = pl.col("State") == "Claimed"
-
-    df = df.with_columns(
-        pl.when(is_claimed & ~is_backfill)
-        .then(3)
-        .when(is_claimed & is_backfill)
-        .then(2)
-        .when(~is_claimed & ~is_backfill)
-        .then(1)
-        .otherwise(0)
-        .alias("_rank")
-    )
-    df = df.sort(["AssignedGPUs", "_rank"], descending=[False, True])
-    df = df.unique(subset=["timestamp", "AssignedGPUs"], keep="first")
-    df = df.drop("_rank")
-    return df
-
-
-def classify_rows(df: pl.DataFrame) -> pl.DataFrame:
-    """
-    Classify each row into a slot_type category and an effective state,
-    replicating the logic from filter_df_enhanced but vectorized.
-
-    Returns the dataframe with added columns: slot_type, effective_state
-    """
-    chtc_owned_hosts = load_chtc_owned_hosts()
-    chtc_list = list(chtc_owned_hosts)
-
-    is_backfill = pl.col("Name").str.contains("backfill")
-    is_chtc = pl.col("Machine").is_in(chtc_list)
-
-    # Apply host exclusions
-    if HOST_EXCLUSIONS:
-        for excluded_host in HOST_EXCLUSIONS.keys():
-            df = df.filter(~pl.col("Machine").str.contains(f"(?i){excluded_host}").fill_null(False))
-
-    # Filter out old/uncommon GPU types and null device names (same as usage_stats)
-    old_pattern = "|".join(OLD_GPU_TYPES)
-    df = df.filter(
+def _category_frames(frames: PreparedFrames) -> dict[str, pl.LazyFrame]:
+    """Class frames for the three headline categories, old devices excluded."""
+    keep_device = (
         pl.col("GPUs_DeviceName").is_not_null()
         & (pl.col("GPUs_DeviceName") != "")
-        & ~pl.col("GPUs_DeviceName").str.contains(old_pattern).fill_null(False)
+        & ~pl.col("GPUs_DeviceName").str.contains("|".join(OLD_GPU_TYPES)).fill_null(False)
     )
-
-    # Shared requires PrioritizedProjects == "" (not null) to match filter_df_enhanced
-    has_priority_not_null = (pl.col("PrioritizedProjects") != "") & pl.col("PrioritizedProjects").is_not_null()
-    priority_is_empty = pl.col("PrioritizedProjects") == ""
-    priority_is_null_or_empty = (pl.col("PrioritizedProjects") == "") | pl.col("PrioritizedProjects").is_null()
-
-    # Step 1: Classify each row into its slot_type
-    # Match filter_df_enhanced logic exactly:
-    #   Backfill-ResearcherOwned: backfill & has_priority & !chtc
-    #   Backfill-CHTCOwned: backfill & chtc (no priority check)
-    #   Backfill-OpenCapacity: backfill & (priority=="" or null) & !chtc
-    #   Priority-ResearcherOwned: !backfill & has_priority & !chtc
-    #   Priority-CHTCOwned: !backfill & has_priority & chtc
-    #   Shared: !backfill & priority=="" (NOT null)
-    df = df.with_columns(
-        pl.when(is_backfill & has_priority_not_null & ~is_chtc)
-        .then(pl.lit("Backfill-ResearcherOwned"))
-        .when(is_backfill & is_chtc)
-        .then(pl.lit("Backfill-CHTCOwned"))
-        .when(is_backfill & priority_is_null_or_empty & ~is_chtc)
-        .then(pl.lit("Backfill-OpenCapacity"))
-        .when(~is_backfill & has_priority_not_null & ~is_chtc)
-        .then(pl.lit("Priority-ResearcherOwned"))
-        .when(~is_backfill & has_priority_not_null & is_chtc)
-        .then(pl.lit("Priority-CHTCOwned"))
-        .when(~is_backfill & priority_is_empty)
-        .then(pl.lit("Shared"))
-        .otherwise(pl.lit("Other"))
-        .alias("slot_type")
+    prioritized = frames.dedup.filter(
+        (_REAL_CLASS_EXPRS["Priority-ResearcherOwned"] | _REAL_CLASS_EXPRS["Priority-CHTCOwned"]) & keep_device
     )
-
-    # Step 2: Apply duplicate cleanup for priority/shared primary slots.
-    # The original logic deduplicates across ALL rows (primary+backfill) within a timestamp,
-    # then filters to just primary slots for Claimed, or primary-unclaimed + backfill-claimed for Unclaimed.
-    #
-    # For the weekly allocation calc, what matters is:
-    #   - "Claimed" count = unique GPUs in claimed primary slots (after dedup)
-    #   - "Total" count = claimed + unique GPUs that are unclaimed in primary
-    #     (where "unclaimed" means: primary slot is unclaimed AND not claimed in backfill)
-    #
-    # The dedup logic keeps the highest-ranked row per (timestamp, GPU), so if a GPU is
-    # claimed in backfill but unclaimed in primary, the claimed-backfill row wins.
-    # For Priority/Shared "Unclaimed" counting, the original code also counts
-    # GPUs that are claimed in backfill (condition2 in filter_df_enhanced).
-    # This means: "Unclaimed from prioritized/shared perspective" = not being used for priority/shared.
-    #
-    # Simplification: after dedup, for priority/shared primary slots:
-    #   - If State=Claimed and not backfill -> truly claimed for priority/shared
-    #   - If the GPU only appears in backfill (claimed) -> it's "unclaimed" from priority/shared perspective
-    #   - If State=Unclaimed and not backfill -> truly unclaimed
-    #
-    # For the percentage calc (claimed / total), we need:
-    #   Claimed = unique GPUs where primary slot is Claimed
-    #   Total = all unique GPUs that have a primary slot (claimed or unclaimed)
-
-    # We apply dedup only for counting purposes. The slot_type classification is already done.
-    # The dedup affects which GPUs count as "claimed" vs "unclaimed" for Priority/Shared.
-    # For backfill, no dedup is needed.
-
-    return df
-
-
-def _compute_bucket_stats(df: pl.DataFrame) -> pl.DataFrame:
-    """
-    Compute per-bucket (15-min) stats for a single database's worth of data.
-    Returns a small DataFrame with columns: week_start, bucket, category, total_gpus, claimed_gpus.
-    """
-    if len(df) == 0:
-        return pl.DataFrame(
-            schema={
-                "week_start": pl.Datetime,
-                "bucket": pl.Datetime,
-                "category": pl.Utf8,
-                "total_gpus": pl.UInt32,
-                "claimed_gpus": pl.UInt32,
-            }
-        )
-
-    # Classify all rows
-    df = classify_rows(df)
-
-    # Add time buckets
-    df = df.with_columns(
-        [
-            pl.col("timestamp").dt.truncate("1w").alias("week_start"),
-            pl.col("timestamp").dt.truncate("15m").alias("bucket"),
-        ]
+    open_capacity = frames.dedup.filter(_REAL_CLASS_EXPRS["Shared"] & keep_device)
+    researcher = _researcher_scope(frames, ["Machine"])
+    backfill = frames.raw_bf.filter(keep_device).filter(
+        pl.col("_is_chtc") | pl.col("Machine").is_in(researcher.collect()["Machine"].implode())
     )
-
-    # Map slot_types to categories
-    category_map = {
-        "Priority-ResearcherOwned": "prioritized",
-        "Priority-CHTCOwned": "prioritized",
-        "Shared": "open_capacity",
-        "Backfill-ResearcherOwned": "backfill",
-        "Backfill-CHTCOwned": "backfill",
-        "Backfill-OpenCapacity": "backfill",
+    return {
+        "Prioritized (Primary)": prioritized,
+        "Open Capacity": open_capacity,
+        "Secondary (Backfill)": backfill,
     }
 
-    df = df.with_columns(pl.col("slot_type").replace_strict(category_map, default="other").alias("category"))
 
-    # Filter to only the categories we care about
-    df = df.filter(pl.col("category") != "other")
-
-    # Apply dedup to determine GPU states
-    full_deduped = _apply_duplicate_cleanup(df.filter(pl.col("AssignedGPUs").is_not_null()))
-    primary_deduped = full_deduped.filter(pl.col("category") != "backfill")
-
-    # Primary categories: total GPUs from pre-dedup, claimed from post-dedup
-    primary_all_gpus = (
-        df.filter((pl.col("category") != "backfill") & pl.col("AssignedGPUs").is_not_null())
-        .group_by(["week_start", "bucket", "category"])
-        .agg(pl.col("AssignedGPUs").n_unique().alias("total_gpus"))
-    )
-
-    primary_claimed_gpus = (
-        primary_deduped.filter((pl.col("State") == "Claimed") & pl.col("AssignedGPUs").is_not_null())
-        .group_by(["week_start", "bucket", "category"])
-        .agg(pl.col("AssignedGPUs").n_unique().alias("claimed_gpus"))
-    )
-
-    primary_stats = primary_all_gpus.join(
-        primary_claimed_gpus,
-        on=["week_start", "bucket", "category"],
-        how="left",
-    ).with_columns(pl.col("claimed_gpus").fill_null(0))
-
-    # Backfill: simpler
-    backfill_df = df.filter(pl.col("category") == "backfill")
-    backfill_stats = (
-        backfill_df.filter(pl.col("AssignedGPUs").is_not_null())
-        .group_by(["week_start", "bucket", "category"])
-        .agg(
-            [
-                pl.col("AssignedGPUs").n_unique().alias("total_gpus"),
-                pl.col("AssignedGPUs").filter(pl.col("State") == "Claimed").n_unique().alias("claimed_gpus"),
-            ]
+def weekly_allocation(frames: PreparedFrames) -> pl.DataFrame:
+    """Weekly mean of per-bucket allocation percentages per category."""
+    weeklies = []
+    for name, frame in _category_frames(frames).items():
+        per_bucket = (
+            frame.filter(pl.col("AssignedGPUs").is_not_null())
+            .group_by("bucket", "AssignedGPUs")
+            .agg((pl.col("State") == "Claimed").any().alias("claimed"))
+            .group_by("bucket")
+            .agg(pl.len().alias("total"), pl.col("claimed").sum().alias("claimed"))
+            .with_columns(pl.col("bucket").dt.truncate("1w").alias("week_start"))
         )
-    )
-
-    return pl.concat([primary_stats, backfill_stats])
-
-
-def calculate_weekly_allocation_incremental(db_paths: list[str]) -> pl.DataFrame:
-    """
-    Calculate weekly allocation percentages by processing one database at a time.
-    Each DB is loaded, aggregated to bucket-level stats, then freed before the next.
-    """
-    all_bucket_stats = []
-
-    for db_path in db_paths:
-        df = load_data_from_database(db_path)
-        if len(df) == 0:
-            continue
-        print(f"  Computing bucket stats for {db_path}...")
-        stats = _compute_bucket_stats(df)
-        all_bucket_stats.append(stats)
-        del df  # free memory before loading next DB
-
-    if not all_bucket_stats:
-        return pl.DataFrame()
-
-    # Combine the small bucket-level stats from all DBs
-    all_stats = pl.concat(all_bucket_stats)
-    del all_bucket_stats
-
-    # Count distinct days per week to filter partial weeks (must have all 7 days, like gpu_hours)
-    days_per_week = (
-        all_stats.with_columns(pl.col("bucket").dt.date().alias("day"))
-        .group_by("week_start")
-        .agg(pl.col("day").n_unique().alias("n_days"))
-    )
-    complete_weeks = days_per_week.filter(pl.col("n_days") >= 7)["week_start"].to_list()
-    all_stats = all_stats.filter(pl.col("week_start").is_in(complete_weeks))
-
-    # Sum counts across buckets per week (matching usage_stats: sum totals, then divide)
-    weekly = (
-        all_stats.group_by(["week_start", "category"]).agg(
-            [
-                pl.col("total_gpus").sum().alias("total_gpus"),
-                pl.col("claimed_gpus").sum().alias("claimed_gpus"),
+        weekly = (
+            per_bucket.group_by("week_start")
+            .agg(
+                (pl.col("claimed") / pl.col("total") * 100).mean().alias("pct"),
+                (pl.col("claimed").sum() / pl.len()).alias("avg_claimed"),
+                (pl.col("total").sum() / pl.len()).alias("avg_total"),
                 pl.len().alias("intervals"),
-            ]
+                pl.col("bucket").dt.date().n_unique().alias("n_days"),
+            )
+            .filter(pl.col("n_days") >= 7)
+            .with_columns(pl.lit(name).alias("category"))
         )
-    ).with_columns(
-        pl.when(pl.col("total_gpus") > 0)
-        .then(pl.col("claimed_gpus") / pl.col("total_gpus") * 100.0)
-        .otherwise(0.0)
-        .alias("avg_pct")
+        weeklies.append(weekly.collect(engine="streaming"))
+    return pl.concat(weeklies).sort(["category", "week_start"])
+
+
+def create_plot(weekly: pl.DataFrame, output_path: str, title_period: str):
+    fig, ax = plt.subplots(figsize=(12, 6.5), dpi=200)
+    fig.patch.set_facecolor(SURFACE)
+    ax.set_facecolor(SURFACE)
+
+    # Break lines at weeks dropped for incomplete data instead of bridging the gap
+    first_week = weekly["week_start"].min()
+    last_week = weekly["week_start"].max()
+    n_weeks = (last_week - first_week).days // 7 + 1
+    all_weeks = [first_week + datetime.timedelta(weeks=i) for i in range(n_weeks)]
+
+    for name, color in CATEGORIES:
+        cat = weekly.filter(pl.col("category") == name)
+        by_week = dict(zip(cat["week_start"].to_list(), cat["pct"].to_list(), strict=True))
+        pcts = [by_week.get(week, float("nan")) for week in all_weeks]
+        ax.plot(all_weeks, pcts, color=color, linewidth=2, solid_capstyle="round", label=name)
+        last_present = max(w for w in by_week if by_week[w] == by_week[w])
+        # Direct label at the line end (required relief for the low-contrast slots)
+        ax.annotate(
+            name,
+            xy=(last_present, by_week[last_present]),
+            xytext=(8, 0),
+            textcoords="offset points",
+            va="center",
+            fontsize=9.5,
+            color=TEXT_PRIMARY,
+        )
+
+    ax.set_ylim(0, 100)
+    ax.set_yticks(range(0, 101, 20))
+    ax.yaxis.set_major_formatter(lambda v, _: f"{v:.0f}%")
+    ax.grid(axis="y", color=GRID, linewidth=0.8)
+    ax.set_axisbelow(True)
+    for spine in ("top", "right", "left"):
+        ax.spines[spine].set_visible(False)
+    ax.spines["bottom"].set_color(GRID)
+    ax.tick_params(colors=TEXT_SECONDARY, labelsize=9)
+
+    ax.xaxis.set_major_locator(mdates.MonthLocator())
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%b\n%Y"))
+    # Room on the right for the direct labels
+    last_week = weekly["week_start"].max()
+    ax.set_xlim(right=last_week + datetime.timedelta(days=42))
+
+    ax.set_title(
+        f"Weekly GPU allocation, {title_period}",
+        loc="left",
+        fontsize=14,
+        color=TEXT_PRIMARY,
+        pad=18,
+        fontweight="bold",
     )
-
-    # Also compute average GPUs per interval for context
-    weekly = weekly.with_columns(
-        [
-            (pl.col("total_gpus") / pl.col("intervals")).alias("avg_total_gpus"),
-            (pl.col("claimed_gpus") / pl.col("intervals")).alias("avg_claimed_gpus"),
-        ]
+    ax.text(
+        0,
+        1.015,
+        "Share of available GPUs claimed, averaged over each week",
+        transform=ax.transAxes,
+        fontsize=10,
+        color=TEXT_SECONDARY,
     )
-
-    # Pivot to get one row per week with columns for each category
-    weekly_pivoted = weekly.pivot(
-        on="category",
-        index="week_start",
-        values=["avg_pct", "intervals", "avg_total_gpus", "avg_claimed_gpus"],
-    )
-
-    # Rename columns to match expected output
-    rename_map = {}
-    for cat in ["prioritized", "open_capacity", "backfill"]:
-        for prefix, suffix in [
-            ("avg_pct", "pct"),
-            ("intervals", "intervals"),
-            ("avg_total_gpus", "avg_total"),
-            ("avg_claimed_gpus", "avg_claimed"),
-        ]:
-            col = f"{prefix}_{cat}"
-            if col in weekly_pivoted.columns:
-                rename_map[col] = f"{cat}_{suffix}"
-
-    weekly_pivoted = weekly_pivoted.rename(rename_map)
-
-    # Fill missing categories with 0
-    for cat in ["prioritized", "open_capacity", "backfill"]:
-        for suffix in ["pct", "intervals", "avg_total", "avg_claimed"]:
-            col = f"{cat}_{suffix}"
-            if col not in weekly_pivoted.columns:
-                weekly_pivoted = weekly_pivoted.with_columns(pl.lit(0.0).alias(col))
-
-    weekly_pivoted = weekly_pivoted.sort("week_start")
-
-    return weekly_pivoted
-
-
-def create_plot(weekly_df: pl.DataFrame, output_path: str = None, show_plot: bool = True):
-    """Create the weekly allocation percentage plot."""
-    if not MATPLOTLIB_AVAILABLE:
-        print("Error: matplotlib is required for plotting. Install with: pip install matplotlib")
-        return
-
-    if len(weekly_df) == 0:
-        print("No data available for plotting")
-        return
-
-    fig, ax = plt.subplots(1, 1, figsize=(12, 6))
-
-    # Convert to Python datetimes for matplotlib
-    dates = weekly_df["week_start"].to_list()
-
-    ax.plot(
-        dates,
-        weekly_df["prioritized_pct"].to_list(),
-        color="#2E86AB",
-        linewidth=2,
-        marker="o",
-        markersize=3,
-        label="Prioritized",
-    )
-    ax.plot(
-        dates,
-        weekly_df["open_capacity_pct"].to_list(),
-        color="#F18F01",
-        linewidth=2,
-        marker="s",
-        markersize=3,
-        label="Open Capacity",
-    )
-    ax.plot(
-        dates,
-        weekly_df["backfill_pct"].to_list(),
-        color="#A23B72",
-        linewidth=2,
-        marker="^",
-        markersize=3,
-        label="Backfill",
-    )
-
-    ax.set_title("Weekly GPU Allocation Percentage by Category")
-    ax.set_xlabel("Week Starting")
-    ax.set_ylabel("Allocation %")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
-    ax.xaxis.set_major_locator(mdates.WeekdayLocator(interval=2))
-    plt.setp(ax.xaxis.get_majorticklabels(), rotation=45)
+    ax.legend(loc="lower right", frameon=False, fontsize=9.5, labelcolor=TEXT_SECONDARY)
 
     plt.tight_layout()
+    plt.savefig(output_path, dpi=200, bbox_inches="tight", facecolor=SURFACE)
+    print(f"Plot saved to: {output_path}")
 
-    if output_path:
-        plt.savefig(output_path, dpi=300, bbox_inches="tight")
-        print(f"Plot saved to: {output_path}")
 
-    if show_plot:
+def print_summary(weekly: pl.DataFrame):
+    print(f"\nWeeks: {weekly['week_start'].n_unique()}  ({weekly['week_start'].min()} to {weekly['week_start'].max()})")
+    for name, _ in CATEGORIES:
+        cat = weekly.filter(pl.col("category") == name)
+        print(f"{name}: avg {cat['pct'].mean():.1f}%  min {cat['pct'].min():.1f}%  max {cat['pct'].max():.1f}%")
+
+
+def _parse_date(value: str) -> datetime.datetime:
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
         try:
-            plt.show()
-        except Exception:
-            print("Display not available - plot saved to file only")
-
-
-def print_summary(weekly_df: pl.DataFrame):
-    """Print summary statistics."""
-    if len(weekly_df) == 0:
-        print("No data to summarize")
-        return
-
-    print("\n" + "=" * 70)
-    print("WEEKLY ALLOCATION PERCENTAGE SUMMARY")
-    print("=" * 70)
-
-    week_starts = weekly_df["week_start"]
-    print(f"Date Range: {week_starts.min()} to {week_starts.max()}")
-    print(f"Total Weeks: {len(weekly_df)}")
-    print()
-
-    for category in ["prioritized", "open_capacity", "backfill"]:
-        col = f"{category}_pct"
-        print(f"{category.replace('_', ' ').title()}:")
-        print(f"  Average: {weekly_df[col].mean():.1f}%")
-        print(f"  Min:     {weekly_df[col].min():.1f}%")
-        print(f"  Max:     {weekly_df[col].max():.1f}%")
-        print()
-
-    # Print weekly breakdown
-    print("WEEKLY BREAKDOWN (allocation % and avg claimed/total GPUs per interval):")
-    print("-" * 100)
-    print(f"{'Week Starting':<14} {'Prioritized':>12} {'Open Capacity':>14} {'Backfill':>10}   {'Backfill Pool':>14}")
-    print("-" * 100)
-    for row in weekly_df.iter_rows(named=True):
-        week_str = str(row["week_start"])[:10]
-        print(
-            f"{week_str:<14} "
-            f"{row['prioritized_pct']:>11.1f}% "
-            f"{row['open_capacity_pct']:>13.1f}% "
-            f"{row['backfill_pct']:>9.1f}%"
-            f"   {row['backfill_avg_claimed']:>5.0f}/{row['backfill_avg_total']:>5.0f} GPUs"
-        )
+            return datetime.datetime.strptime(value, fmt)
+        except ValueError:
+            continue
+    raise argparse.ArgumentTypeError(f"invalid date {value!r}, expected YYYY-MM-DD or YYYY-MM-DD HH:MM:SS")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Plot weekly GPU allocation percentages by category")
-    parser.add_argument(
-        "--databases",
-        "-d",
-        nargs="+",
-        default=[
-            "gpu_state_2025-10.db",
-            "gpu_state_2025-11.db",
-            "gpu_state_2025-12.db",
-            "gpu_state_2026-01.db",
-        ],
-        help="Database files to analyze",
-    )
-    parser.add_argument(
-        "--output",
-        "-o",
-        default="weekly_allocation.png",
-        help="Output plot file path (default: weekly_allocation.png)",
-    )
-    parser.add_argument(
-        "--no-plot",
-        action="store_true",
-        help="Skip generating the plot, only print summary",
-    )
-    parser.add_argument(
-        "--csv",
-        help="Output CSV file path for weekly data",
-    )
-
+    parser.add_argument("--data-dir", default=".", help="Directory containing gpu_state_*.parquet files")
+    parser.add_argument("--start", type=_parse_date, default=None, help="Window start, default: one year before end")
+    parser.add_argument("--end", type=_parse_date, default=None, help="Window end, default: latest data")
+    parser.add_argument("--exclude-hosts-yaml", default="masked_hosts.yaml", help="Host exclusions YAML")
+    parser.add_argument("--output", "-o", default="weekly_allocation.png", help="Output plot file path")
+    parser.add_argument("--csv", help="Optional CSV output path for the weekly data")
+    parser.add_argument("--no-plot", action="store_true", help="Skip the plot, only print the summary")
     args = parser.parse_args()
 
-    print("Weekly Allocation Percentage Analysis")
-    print("=" * 50)
-    print(f"Analyzing databases: {', '.join(args.databases)}")
-    print()
+    end = args.end or get_latest_timestamp(args.data_dir)
+    if end is None:
+        print(f"Error: no gpu_state Parquet files found in {args.data_dir}")
+        sys.exit(1)
+    start = args.start or end - datetime.timedelta(days=365)
+    if start >= end:
+        print(f"Error: start {start} is not before end {end}")
+        sys.exit(1)
+    gpu_utils.HOST_EXCLUSIONS = load_host_exclusions(None, args.exclude_hosts_yaml)
 
-    # Calculate weekly stats (processes one DB at a time to limit memory)
-    print("Calculating weekly allocation percentages...")
-    weekly_df = calculate_weekly_allocation_incremental(args.databases)
-
-    if len(weekly_df) == 0:
-        print("Error: Could not calculate weekly statistics")
+    print(f"Preparing window {start} – {end} from {args.data_dir}...")
+    hours_back = (end - start).total_seconds() / 3600
+    frames = prepare_frames(scan_time_filtered(args.data_dir, hours_back, end))
+    if frames.original_count == 0:
+        print("Error: no data found in the specified time range")
         sys.exit(1)
 
-    print(f"Complete weeks found: {len(weekly_df)}")
+    weekly = weekly_allocation(frames)
+    print_summary(weekly)
 
-    # Print summary
-    print_summary(weekly_df)
-
-    # Save to CSV if requested
     if args.csv:
-        weekly_df.write_csv(args.csv)
-        print(f"\nCSV saved to: {args.csv}")
+        weekly.write_csv(args.csv)
+        print(f"CSV saved to: {args.csv}")
 
-    # Create plot
     if not args.no_plot:
-        create_plot(weekly_df, args.output)
+        period = f"{frames.start_time:%b %Y} – {frames.end_time:%b %Y}"
+        create_plot(weekly, args.output, period)
 
 
 if __name__ == "__main__":
