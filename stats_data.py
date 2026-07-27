@@ -29,6 +29,7 @@ GPU_STATE_SCHEMA = {
     "Machine": pl.Utf8,
     "RemoteOwner": pl.Utf8,
     "GlobalJobId": pl.Utf8,
+    "PreventJobsReason": pl.Utf8,
     "timestamp": pl.Datetime("us"),
 }
 
@@ -62,7 +63,7 @@ def get_latest_timestamp(data_dir: str) -> datetime.datetime | None:
     if not files:
         return None
     try:
-        row = pl.scan_parquet(files).select(pl.col("timestamp").max()).collect().item()
+        row = pl.scan_parquet(files, missing_columns="insert").select(pl.col("timestamp").max()).collect().item()
         if row is not None:
             return pd.to_datetime(row).to_pydatetime().replace(tzinfo=None)
     except Exception as e:
@@ -99,7 +100,7 @@ def scan_time_filtered(
     if not files:
         return pl.DataFrame(schema=GPU_STATE_SCHEMA).lazy()
 
-    return pl.scan_parquet(files).filter(pl.col("timestamp").is_between(start_time, end_time))
+    return pl.scan_parquet(files, missing_columns="insert").filter(pl.col("timestamp").is_between(start_time, end_time))
 
 
 def get_time_filtered_data(
