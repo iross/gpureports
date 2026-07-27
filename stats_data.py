@@ -15,8 +15,11 @@ import duckdb
 import pandas as pd
 import polars as pl
 
-# Schema of gpu_state Parquet files, used to construct an empty frame when a
-# directory contains no data files.
+# Schema of gpu_state Parquet files. Passed explicitly to scan_parquet() so that
+# files from different collector generations - which can have columns in different
+# orders, or predate later-added columns like PreventJobsReason - resolve by name
+# instead of erroring on order/column-set mismatches. Also used to construct an
+# empty frame when a directory contains no data files.
 GPU_STATE_SCHEMA = {
     "Name": pl.Utf8,
     "AssignedGPUs": pl.Utf8,
@@ -32,6 +35,11 @@ GPU_STATE_SCHEMA = {
     "PreventJobsReason": pl.Utf8,
     "timestamp": pl.Datetime("us"),
 }
+
+# Some Parquet writers (e.g. pandas' default) emit nanosecond-precision timestamps
+# instead of the microsecond precision in GPU_STATE_SCHEMA; allow that downcast
+# rather than erroring when scanning files from mixed sources.
+_SCAN_CAST_OPTIONS = pl.ScanCastOptions(datetime_cast="nanosecond-downcast")
 
 
 def get_preprocessed_dataframe(df: pd.DataFrame, cache_key: str = None) -> pd.DataFrame:
@@ -63,7 +71,12 @@ def get_latest_timestamp(data_dir: str) -> datetime.datetime | None:
     if not files:
         return None
     try:
-        row = pl.scan_parquet(files, missing_columns="insert").select(pl.col("timestamp").max()).collect().item()
+        row = (
+            pl.scan_parquet(files, schema=GPU_STATE_SCHEMA, missing_columns="insert", cast_options=_SCAN_CAST_OPTIONS)
+            .select(pl.col("timestamp").max())
+            .collect()
+            .item()
+        )
         if row is not None:
             return pd.to_datetime(row).to_pydatetime().replace(tzinfo=None)
     except Exception as e:
@@ -100,7 +113,9 @@ def scan_time_filtered(
     if not files:
         return pl.DataFrame(schema=GPU_STATE_SCHEMA).lazy()
 
-    return pl.scan_parquet(files, missing_columns="insert").filter(pl.col("timestamp").is_between(start_time, end_time))
+    return pl.scan_parquet(
+        files, schema=GPU_STATE_SCHEMA, missing_columns="insert", cast_options=_SCAN_CAST_OPTIONS
+    ).filter(pl.col("timestamp").is_between(start_time, end_time))
 
 
 def get_time_filtered_data(
