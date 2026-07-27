@@ -247,6 +247,23 @@ class TestCollectorParquetWrite:
         ):
             collector.main(str(tmp_path))
 
+        assert list(tmp_path.glob("*.tmp")) == []
+        assert list(tmp_path.glob(".*")) == []
+
+    def test_temp_file_name_never_matches_reader_glob(self, tmp_path):
+        """The temp file must never match gpu_state_*.parquet, even mid-write,
+        or a concurrent reader could scan a partially written file."""
+        import fnmatch
+
+        import collector
+
+        parquet_path = tmp_path / "gpu_state_2026-05.parquet"
+        rows = _make_rows(datetime.datetime(2026, 5, 1, 10, 0, 0))
+        collector._write_parquet_atomic(rows, parquet_path)
+
+        tmp = parquet_path.with_name(f".{parquet_path.name}.tmp")
+        assert not fnmatch.fnmatch(tmp.name, "gpu_state_*.parquet")
+
         assert list(tmp_path.glob("*.tmp.parquet")) == []
 
     def test_column_schema_preserved(self, tmp_path):

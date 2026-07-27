@@ -2,8 +2,9 @@
 """GPU State Collection Script — writes directly to monthly Parquet files.
 
 Each run appends new rows to gpu_state_YYYY-MM.parquet via a read-concat-atomic-rename
-cycle. Crash safety: writes to a .tmp file then os.replace() so the live Parquet is
-never partially written.
+cycle. Crash safety: writes to a dot-prefixed .tmp file (named so it can't match the
+gpu_state_*.parquet glob readers use) then os.replace() so the live Parquet is never
+partially written and concurrent readers never see the temp file.
 """
 
 import datetime
@@ -67,11 +68,18 @@ def get_gpus() -> pl.DataFrame:
 
 
 def _write_parquet_atomic(df: pl.DataFrame, parquet_path: Path) -> None:
-    """Append df to parquet_path, replacing it atomically via a temp file."""
+    """Append df to parquet_path, replacing it atomically via a temp file.
+
+    The temp file is named so it can never match the `gpu_state_*.parquet` glob
+    that readers use, even mid-write: it's dot-prefixed (fails the "gpu_state_"
+    prefix check) and suffixed `.tmp` rather than `.parquet` (fails the suffix
+    check). A name like `gpu_state_2026-07.tmp.parquet` would still match that
+    glob and let a concurrent reader pick up a partially written file.
+    """
     if parquet_path.exists():
         existing = pl.read_parquet(str(parquet_path))
         df = pl.concat([existing, df], how="diagonal_relaxed")
-    tmp = parquet_path.with_suffix(".tmp.parquet")
+    tmp = parquet_path.with_name(f".{parquet_path.name}.tmp")
     df.write_parquet(str(tmp), compression="zstd")
     os.replace(tmp, parquet_path)
 
