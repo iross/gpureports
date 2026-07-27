@@ -9,7 +9,6 @@ and stats_reporting for the implementation details.
 
 import datetime
 
-import pandas as pd
 import typer
 
 import gpu_utils
@@ -27,8 +26,9 @@ from stats_calculations import (
     calculate_prevent_jobs_stats,
     calculate_time_series_usage,
     get_gpu_models_at_time,
+    prepare_frames,
 )
-from stats_data import get_draining_data, get_time_filtered_data
+from stats_data import get_draining_data, get_time_filtered_data, scan_time_filtered
 from stats_reporting import (
     generate_html_report,
     print_analysis_results,
@@ -70,44 +70,53 @@ def run_analysis(
     gpu_utils.HOST_EXCLUSIONS = load_host_exclusions(exclude_hosts, exclude_hosts_yaml)
     gpu_utils.FILTERED_HOSTS_INFO = []  # Reset tracking
 
-    # Get filtered data
-    df = get_time_filtered_data(data_dir, hours_back, end_time)
+    # Prepare lazy frames over the Parquet window; the full window is never
+    # materialized as a pandas DataFrame
+    frames = prepare_frames(scan_time_filtered(data_dir, hours_back, end_time))
 
-    if len(df) == 0:
+    if frames.original_count == 0:
         return {"error": "No data found in the specified time range."}
 
-    # Calculate time buckets for interval counting
-    df_temp = df.copy()
-    df_temp["timestamp"] = pd.to_datetime(df_temp["timestamp"])
-    df_temp["15min_bucket"] = df_temp["timestamp"].dt.floor("15min")
-    num_intervals = df_temp["15min_bucket"].nunique()
+    filtered_hosts_info = []
+    if frames.excluded_count > 0:
+        filtered_hosts_info.append(
+            {
+                "original_count": frames.original_count,
+                "filtered_count": frames.original_count - frames.excluded_count,
+                "excluded_hosts": gpu_utils.HOST_EXCLUSIONS,
+            }
+        )
 
     result = {
         "metadata": {
-            "start_time": df["timestamp"].min(),
-            "end_time": df["timestamp"].max(),
-            "num_intervals": num_intervals,
-            "total_records": len(df),
+            "start_time": frames.start_time,
+            "end_time": frames.end_time,
+            "num_intervals": frames.total_buckets,
+            "total_records": frames.original_count,
             "hours_back": hours_back,
             "excluded_hosts": gpu_utils.HOST_EXCLUSIONS,
-            "filtered_hosts_info": gpu_utils.FILTERED_HOSTS_INFO,
+            "filtered_hosts_info": filtered_hosts_info,
         }
     }
 
     if analysis_type == "allocation":
         if group_by_device:
-            result["device_stats"] = calculate_allocation_usage_by_device_enhanced(df, host, all_devices)
-            result["memory_stats"] = calculate_allocation_usage_by_memory(df, host, all_devices)
-            result["h200_user_stats"] = calculate_h200_user_breakdown(df, host, hours_back)
-            result["backfill_user_stats"] = calculate_backfill_usage_by_user(df, host, hours_back, all_devices)
-            result["zero_active_machines"] = calculate_machines_with_zero_active_gpus(df, host, all_devices)
-            result["raw_data"] = df  # Pass raw data for unique cluster totals calculation
+            result["device_stats"] = calculate_allocation_usage_by_device_enhanced(frames, host, all_devices)
+            result["memory_stats"] = calculate_allocation_usage_by_memory(frames, host, all_devices)
+            result["h200_user_stats"] = calculate_h200_user_breakdown(frames, host, hours_back)
+            result["backfill_user_stats"] = calculate_backfill_usage_by_user(frames, host, hours_back, all_devices)
+            result["zero_active_machines"] = calculate_machines_with_zero_active_gpus(frames, host, all_devices)
             result["host_filter"] = host  # Pass host filter for consistency
         else:
+            df = get_time_filtered_data(data_dir, hours_back, end_time)
             result["allocation_stats"] = calculate_allocation_usage_enhanced(df, host)
+            # The pandas filters append per-call filtering counts to this list
+            result["metadata"]["filtered_hosts_info"] = gpu_utils.FILTERED_HOSTS_INFO
 
     elif analysis_type == "timeseries":
+        df = get_time_filtered_data(data_dir, hours_back, end_time)
         result["timeseries_data"] = calculate_time_series_usage(df, bucket_minutes, host)
+        result["metadata"]["filtered_hosts_info"] = gpu_utils.FILTERED_HOSTS_INFO
 
     elif analysis_type == "monthly":
         result["monthly_stats"] = calculate_monthly_summary(data_dir, end_time)
@@ -129,7 +138,7 @@ def run_analysis(
 
     # Add PreventJobsReason stats
     try:
-        prevent_jobs_stats = calculate_prevent_jobs_stats(df)
+        prevent_jobs_stats = calculate_prevent_jobs_stats(frames)
         if analysis_type == "monthly" and "monthly_stats" in result and "error" not in result["monthly_stats"]:
             result["monthly_stats"]["prevent_jobs_stats"] = prevent_jobs_stats
         else:

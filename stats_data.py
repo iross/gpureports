@@ -1,88 +1,55 @@
 #!/usr/bin/env python3
 """
-GPU Usage Statistics - Data Loading and Caching
+GPU Usage Statistics - Data Loading
 
-Functions for loading GPU state data from Parquet files via DuckDB,
-filtering by time range, and caching preprocessed DataFrames.
+Polars lazy scans over gpu_state Parquet files for the aggregation pipeline,
+plus a pandas loader retained for legacy consumers (timeseries/snapshot paths
+and standalone scripts).
 """
 
 import datetime
+import glob as globlib
 import os
 
 import duckdb
 import pandas as pd
+import polars as pl
 
-# Global cache for preprocessed DataFrames and filtered datasets to avoid repeated work
-_dataframe_cache = {}
-_filtered_cache = {}
+# Schema of gpu_state Parquet files, used to construct an empty frame when a
+# directory contains no data files.
+GPU_STATE_SCHEMA = {
+    "Name": pl.Utf8,
+    "AssignedGPUs": pl.Utf8,
+    "AvailableGPUs": pl.Utf8,
+    "State": pl.Utf8,
+    "GPUs_DeviceName": pl.Utf8,
+    "GPUs_GlobalMemoryMb": pl.Int64,
+    "PrioritizedProjects": pl.Utf8,
+    "GPUsAverageUsage": pl.Float64,
+    "Machine": pl.Utf8,
+    "RemoteOwner": pl.Utf8,
+    "GlobalJobId": pl.Utf8,
+    "timestamp": pl.Datetime("us"),
+}
 
 
 def get_preprocessed_dataframe(df: pd.DataFrame, cache_key: str = None) -> pd.DataFrame:
     """
-    Get a preprocessed DataFrame with common operations applied, using caching to avoid repeated work.
-    Optimized to avoid multiple copies and improve cache effectiveness.
+    Get a pandas DataFrame with timestamp conversion and 15-minute buckets added.
 
     Args:
         df: Input DataFrame
-        cache_key: Optional cache key to avoid reprocessing the same data
+        cache_key: Ignored, retained for call-site compatibility
 
     Returns:
         DataFrame with timestamp conversion and 15-minute buckets added
     """
-    if not cache_key:
-        processed_df = df.copy()
-        if "timestamp" not in processed_df.columns or not pd.api.types.is_datetime64_any_dtype(
-            processed_df["timestamp"]
-        ):
-            processed_df["timestamp"] = pd.to_datetime(processed_df["timestamp"])
-        if "15min_bucket" not in processed_df.columns:
-            processed_df["15min_bucket"] = processed_df["timestamp"].dt.floor("15min")
-        return processed_df
-
-    if cache_key in _dataframe_cache:
-        return _dataframe_cache[cache_key]
-
     processed_df = df.copy()
-
     if "timestamp" not in processed_df.columns or not pd.api.types.is_datetime64_any_dtype(processed_df["timestamp"]):
         processed_df["timestamp"] = pd.to_datetime(processed_df["timestamp"])
-
     if "15min_bucket" not in processed_df.columns:
         processed_df["15min_bucket"] = processed_df["timestamp"].dt.floor("15min")
-
-    _dataframe_cache[cache_key] = processed_df
     return processed_df
-
-
-def get_cached_filtered_dataframe(df: pd.DataFrame, filter_func, filter_args, cache_key: str = None) -> pd.DataFrame:
-    """
-    Get a filtered DataFrame with caching to avoid repeated filtering operations.
-
-    Args:
-        df: Input DataFrame
-        filter_func: Filtering function to apply
-        filter_args: Arguments for the filtering function
-        cache_key: Optional cache key to avoid reprocessing the same filter
-
-    Returns:
-        Filtered DataFrame
-    """
-    if cache_key and cache_key in _filtered_cache:
-        return _filtered_cache[cache_key]
-
-    filtered_df = filter_func(df, *filter_args)
-
-    if cache_key:
-        _filtered_cache[cache_key] = filtered_df
-
-    return filtered_df
-
-
-def clear_dataframe_cache():
-    """Clear all DataFrame caches to free memory."""
-    global _dataframe_cache, _filtered_cache
-    _dataframe_cache.clear()
-    _filtered_cache.clear()
 
 
 def parquet_glob(base_dir: str) -> str:
@@ -91,28 +58,59 @@ def parquet_glob(base_dir: str) -> str:
 
 def get_latest_timestamp(data_dir: str) -> datetime.datetime | None:
     """Return the latest timestamp across all gpu_state Parquet files in data_dir."""
-    glob = parquet_glob(data_dir)
+    files = globlib.glob(parquet_glob(data_dir))
+    if not files:
+        return None
     try:
-        con = duckdb.connect()
-        row = con.execute(
-            f"SELECT MAX(timestamp) FROM parquet_scan('{glob}', hive_partitioning=false, union_by_name=true)"
-        ).fetchone()
-        con.close()
-        if row and row[0] is not None:
-            ts = pd.to_datetime(row[0])
-            return ts.to_pydatetime().replace(tzinfo=None)
-    except Exception:
-        pass
+        row = pl.scan_parquet(files).select(pl.col("timestamp").max()).collect().item()
+        if row is not None:
+            return pd.to_datetime(row).to_pydatetime().replace(tzinfo=None)
+    except Exception as e:
+        print(f"Error: could not read latest timestamp from {parquet_glob(data_dir)}: {e}")
     return None
+
+
+def scan_time_filtered(
+    data_dir: str, hours_back: float = 24, end_time: datetime.datetime | None = None
+) -> pl.LazyFrame:
+    """
+    Lazily scan gpu_state Parquet files filtered to a time range.
+
+    Nothing is read until the returned LazyFrame is collected, so downstream
+    aggregations benefit from projection and predicate pushdown instead of
+    materializing the full window.
+
+    Args:
+        data_dir: Directory containing gpu_state_*.parquet files
+        hours_back: Number of hours to look back from end_time
+        end_time: End time for the range (defaults to latest timestamp across all Parquet files)
+
+    Returns:
+        LazyFrame filtered to the specified time range (inclusive on both ends)
+    """
+    if end_time is None:
+        end_time = get_latest_timestamp(data_dir)
+        if end_time is None:
+            end_time = datetime.datetime.now()
+
+    start_time = end_time - datetime.timedelta(hours=hours_back)
+
+    files = globlib.glob(parquet_glob(data_dir))
+    if not files:
+        return pl.DataFrame(schema=GPU_STATE_SCHEMA).lazy()
+
+    return pl.scan_parquet(files).filter(pl.col("timestamp").is_between(start_time, end_time))
 
 
 def get_time_filtered_data(
     data_dir: str, hours_back: int = 24, end_time: datetime.datetime | None = None
 ) -> pd.DataFrame:
     """
-    Get GPU state data filtered by time range from Parquet files via DuckDB.
-    Automatically covers month boundaries by globbing all gpu_state_*.parquet files
-    in data_dir.
+    Get GPU state data for a time range as a pandas DataFrame.
+
+    Retained for consumers of the pandas calculation paths (timeseries,
+    non-device allocation, GPU model snapshots, and standalone scripts).
+    Materializes the full window — use scan_time_filtered for large ranges.
 
     Args:
         data_dir: Directory containing gpu_state_*.parquet files
@@ -133,10 +131,11 @@ def get_time_filtered_data(
     start_str = start_time.strftime("%Y-%m-%d %H:%M:%S")
     end_str = end_time.strftime("%Y-%m-%d %H:%M:%S")
     # Note: datetime strings are derived from internal datetime objects, not user input.
+    # No ORDER BY: sorting 50M+ rows forces an external sort that can spill to disk,
+    # and all downstream calculations group by time bucket rather than relying on row order.
     query = (
         f"SELECT * FROM parquet_scan('{glob}', hive_partitioning=false, union_by_name=true) "
-        f"WHERE timestamp >= '{start_str}' AND timestamp <= '{end_str}' "
-        f"ORDER BY timestamp"
+        f"WHERE timestamp >= '{start_str}' AND timestamp <= '{end_str}'"
     )
     try:
         con = duckdb.connect()
@@ -150,9 +149,9 @@ def get_time_filtered_data(
         return pd.DataFrame()
 
 
-def get_draining_data(data_dir: str, hours_back: int = 24, end_time: datetime.datetime | None = None) -> pd.DataFrame:
+def get_draining_data(data_dir: str, hours_back: int = 24, end_time: datetime.datetime | None = None) -> pl.DataFrame:
     """
-    Get GPU draining data (State='Drained') for the specified time range from Parquet files.
+    Get GPU draining data (State='Drained') for the specified time range.
     Only includes GPUs that are drained and NOT claimed by any slot at that timestamp.
 
     Args:
@@ -163,46 +162,12 @@ def get_draining_data(data_dir: str, hours_back: int = 24, end_time: datetime.da
     Returns:
         DataFrame with draining data (Machine, AssignedGPUs, timestamp)
     """
-    if end_time is None:
-        end_time = get_latest_timestamp(data_dir)
-        if end_time is None:
-            end_time = datetime.datetime.now()
-
-    start_time = end_time - datetime.timedelta(hours=hours_back)
-
-    glob = parquet_glob(data_dir)
-    start_str = start_time.strftime("%Y-%m-%d %H:%M:%S")
-    end_str = end_time.strftime("%Y-%m-%d %H:%M:%S")
-    # Note: datetime strings are derived from internal datetime objects, not user input.
-    query = f"""
-    WITH DrainedGPUs AS (
-        SELECT DISTINCT Machine, AssignedGPUs, timestamp
-        FROM parquet_scan('{glob}', hive_partitioning=false, union_by_name=true)
-        WHERE timestamp >= '{start_str}' AND timestamp <= '{end_str}'
-            AND State = 'Drained' AND AssignedGPUs IS NOT NULL
-    ),
-    ClaimedGPUs AS (
-        SELECT DISTINCT Machine, AssignedGPUs, timestamp
-        FROM parquet_scan('{glob}', hive_partitioning=false, union_by_name=true)
-        WHERE timestamp >= '{start_str}' AND timestamp <= '{end_str}'
-            AND State = 'Claimed' AND AssignedGPUs IS NOT NULL
+    lf = scan_time_filtered(data_dir, hours_back, end_time)
+    base = lf.filter(pl.col("AssignedGPUs").is_not_null()).select("Machine", "AssignedGPUs", "State", "timestamp")
+    drained = base.filter(pl.col("State") == "Drained").select("Machine", "AssignedGPUs", "timestamp").unique()
+    claimed = base.filter(pl.col("State") == "Claimed").select("Machine", "AssignedGPUs", "timestamp").unique()
+    return (
+        drained.join(claimed, on=["Machine", "AssignedGPUs", "timestamp"], how="anti")
+        .sort(["Machine", "timestamp"])
+        .collect(engine="streaming")
     )
-    SELECT d.Machine, d.AssignedGPUs, d.timestamp
-    FROM DrainedGPUs d
-    LEFT JOIN ClaimedGPUs c
-        ON d.Machine = c.Machine
-        AND d.AssignedGPUs = c.AssignedGPUs
-        AND d.timestamp = c.timestamp
-    WHERE c.AssignedGPUs IS NULL
-    ORDER BY d.Machine, d.timestamp
-    """
-    try:
-        con = duckdb.connect()
-        df = con.execute(query).df()
-        con.close()
-        if len(df) > 0:
-            df["timestamp"] = pd.to_datetime(df["timestamp"])
-        return df
-    except Exception as e:
-        print(f"Error: DuckDB draining query failed: {e}")
-        return pd.DataFrame()

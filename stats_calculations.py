@@ -2,14 +2,20 @@
 """
 GPU Usage Statistics - Calculation Functions
 
-All calculate_* functions and GPU model analysis functions for computing
-allocation usage, performance metrics, time series data, and device breakdowns.
+The report-scale aggregations (device/memory/user breakdowns, draining,
+prevent-jobs) run on polars LazyFrames prepared by prepare_frames(), so a
+year-scale window is never materialized as a pandas DataFrame. A handful of
+small-window helpers (timeseries, non-device allocation, GPU model snapshots)
+remain pandas-based and are consumed by standalone scripts.
 """
 
 import datetime
+import re
+from dataclasses import dataclass, field
 
 import duckdb
 import pandas as pd
+import polars as pl
 
 import gpu_utils
 from device_name_mappings import get_memory_category_from_mb
@@ -19,14 +25,814 @@ from gpu_utils import (
     UTILIZATION_TYPES,
     filter_df,
     filter_df_enhanced,
+    load_chtc_owned_hosts,
 )
 from stats_data import (
-    get_cached_filtered_dataframe,
     get_latest_timestamp,
-    get_preprocessed_dataframe,
-    get_time_filtered_data,
     parquet_glob,
+    scan_time_filtered,
 )
+
+# GPU families hidden from reports unless --all-devices is passed
+OLD_GPU_TYPES = ["GTX 1080", "P100", "Quadro", "A30", "A40"]
+
+_PJ_COLUMN = "PreventJobsReason"
+
+
+# ---------------------------------------------------------------------------
+# Prepared lazy frames shared by the polars calculations
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PreparedFrames:
+    """Window data prepared for the polars aggregations.
+
+    raw is a LazyFrame over the Parquet files with derived boolean columns and
+    NO host exclusions applied (denominators like bucket counts match the
+    pre-exclusion window). dedup and raw_bf are collected once and wrapped
+    back in LazyFrames: dedup holds one representative row per
+    (timestamp, GPU) after host exclusion and duplicate-slot ranking; raw_bf
+    holds all backfill-slot rows after host exclusion.
+    """
+
+    raw: pl.LazyFrame
+    dedup: pl.LazyFrame
+    raw_bf: pl.LazyFrame
+    total_buckets: int
+    start_time: datetime.datetime | None
+    end_time: datetime.datetime | None
+    original_count: int
+    excluded_count: int
+    has_prevent_jobs: bool
+    excluded_hosts: dict = field(default_factory=dict)
+
+
+def _host_exclusion_expr(exclusions: dict) -> pl.Expr:
+    if not exclusions:
+        return pl.lit(False)
+    pattern = "|".join(re.escape(host) for host in exclusions)
+    return pl.col("Machine").str.contains(f"(?i)({pattern})").fill_null(False)
+
+
+def prepare_frames(lf: pl.LazyFrame) -> PreparedFrames:
+    """Derive classification columns and collect the shared dedup/backfill frames.
+
+    The duplicate-slot ranking (see gpu_utils._apply_duplicate_cleanup) is
+    computed once for the whole window instead of once per class/device
+    filter: each GPU maps to a single machine and device, so a global dedup
+    is equivalent to the per-subset dedup the pandas filters performed.
+    """
+    exclusions = gpu_utils.HOST_EXCLUSIONS
+    chtc_hosts = load_chtc_owned_hosts()
+    has_pj = _PJ_COLUMN in lf.collect_schema().names()
+
+    state = pl.col("State")
+    if has_pj:
+        pj_set = pl.col(_PJ_COLUMN).is_not_null() & (pl.col(_PJ_COLUMN).str.strip_chars() != "")
+        prev_idle = pj_set & (state != "Claimed")
+    else:
+        pj_set = pl.lit(False)
+        prev_idle = pl.lit(False)
+
+    raw = lf.with_columns(
+        pl.col("timestamp").dt.truncate("15m").alias("bucket"),
+        pl.col("Name").str.contains("backfill").fill_null(False).alias("_is_bf"),
+        pl.col("Name").str.contains("interactive").fill_null(False).alias("_is_inter"),
+        # pandas object-dtype `!= ""` treats null as True and `== ""` as False;
+        # the fill_null values preserve that classification for null projects
+        (pl.col("PrioritizedProjects") != "").fill_null(True).alias("_pp_prio"),
+        (pl.col("PrioritizedProjects") == "").fill_null(False).alias("_pp_shared"),
+        pl.col("Machine").is_in(sorted(chtc_hosts)).fill_null(False).alias("_is_chtc"),
+        _host_exclusion_expr(exclusions).alias("_excluded"),
+        pj_set.alias("_pj_set"),
+        prev_idle.alias("_prev_idle"),
+    )
+
+    meta_q = raw.select(
+        pl.len().alias("total"),
+        pl.col("timestamp").min().alias("start"),
+        pl.col("timestamp").max().alias("end"),
+        pl.col("bucket").n_unique().alias("buckets"),
+        pl.col("_excluded").sum().alias("excluded"),
+    )
+
+    is_bf = pl.col("_is_bf")
+    claimed = state == "Claimed"
+    unclaimed = state == "Unclaimed"
+    rank = (
+        pl.when(~is_bf & claimed)
+        .then(6)
+        .when(~is_bf & pl.col("_prev_idle"))
+        .then(2)
+        .when(~is_bf & unclaimed)
+        .then(5)
+        .when(~is_bf)
+        .then(4)
+        .when(is_bf & claimed)
+        .then(3)
+        .when(is_bf & unclaimed)
+        .then(1)
+        .otherwise(0)
+        .alias("_rank")
+    )
+
+    dedup_cols = [
+        "State",
+        "Name",
+        "Machine",
+        "GPUs_DeviceName",
+        "GPUs_GlobalMemoryMb",
+        "RemoteOwner",
+        "_is_bf",
+        "_is_inter",
+        "_pp_prio",
+        "_pp_shared",
+        "_is_chtc",
+        "_pj_set",
+    ]
+    dedup_q = (
+        raw.filter(~pl.col("_excluded") & pl.col("AssignedGPUs").is_not_null())
+        .with_columns(rank)
+        .group_by("timestamp", "AssignedGPUs")
+        .agg(pl.struct(dedup_cols).sort_by("_rank").last().alias("_top"))
+        .unnest("_top")
+        .with_columns(pl.col("timestamp").dt.truncate("15m").alias("bucket"))
+        .drop("timestamp")
+    )
+
+    raw_bf_q = raw.filter(~pl.col("_excluded") & is_bf).select(
+        "bucket",
+        "AssignedGPUs",
+        "State",
+        "Name",
+        "Machine",
+        "GPUs_DeviceName",
+        "RemoteOwner",
+        "_is_chtc",
+        "_pj_set",
+    )
+
+    meta, dedup, raw_bf = pl.collect_all([meta_q, dedup_q, raw_bf_q], engine="streaming")
+    row = meta.row(0, named=True)
+
+    return PreparedFrames(
+        raw=raw,
+        dedup=dedup.lazy(),
+        raw_bf=raw_bf.lazy(),
+        total_buckets=row["buckets"],
+        start_time=row["start"],
+        end_time=row["end"],
+        original_count=row["total"],
+        excluded_count=row["excluded"] or 0,
+        has_prevent_jobs=has_pj,
+        excluded_hosts=dict(exclusions) if exclusions else {},
+    )
+
+
+# Class-membership expressions evaluated against the dedup frame's
+# representative row per (timestamp, GPU)
+_REAL_CLASS_EXPRS = {
+    "Priority-ResearcherOwned": pl.col("_pp_prio") & ~pl.col("_is_chtc") & ~pl.col("_is_bf"),
+    "Priority-CHTCOwned": pl.col("_pp_prio") & pl.col("_is_chtc") & ~pl.col("_is_bf"),
+    "Shared": pl.col("_pp_shared") & ~pl.col("_is_bf") & ~pl.col("_is_inter"),
+}
+
+
+def _researcher_scope(frames: PreparedFrames, keys: list[str], device: str | None = None) -> pl.LazyFrame:
+    """Machines (or machine/device pairs) whose primary slots carry PrioritizedProjects.
+
+    Mirrors the researcher-machine discovery inside filter_df_enhanced: primary
+    slots with a non-empty, non-null PrioritizedProjects on non-CHTC machines,
+    scoped to the same subset (per device, or globally) the pandas code used.
+    """
+    f = frames.raw.filter(
+        ~pl.col("_excluded")
+        & ~pl.col("_is_bf")
+        & (pl.col("PrioritizedProjects") != "").fill_null(False)
+        & ~pl.col("_is_chtc")
+    )
+    if device is not None:
+        f = f.filter(pl.col("GPUs_DeviceName") == device)
+    return f.select(keys).unique()
+
+
+def _class_frame(
+    frames: PreparedFrames,
+    class_name: str,
+    host: str = "",
+    researcher: pl.LazyFrame | None = None,
+    researcher_keys: list[str] | None = None,
+) -> pl.LazyFrame:
+    """Rows belonging to a slot class: deduped rows for Real-slot classes, raw
+    backfill rows for Backfill classes (matching filter_df_enhanced)."""
+    if class_name in _REAL_CLASS_EXPRS:
+        f = frames.dedup.filter(_REAL_CLASS_EXPRS[class_name])
+        if host:
+            f = f.filter(pl.col("Name").str.contains(host).fill_null(False))
+        return f
+
+    f = frames.raw_bf
+    if host:
+        f = f.filter(pl.col("Name").str.contains(host).fill_null(False))
+    if class_name == "Backfill-CHTCOwned":
+        return f.filter(pl.col("_is_chtc"))
+    if class_name == "Backfill-ResearcherOwned":
+        if researcher is None:
+            raise ValueError("Backfill-ResearcherOwned requires a researcher scope frame")
+        return f.join(researcher, on=researcher_keys or ["Machine"], how="semi")
+    raise ValueError(f"Unknown class name: {class_name}")
+
+
+def _pair_bucket_stats(frame: pl.LazyFrame, group_cols: list[str]) -> pl.DataFrame:
+    """Aggregate unique-GPU claim/drain counts per 15-minute bucket.
+
+    A GPU counts as claimed (or drained) in a bucket if any of its
+    representative rows in that bucket has that state; a GPU claimed in a
+    bucket is not also counted as drained (Claimed wins).
+    """
+    pairs = (
+        frame.filter(pl.col("AssignedGPUs").is_not_null())
+        .group_by([*group_cols, "bucket", "AssignedGPUs"])
+        .agg(
+            (pl.col("State") == "Claimed").any().alias("_claimed"),
+            (pl.col("State") == "Drained").any().alias("_drained"),
+        )
+    )
+    per_bucket = pairs.group_by([*group_cols, "bucket"]).agg(
+        pl.len().alias("total"),
+        pl.col("_claimed").sum().alias("claimed"),
+        (pl.col("_drained") & ~pl.col("_claimed")).sum().alias("drained"),
+    )
+    return (
+        per_bucket.group_by(group_cols)
+        .agg(
+            (pl.col("claimed") / pl.col("total") * 100).mean().alias("pct_claimed"),
+            (pl.col("drained") / pl.col("total") * 100).mean().alias("pct_drained"),
+            pl.col("claimed").sum().alias("claimed_sum"),
+            pl.col("drained").sum().alias("drained_sum"),
+            pl.col("total").sum().alias("total_sum"),
+            pl.len().alias("num_buckets"),
+        )
+        .sort(group_cols)
+        .collect(engine="streaming")
+    )
+
+
+def _is_old_device(device: str) -> bool:
+    return any(old in device for old in OLD_GPU_TYPES)
+
+
+def calculate_allocation_usage_by_device_enhanced(
+    frames: PreparedFrames, host: str = "", include_all_devices: bool = True
+) -> dict:
+    """
+    Calculate allocation-based usage grouped by device type with enhanced backfill categories.
+
+    Args:
+        frames: Prepared window frames from prepare_frames()
+        host: Optional host filter (matched against slot Name)
+        include_all_devices: Whether to include all device types or filter out older ones
+
+    Returns:
+        Dictionary with usage statistics for each enhanced class and device type
+    """
+    utilization_types = [
+        "Priority-ResearcherOwned",
+        "Priority-CHTCOwned",
+        "Shared",
+        "Backfill-CHTCOwned",
+        "Backfill-ResearcherOwned",
+    ]
+    # Backfill ownership is resolved per (machine, device) to match the pandas
+    # path, which discovered researcher machines within each device subset
+    researcher = _researcher_scope(frames, ["Machine", "GPUs_DeviceName"])
+    total_intervals = frames.total_buckets
+
+    stats = {}
+    for utilization_type in utilization_types:
+        frame = _class_frame(
+            frames, utilization_type, host, researcher, researcher_keys=["Machine", "GPUs_DeviceName"]
+        ).filter(pl.col("GPUs_DeviceName").is_not_null())
+        agg = _pair_bucket_stats(frame, ["GPUs_DeviceName"])
+
+        stats[utilization_type] = {}
+        for row in agg.iter_rows(named=True):
+            device_type = row["GPUs_DeviceName"]
+            if not include_all_devices and _is_old_device(device_type):
+                continue
+            stats[utilization_type][device_type] = {
+                "avg_claimed": row["claimed_sum"] / total_intervals if total_intervals > 0 else 0,
+                "avg_drained": row["drained_sum"] / total_intervals if total_intervals > 0 else 0,
+                "avg_total_available": row["total_sum"] / total_intervals if total_intervals > 0 else 0,
+                "allocation_usage_percent": float(row["pct_claimed"]),
+                "drained_percent": float(row["pct_drained"]),
+                "num_intervals": total_intervals,
+            }
+
+    return stats
+
+
+def calculate_allocation_usage_by_memory(
+    frames: PreparedFrames, host: str = "", include_all_devices: bool = True
+) -> dict:
+    """
+    Calculate allocation-based usage grouped by memory category for Real slots only.
+    Uses GPUs_GlobalMemoryMb field for dynamic memory categorization.
+
+    Args:
+        frames: Prepared window frames from prepare_frames()
+        host: Optional host filter (matched against slot Name)
+        include_all_devices: Whether to include all device types or filter out older ones
+
+    Returns:
+        Dictionary with usage statistics for each memory category (for Real slots only)
+    """
+    real_slot_expr = (
+        _REAL_CLASS_EXPRS["Priority-ResearcherOwned"]
+        | _REAL_CLASS_EXPRS["Priority-CHTCOwned"]
+        | _REAL_CLASS_EXPRS["Shared"]
+    )
+    frame = frames.dedup.filter(real_slot_expr)
+    if host:
+        frame = frame.filter(pl.col("Name").str.contains(host).fill_null(False))
+    if not include_all_devices:
+        old_mask = pl.col("GPUs_DeviceName").str.contains("|".join(OLD_GPU_TYPES)).fill_null(False)
+        frame = frame.filter(~old_mask)
+
+    # Map the handful of distinct memory sizes through the categorization
+    # function instead of applying it per row
+    mem_values = frame.select(pl.col("GPUs_GlobalMemoryMb").unique()).collect()["GPUs_GlobalMemoryMb"].to_list()
+    mem_map = {mb: get_memory_category_from_mb(mb) for mb in mem_values if mb is not None}
+    frame = frame.with_columns(
+        pl.col("GPUs_GlobalMemoryMb")
+        .replace_strict(mem_map, default=get_memory_category_from_mb(None), return_dtype=pl.Utf8)
+        .alias("memory_category")
+    )
+
+    agg = _pair_bucket_stats(frame, ["memory_category"])
+
+    stats = {}
+    for row in agg.iter_rows(named=True):
+        num_intervals = row["num_buckets"]
+        stats[row["memory_category"]] = {
+            "avg_claimed": row["claimed_sum"] / num_intervals,
+            "avg_drained": row["drained_sum"] / num_intervals,
+            "avg_total_available": row["total_sum"] / num_intervals,
+            "allocation_usage_percent": float(row["pct_claimed"]),
+            "drained_percent": float(row["pct_drained"]),
+            "num_intervals": num_intervals,
+        }
+    return stats
+
+
+def _user_gpu_totals(frame: pl.LazyFrame) -> dict[str, int]:
+    """Sum per-bucket unique claimed GPU counts per user (empty owner → Unknown)."""
+    per_owner = (
+        frame.filter((pl.col("State") == "Claimed") & pl.col("RemoteOwner").is_not_null())
+        .group_by("bucket", "RemoteOwner")
+        .agg(pl.col("AssignedGPUs").drop_nulls().n_unique().alias("n"))
+        .group_by("RemoteOwner")
+        .agg(pl.col("n").sum().alias("total"))
+        .collect(engine="streaming")
+    )
+    totals: dict[str, int] = {}
+    for owner, total in per_owner.iter_rows():
+        user = "Unknown" if owner == "" else owner
+        totals[user] = totals.get(user, 0) + int(total)
+    return totals
+
+
+def _finalize_user_stats(user_stats: dict) -> dict:
+    """Drop zero-usage users/classes and add per-class percentages."""
+    final_stats = {}
+    for user, slot_data in user_stats.items():
+        total_gpu_hours = sum(slot_data.values())
+        if total_gpu_hours > 0:
+            final_stats[user] = {"total_gpu_hours": total_gpu_hours, "slot_breakdown": {}}
+            for slot_type, gpu_hours in slot_data.items():
+                if gpu_hours > 0:
+                    final_stats[user]["slot_breakdown"][slot_type] = {
+                        "gpu_hours": gpu_hours,
+                        "percentage": (gpu_hours / total_gpu_hours) * 100,
+                    }
+    return final_stats
+
+
+def calculate_h200_user_breakdown(frames: PreparedFrames, host: str = "", hours_back: int = 1) -> dict:
+    """
+    Calculate H200 usage breakdown by user and slot type.
+
+    Args:
+        frames: Prepared window frames from prepare_frames()
+        host: Optional host filter (matched against Machine, then slot Name)
+        hours_back: Lookback period in hours
+
+    Returns:
+        Dictionary with H200 usage statistics by user and slot type
+    """
+    h200 = pl.col("GPUs_DeviceName") == "NVIDIA H200"
+    host_machine = pl.col("Machine").str.contains(f"(?i){re.escape(host)}").fill_null(False) if host else pl.lit(True)
+
+    # Denominator counts all intervals in the H200 dataset (pre-exclusion),
+    # including those where a user has 0 GPUs
+    num_buckets = frames.raw.filter(h200 & host_machine).select(pl.col("bucket").n_unique()).collect().item()
+    if not num_buckets:
+        return {}
+
+    researcher = _researcher_scope(frames, ["Machine"], device="NVIDIA H200")
+
+    user_stats: dict[str, dict[str, float]] = {}
+    for slot_type in CLASS_ORDER:
+        frame = _class_frame(frames, slot_type, host, researcher).filter(h200 & host_machine)
+        for user, total_gpus in _user_gpu_totals(frame).items():
+            gpu_hours = (total_gpus / num_buckets) * hours_back
+            if user not in user_stats:
+                user_stats[user] = dict.fromkeys(CLASS_ORDER, 0)
+            user_stats[user][slot_type] = gpu_hours
+
+    return _finalize_user_stats(user_stats)
+
+
+def calculate_backfill_usage_by_user(
+    frames: PreparedFrames, host: str = "", hours_back: int = 1, include_all_devices: bool = False
+) -> dict:
+    """
+    Calculate backfill slot usage breakdown by user and slot type.
+
+    Args:
+        frames: Prepared window frames from prepare_frames()
+        host: Optional host filter (matched against Machine, then slot Name)
+        hours_back: Lookback period in hours
+        include_all_devices: Whether to include all device types or filter out older ones
+
+    Returns:
+        Dictionary with backfill usage statistics by user and slot type
+    """
+    keep = pl.lit(True)
+    if not include_all_devices:
+        pattern = "|".join(OLD_GPU_TYPES)
+        keep = keep & ~pl.col("GPUs_DeviceName").str.contains(f"(?i)({pattern})").fill_null(False)
+    if host:
+        keep = keep & pl.col("Machine").str.contains(f"(?i){re.escape(host)}").fill_null(False)
+
+    num_buckets = frames.raw.filter(keep).select(pl.col("bucket").n_unique()).collect().item()
+    if not num_buckets:
+        return {}
+
+    researcher = (
+        frames.raw.filter(
+            keep
+            & ~pl.col("_excluded")
+            & ~pl.col("_is_bf")
+            & (pl.col("PrioritizedProjects") != "").fill_null(False)
+            & ~pl.col("_is_chtc")
+        )
+        .select("Machine")
+        .unique()
+    )
+
+    user_stats: dict[str, dict[str, float]] = {}
+    for slot_type in BACKFILL_SLOT_TYPES:
+        frame = _class_frame(frames, slot_type, host, researcher).filter(keep)
+        for user, total_gpus in _user_gpu_totals(frame).items():
+            gpu_hours = (total_gpus / num_buckets) * hours_back
+            if user not in user_stats:
+                user_stats[user] = dict.fromkeys(BACKFILL_SLOT_TYPES, 0)
+            user_stats[user][slot_type] = gpu_hours
+
+    return _finalize_user_stats(user_stats)
+
+
+def calculate_machines_with_zero_active_gpus(
+    frames: PreparedFrames, host: str = "", include_all_devices: bool = True
+) -> dict:
+    """
+    Calculate machines that had ZERO active (claimed) GPUs across the entire time span.
+
+    This identifies machines that had GPUs available but never had any claimed during
+    the analysis period, which may indicate underutilized or problematic hosts.
+
+    Args:
+        frames: Prepared window frames from prepare_frames()
+        host: Optional exact machine name filter
+        include_all_devices: Whether to include all device types or filter out older ones
+
+    Returns:
+        Dictionary with per-machine info for hosts with zero claimed GPUs and a summary
+    """
+    f = frames.raw.filter(~pl.col("_excluded"))
+    if host:
+        f = f.filter(pl.col("Machine") == host)
+
+    is_bf_ci = pl.col("Name").str.contains("(?i)backfill").fill_null(False)
+    claimed = pl.col("State") == "Claimed"
+    gpus = pl.col("AssignedGPUs")
+
+    per_machine = (
+        f.group_by("Machine")
+        .agg(
+            pl.len().alias("total_observations"),
+            gpus.filter(~is_bf_ci).drop_nulls().n_unique().alias("all_gpus"),
+            gpus.filter(~is_bf_ci & claimed).drop_nulls().n_unique().alias("claimed_gpus"),
+            pl.col("bucket").filter(is_bf_ci).n_unique().alias("bf_buckets"),
+            pl.struct("bucket", "AssignedGPUs")
+            .filter(is_bf_ci & claimed & gpus.is_not_null())
+            .n_unique()
+            .alias("bf_claimed_pairs"),
+            pl.col("GPUs_DeviceName").drop_nulls().mode().sort().first().alias("gpu_model"),
+            pl.col("PrioritizedProjects").drop_nulls().unique().alias("prioritized_projects"),
+        )
+        .collect(engine="streaming")
+    )
+
+    machines_with_zero_active = []
+    total_gpus_idle = 0
+    for row in per_machine.iter_rows(named=True):
+        if row["claimed_gpus"] != 0 or row["all_gpus"] == 0:
+            continue
+        gpu_model = row["gpu_model"] or "Unknown"
+        if not include_all_devices and _is_old_device(gpu_model):
+            continue
+        machines_with_zero_active.append(
+            {
+                "machine": row["Machine"],
+                "gpu_model": gpu_model,
+                "total_gpus": row["all_gpus"],
+                "total_observations": row["total_observations"],
+                "prioritized_projects": {p.strip() for p in row["prioritized_projects"] if p.strip()},
+                "avg_backfill_claimed": (row["bf_claimed_pairs"] / row["bf_buckets"]) if row["bf_buckets"] else 0,
+            }
+        )
+        total_gpus_idle += row["all_gpus"]
+
+    machines_with_zero_active.sort(key=lambda x: x["machine"])
+
+    return {
+        "machines": machines_with_zero_active,
+        "summary": {
+            "total_machines": len(machines_with_zero_active),
+            "total_gpus_idle": total_gpus_idle,
+        },
+    }
+
+
+def calculate_prevent_jobs_stats(frames: PreparedFrames) -> dict:
+    """
+    Calculate summary statistics for GPUs with PreventJobsReason set.
+
+    Args:
+        frames: Prepared window frames from prepare_frames()
+
+    Returns:
+        Dictionary with per-host breakdown (including last_seen and whether the reason
+        is still active), reason groupings, and per-class counts: per_class_avg feeds
+        the Real Slots table Prevented (avg.) column. A GPU counts as Prevented only
+        when its representative slot (after duplicate cleanup) is idle with
+        PreventJobsReason set.
+    """
+    empty = {
+        "has_prevent_jobs": False,
+        "num_hosts": 0,
+        "num_unique_gpus": 0,
+        "per_host": {},
+        "by_reason": {},
+        "per_class_avg": dict.fromkeys(CLASS_ORDER, 0.0),
+        "per_class_device_avg": {c: {} for c in CLASS_ORDER},
+        "pj_buckets": 0,
+        "total_buckets": 0,
+    }
+
+    if not frames.has_prevent_jobs:
+        return empty
+
+    pj_rows = frames.raw.filter(pl.col("_pj_set"))
+    per_host_agg = (
+        pj_rows.group_by("Machine")
+        .agg(
+            pl.col("AssignedGPUs").drop_nulls().n_unique().alias("num_gpus"),
+            pl.col(_PJ_COLUMN).drop_nulls().unique().alias("reasons"),
+            pl.col("timestamp").max().alias("last_seen"),
+        )
+        .collect(engine="streaming")
+    )
+    if per_host_agg.height == 0:
+        return empty
+
+    by_reason_agg = (
+        pj_rows.group_by(_PJ_COLUMN)
+        .agg(
+            pl.col("Machine").drop_nulls().n_unique().alias("num_hosts"),
+            pl.col("AssignedGPUs").drop_nulls().n_unique().alias("num_gpus"),
+        )
+        .sort(_PJ_COLUMN)
+        .collect()
+    )
+    by_reason = {
+        str(row[_PJ_COLUMN]): {"num_hosts": row["num_hosts"], "num_gpus": row["num_gpus"]}
+        for row in by_reason_agg.iter_rows(named=True)
+    }
+
+    # A host is "active" if its reason is still set in the most recent bucket with PJ
+    # data; otherwise the reason was lifted partway through the window.
+    pj_buckets = sorted(pj_rows.select(pl.col("bucket").unique()).collect()["bucket"].to_list())
+    last_pj_bucket = pj_buckets[-1]
+    active_machines = set(
+        pj_rows.filter(pl.col("bucket") == last_pj_bucket).select(pl.col("Machine").unique()).collect()["Machine"]
+    )
+
+    per_host = {}
+    for row in sorted(per_host_agg.iter_rows(named=True), key=lambda r: r["Machine"]):
+        per_host[row["Machine"]] = {
+            "num_gpus": row["num_gpus"],
+            "reasons": sorted(row["reasons"]),
+            "last_seen": row["last_seen"].strftime("%Y-%m-%d %H:%M"),
+            "active": row["Machine"] in active_machines,
+        }
+
+    totals = pj_rows.select(
+        pl.col("Machine").drop_nulls().n_unique().alias("num_hosts"),
+        pl.col("AssignedGPUs").drop_nulls().n_unique().alias("num_gpus"),
+    ).collect()
+
+    # PreventJobsReason does not evict running jobs — it only stops new ones, so only
+    # idle GPUs count as Prevented. The duplicate-cleanup ranking in prepare_frames
+    # resolves multi-slot GPUs: a Claimed slot outranks an idle prevented one, so a
+    # GPU still finishing a job surfaces here as Claimed (or, for a backfill-slot
+    # job, drops out of the primary class) and counts as Allocated.
+    researcher = _researcher_scope(frames, ["Machine"])
+    num_buckets = frames.total_buckets
+    per_class_avg: dict[str, float] = {}
+    per_class_device_avg: dict[str, dict[str, float]] = {}
+    for class_name in CLASS_ORDER:
+        prevented = _class_frame(frames, class_name, "", researcher).filter(
+            pl.col("_pj_set") & (pl.col("State") != "Claimed")
+        )
+        per_device = (
+            prevented.filter(pl.col("GPUs_DeviceName").is_not_null())
+            .group_by("GPUs_DeviceName", "bucket")
+            .agg(pl.col("AssignedGPUs").drop_nulls().n_unique().alias("n"))
+            .group_by("GPUs_DeviceName")
+            .agg(pl.col("n").sum().alias("total"))
+            .sort("GPUs_DeviceName")
+            .collect(engine="streaming")
+        )
+        total = (
+            prevented.group_by("bucket")
+            .agg(pl.col("AssignedGPUs").drop_nulls().n_unique().alias("n"))
+            .select(pl.col("n").sum())
+            .collect()
+            .item()
+            or 0
+        )
+        per_class_avg[class_name] = total / num_buckets if num_buckets else 0.0
+        per_class_device_avg[class_name] = {
+            str(row["GPUs_DeviceName"]): row["total"] / num_buckets
+            for row in per_device.iter_rows(named=True)
+            if row["total"] > 0
+        }
+
+    return {
+        "has_prevent_jobs": True,
+        "num_hosts": totals["num_hosts"][0],
+        "num_unique_gpus": totals["num_gpus"][0],
+        "per_host": per_host,
+        "by_reason": by_reason,
+        "per_class_avg": per_class_avg,
+        "per_class_device_avg": per_class_device_avg,
+        "pj_buckets": len(pj_buckets),
+        "total_buckets": num_buckets,
+    }
+
+
+def calculate_draining_stats(df: pl.DataFrame) -> dict:
+    """
+    Calculate summary statistics for drained GPUs.
+
+    Args:
+        df: DataFrame with draining data (Machine, AssignedGPUs, timestamp)
+
+    Returns:
+        Dictionary with draining summary and per-host breakdown
+    """
+    no_draining = {
+        "has_draining": False,
+        "num_hosts": 0,
+        "num_unique_gpus": 0,
+        "num_intervals": 0,
+        "total_hours": 0.0,
+        "per_host": {},
+    }
+    if df.height == 0:
+        return no_draining
+
+    keys = ["Machine", "AssignedGPUs"]
+    intervals = (
+        df.sort([*keys, "timestamp"])
+        .with_columns(
+            (pl.col("timestamp").diff().over(keys) > pl.duration(minutes=20)).fill_null(False).alias("_new_interval")
+        )
+        .with_columns(pl.col("_new_interval").cum_sum().over(keys).alias("interval_id"))
+        .group_by([*keys, "interval_id"])
+        .agg(pl.col("timestamp").min().alias("start"), pl.col("timestamp").max().alias("end"))
+        # Single data point: assume 15 min duration
+        .with_columns(
+            pl.when(pl.col("end") == pl.col("start"))
+            .then(pl.col("start") + pl.duration(minutes=15))
+            .otherwise(pl.col("end"))
+            .alias("end")
+        )
+        .with_columns(((pl.col("end") - pl.col("start")).dt.total_seconds() / 3600).alias("duration_hours"))
+        .sort([*keys, "start"])
+    )
+
+    per_host = {}
+    for (machine,), machine_data in intervals.group_by("Machine", maintain_order=True):
+        gpu_details = {}
+        for (gpu_id,), gpu_data in machine_data.group_by("AssignedGPUs", maintain_order=True):
+            gpu_details[str(gpu_id)] = {
+                "num_intervals": gpu_data.height,
+                "total_hours": gpu_data["duration_hours"].sum(),
+            }
+        per_host[machine] = {
+            "num_gpus": machine_data["AssignedGPUs"].n_unique(),
+            "num_intervals": machine_data.height,
+            "total_hours": machine_data["duration_hours"].sum(),
+            "gpu_details": gpu_details,
+        }
+
+    return {
+        "has_draining": True,
+        "num_hosts": intervals["Machine"].n_unique(),
+        "num_unique_gpus": intervals["AssignedGPUs"].n_unique(),
+        "num_intervals": intervals.height,
+        "total_hours": intervals["duration_hours"].sum(),
+        "per_host": per_host,
+    }
+
+
+def calculate_monthly_summary(data_dir: str, end_time: datetime.datetime | None = None) -> dict:
+    """
+    Calculate complete monthly GPU usage summary for the previous month.
+
+    Args:
+        data_dir: Directory containing gpu_state Parquet files
+        end_time: Optional end time (defaults to latest data)
+
+    Returns:
+        Dictionary containing monthly usage statistics
+    """
+    import calendar
+
+    if end_time is None:
+        end_time = get_latest_timestamp(data_dir)
+        if end_time is None:
+            end_time = datetime.datetime.now()
+
+    # Calculate previous month range
+    current_month = end_time.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    prev_month_end = current_month - datetime.timedelta(seconds=1)
+    prev_month_start = prev_month_end.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    days_in_month = calendar.monthrange(prev_month_start.year, prev_month_start.month)[1]
+    total_hours = days_in_month * 24
+
+    print(f"Calculating monthly summary for {prev_month_start.strftime('%B %Y')}")
+    print(f"Period: {prev_month_start} to {prev_month_end}")
+    print(f"Total hours in month: {total_hours}")
+
+    lf = scan_time_filtered(data_dir, total_hours, prev_month_end + datetime.timedelta(seconds=1))
+    frames = prepare_frames(lf)
+
+    if frames.original_count == 0:
+        return {
+            "error": f"No data found for {prev_month_start.strftime('%B %Y')}",
+            "month": prev_month_start.strftime("%B %Y"),
+            "start_date": prev_month_start,
+            "end_date": prev_month_end,
+            "total_hours": total_hours,
+        }
+
+    return {
+        "month": prev_month_start.strftime("%B %Y"),
+        "start_date": prev_month_start,
+        "end_date": prev_month_end,
+        "total_hours": total_hours,
+        "device_stats": calculate_allocation_usage_by_device_enhanced(frames, "", False),
+        "memory_stats": calculate_allocation_usage_by_memory(frames, "", False),
+        "h200_user_stats": calculate_h200_user_breakdown(frames, "", total_hours),
+        "data_coverage": {
+            "start_time": frames.start_time,
+            "end_time": frames.end_time,
+            "total_records": frames.original_count,
+            "unique_intervals": frames.total_buckets,
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# pandas-based calculations retained for small-window paths and scripts
+# ---------------------------------------------------------------------------
 
 
 def calculate_allocation_usage(df: pd.DataFrame, host: str = "") -> dict:
@@ -57,22 +863,12 @@ def calculate_allocation_usage(df: pd.DataFrame, host: str = "") -> dict:
         for bucket in sorted(df["15min_bucket"].unique()):
             bucket_df = df[df["15min_bucket"] == bucket]
 
-            # Count unique GPUs for this utilization type in this interval
-            if utilization_type == "Priority":
-                claimed_gpus = len(filter_df(bucket_df, "Priority", "Claimed", host)["AssignedGPUs"].dropna().unique())
-                unclaimed_gpus = len(
-                    filter_df(bucket_df, "Priority", "Unclaimed", host)["AssignedGPUs"].dropna().unique()
-                )
-            elif utilization_type == "Shared":
-                claimed_gpus = len(filter_df(bucket_df, "Shared", "Claimed", host)["AssignedGPUs"].dropna().unique())
-                unclaimed_gpus = len(
-                    filter_df(bucket_df, "Shared", "Unclaimed", host)["AssignedGPUs"].dropna().unique()
-                )
-            elif utilization_type == "Backfill":
-                claimed_gpus = len(filter_df(bucket_df, "Backfill", "Claimed", host)["AssignedGPUs"].dropna().unique())
-                unclaimed_gpus = len(
-                    filter_df(bucket_df, "Backfill", "Unclaimed", host)["AssignedGPUs"].dropna().unique()
-                )
+            claimed_gpus = len(
+                filter_df(bucket_df, utilization_type, "Claimed", host)["AssignedGPUs"].dropna().unique()
+            )
+            unclaimed_gpus = len(
+                filter_df(bucket_df, utilization_type, "Unclaimed", host)["AssignedGPUs"].dropna().unique()
+            )
 
             total_gpus_this_interval = claimed_gpus + unclaimed_gpus
 
@@ -138,69 +934,12 @@ def calculate_allocation_usage_enhanced(df: pd.DataFrame, host: str = "") -> dic
         for bucket in sorted(df["15min_bucket"].unique()):
             bucket_df = df[df["15min_bucket"] == bucket]
 
-            # Count unique GPUs for this utilization type in this interval
-            if utilization_type == "Priority-ResearcherOwned":
-                claimed_gpus = len(
-                    filter_df_enhanced(bucket_df, "Priority-ResearcherOwned", "Claimed", host)["AssignedGPUs"]
-                    .dropna()
-                    .unique()
-                )
-                unclaimed_gpus = len(
-                    filter_df_enhanced(bucket_df, "Priority-ResearcherOwned", "Unclaimed", host)["AssignedGPUs"]
-                    .dropna()
-                    .unique()
-                )
-            elif utilization_type == "Priority-CHTCOwned":
-                claimed_gpus = len(
-                    filter_df_enhanced(bucket_df, "Priority-CHTCOwned", "Claimed", host)["AssignedGPUs"]
-                    .dropna()
-                    .unique()
-                )
-                unclaimed_gpus = len(
-                    filter_df_enhanced(bucket_df, "Priority-CHTCOwned", "Unclaimed", host)["AssignedGPUs"]
-                    .dropna()
-                    .unique()
-                )
-            elif utilization_type == "Shared":
-                claimed_gpus = len(
-                    filter_df_enhanced(bucket_df, "Shared", "Claimed", host)["AssignedGPUs"].dropna().unique()
-                )
-                unclaimed_gpus = len(
-                    filter_df_enhanced(bucket_df, "Shared", "Unclaimed", host)["AssignedGPUs"].dropna().unique()
-                )
-            elif utilization_type == "Backfill-CHTCOwned":
-                claimed_gpus = len(
-                    filter_df_enhanced(bucket_df, "Backfill-CHTCOwned", "Claimed", host)["AssignedGPUs"]
-                    .dropna()
-                    .unique()
-                )
-                unclaimed_gpus = len(
-                    filter_df_enhanced(bucket_df, "Backfill-CHTCOwned", "Unclaimed", host)["AssignedGPUs"]
-                    .dropna()
-                    .unique()
-                )
-            elif utilization_type == "Backfill-ResearcherOwned":
-                claimed_gpus = len(
-                    filter_df_enhanced(bucket_df, "Backfill-ResearcherOwned", "Claimed", host)["AssignedGPUs"]
-                    .dropna()
-                    .unique()
-                )
-                unclaimed_gpus = len(
-                    filter_df_enhanced(bucket_df, "Backfill-ResearcherOwned", "Unclaimed", host)["AssignedGPUs"]
-                    .dropna()
-                    .unique()
-                )
-            elif utilization_type == "Backfill-OpenCapacity":
-                claimed_gpus = len(
-                    filter_df_enhanced(bucket_df, "Backfill-OpenCapacity", "Claimed", host)["AssignedGPUs"]
-                    .dropna()
-                    .unique()
-                )
-                unclaimed_gpus = len(
-                    filter_df_enhanced(bucket_df, "Backfill-OpenCapacity", "Unclaimed", host)["AssignedGPUs"]
-                    .dropna()
-                    .unique()
-                )
+            claimed_gpus = len(
+                filter_df_enhanced(bucket_df, utilization_type, "Claimed", host)["AssignedGPUs"].dropna().unique()
+            )
+            unclaimed_gpus = len(
+                filter_df_enhanced(bucket_df, utilization_type, "Unclaimed", host)["AssignedGPUs"].dropna().unique()
+            )
 
             total_gpus_this_interval = claimed_gpus + unclaimed_gpus
 
@@ -230,186 +969,6 @@ def calculate_allocation_usage_enhanced(df: pd.DataFrame, host: str = "") -> dic
     return stats
 
 
-def calculate_allocation_usage_by_device_enhanced(
-    df: pd.DataFrame, host: str = "", include_all_devices: bool = True
-) -> dict:
-    """
-    Calculate allocation-based usage grouped by device type with enhanced backfill categories.
-
-    Args:
-        df: DataFrame with GPU state data
-        host: Optional host filter
-        include_all_devices: Whether to include all device types or filter out older ones
-
-    Returns:
-        Dictionary with usage statistics for each enhanced class and device type
-    """
-    # Use cached preprocessing to avoid repeated timestamp/bucket operations
-    # Generate unified cache key based on DataFrame identity
-    cache_key = f"preprocessed_{len(df)}_{hash(str(df['timestamp'].iloc[0])) if len(df) > 0 else 'empty'}"
-    df = get_preprocessed_dataframe(df, cache_key)
-
-    # Get unique device types
-    device_types = df["GPUs_DeviceName"].dropna().unique()
-
-    stats = {}
-
-    # Utilization types with emphasis on hosted capacity
-    utilization_types = [
-        "Priority-ResearcherOwned",
-        "Priority-CHTCOwned",
-        "Shared",
-        "Backfill-CHTCOwned",
-        "Backfill-ResearcherOwned",
-    ]
-
-    # Pre-filter data by utilization type and device type to avoid repeated filtering
-    filtered_data = {}
-    for utilization_type in utilization_types:
-        filtered_data[utilization_type] = {}
-        for device_type in device_types:
-            # Skip old/uncommon GPU types for cleaner output (unless requested to include all)
-            if not include_all_devices and any(
-                old_gpu in device_type for old_gpu in ["GTX 1080", "P100", "Quadro", "A30", "A40"]
-            ):
-                continue
-
-            # Create cache key for this specific filter combination - include all parameters
-            filter_cache_key = f"enhanced_{utilization_type}_{device_type}_{host}_{len(df)}_{hash(str(df['timestamp'].iloc[0])) if len(df) > 0 else 'empty'}"
-
-            # Get filtered dataset (cached if available) - correct parameter order
-            # filter_df_enhanced(df, utilization, state, host)
-            # We need to filter by device type separately since filter_df_enhanced doesn't take device_type
-            device_df = df[df["GPUs_DeviceName"] == device_type]
-            filtered_df = get_cached_filtered_dataframe(
-                device_df, filter_df_enhanced, (utilization_type, "", host), filter_cache_key
-            )
-            filtered_data[utilization_type][device_type] = filtered_df
-
-    for utilization_type in utilization_types:
-        stats[utilization_type] = {}
-
-        for device_type in device_types:
-            # Skip old/uncommon GPU types for cleaner output (unless requested to include all)
-            if not include_all_devices and any(
-                old_gpu in device_type for old_gpu in ["GTX 1080", "P100", "Quadro", "A30", "A40"]
-            ):
-                continue
-
-            # Use pre-filtered data instead of calling filter_df_enhanced repeatedly
-            if device_type not in filtered_data[utilization_type]:
-                continue
-            device_utilization_df = filtered_data[utilization_type][device_type]
-
-            interval_usage_percentages = []
-            interval_drained_percentages = []
-            total_claimed_gpus = 0
-            total_drained_gpus = 0
-            total_available_gpus = 0
-
-            # For each 15-minute interval, count unique GPUs using pre-filtered data
-            for bucket in sorted(df["15min_bucket"].unique()):
-                # Use pre-filtered data for this bucket
-                bucket_filtered_df = device_utilization_df[device_utilization_df["15min_bucket"] == bucket]
-
-                if bucket_filtered_df.empty:
-                    continue
-
-                # Count unique GPUs (total available for this utilization type)
-                unique_gpu_ids = set(bucket_filtered_df["AssignedGPUs"].dropna().unique())
-                total_gpus_this_interval = len(unique_gpu_ids)
-
-                # Count how many of these unique GPUs are currently claimed
-                claimed_gpus_df = bucket_filtered_df[bucket_filtered_df["State"] == "Claimed"]
-                claimed_unique_gpu_ids = set(claimed_gpus_df["AssignedGPUs"].dropna().unique())
-                claimed_gpus = len(claimed_unique_gpu_ids)
-
-                # Count how many of these unique GPUs are currently drained
-                # EXCLUDE GPUs that are already claimed (prefer Claimed over Drained)
-                drained_gpus_df = bucket_filtered_df[bucket_filtered_df["State"] == "Drained"]
-                drained_unique_gpu_ids = set(drained_gpus_df["AssignedGPUs"].dropna().unique())
-                drained_unique_gpu_ids -= claimed_unique_gpu_ids  # Remove GPUs already counted as claimed
-                drained_gpus = len(drained_unique_gpu_ids)
-
-                if total_gpus_this_interval > 0:
-                    interval_usage = (claimed_gpus / total_gpus_this_interval) * 100
-                    interval_usage_percentages.append(interval_usage)
-
-                    interval_drained = (drained_gpus / total_gpus_this_interval) * 100
-                    interval_drained_percentages.append(interval_drained)
-
-                    total_claimed_gpus += claimed_gpus
-                    total_drained_gpus += drained_gpus
-                    total_available_gpus += total_gpus_this_interval
-
-            if interval_usage_percentages:
-                # Average percentages across intervals (correct approach when GPUs can change state)
-                # Averaging counts then calculating % is wrong because the same GPU counted as
-                # Claimed in one interval and Drained in another adds to both totals
-                avg_usage_percentage = sum(interval_usage_percentages) / len(interval_usage_percentages)
-                avg_drained_percentage = (
-                    sum(interval_drained_percentages) / len(interval_drained_percentages)
-                    if interval_drained_percentages
-                    else 0.0
-                )
-
-                # Calculate average GPU counts across ALL intervals (including those with 0 usage)
-                # This matches the user breakdown method and gives consistent results
-                total_intervals = len(df["15min_bucket"].unique())
-                avg_claimed = total_claimed_gpus / total_intervals if total_intervals > 0 else 0
-                avg_drained = total_drained_gpus / total_intervals if total_intervals > 0 else 0
-                avg_total = total_available_gpus / total_intervals if total_intervals > 0 else 0
-
-                stats[utilization_type][device_type] = {
-                    "avg_claimed": avg_claimed,
-                    "avg_drained": avg_drained,
-                    "avg_total_available": avg_total,
-                    "allocation_usage_percent": avg_usage_percentage,
-                    "drained_percent": avg_drained_percentage,
-                    "num_intervals": total_intervals,
-                }
-
-    return stats
-
-
-def calculate_performance_usage(df: pd.DataFrame, host: str = "") -> dict:
-    """
-    Calculate performance-based usage: actual GPU utilization metrics averaged over time.
-
-    Args:
-        df: DataFrame with GPU state data
-        host: Optional host filter
-
-    Returns:
-        Dictionary with performance usage statistics for each class
-    """
-    stats = {}
-
-    for utilization_type in UTILIZATION_TYPES:
-        # Filter to only claimed GPUs with utilization data
-        filtered_df = filter_df(df, utilization_type, "Claimed", host)
-
-        # Only consider records with valid utilization data
-        util_df = filtered_df[(filtered_df["GPUsAverageUsage"].notna()) & (filtered_df["GPUsAverageUsage"] >= 0)]
-
-        if len(util_df) > 0:
-            avg_utilization = util_df["GPUsAverageUsage"].mean() * 100  # Convert to percentage
-            total_records = len(util_df)
-            unique_gpus = util_df["AssignedGPUs"].nunique()
-        else:
-            avg_utilization = 0
-            total_records = 0
-            unique_gpus = 0
-
-        stats[utilization_type] = {
-            "avg_gpu_utilization_percent": avg_utilization,
-            "records_with_utilization": total_records,
-            "unique_gpus_used": unique_gpus,
-        }
-
-    return stats
-
-
 def calculate_time_series_usage(df: pd.DataFrame, bucket_minutes: int = 15, host: str = "") -> pd.DataFrame:
     """
     Calculate usage over time in buckets, counting unique GPUs per interval.
@@ -434,22 +993,12 @@ def calculate_time_series_usage(df: pd.DataFrame, bucket_minutes: int = 15, host
         bucket_stats = {"timestamp": bucket}
 
         for utilization_type in UTILIZATION_TYPES:
-            # Count unique GPUs for this utilization type in this interval
-            if utilization_type == "Priority":
-                claimed_gpus = len(filter_df(bucket_df, "Priority", "Claimed", host)["AssignedGPUs"].dropna().unique())
-                unclaimed_gpus = len(
-                    filter_df(bucket_df, "Priority", "Unclaimed", host)["AssignedGPUs"].dropna().unique()
-                )
-            elif utilization_type == "Shared":
-                claimed_gpus = len(filter_df(bucket_df, "Shared", "Claimed", host)["AssignedGPUs"].dropna().unique())
-                unclaimed_gpus = len(
-                    filter_df(bucket_df, "Shared", "Unclaimed", host)["AssignedGPUs"].dropna().unique()
-                )
-            elif utilization_type == "Backfill":
-                claimed_gpus = len(filter_df(bucket_df, "Backfill", "Claimed", host)["AssignedGPUs"].dropna().unique())
-                unclaimed_gpus = len(
-                    filter_df(bucket_df, "Backfill", "Unclaimed", host)["AssignedGPUs"].dropna().unique()
-                )
+            claimed_gpus = len(
+                filter_df(bucket_df, utilization_type, "Claimed", host)["AssignedGPUs"].dropna().unique()
+            )
+            unclaimed_gpus = len(
+                filter_df(bucket_df, utilization_type, "Unclaimed", host)["AssignedGPUs"].dropna().unique()
+            )
 
             total_gpus = claimed_gpus + unclaimed_gpus
             usage_percent = (claimed_gpus / total_gpus * 100) if total_gpus > 0 else 0
@@ -490,9 +1039,7 @@ def calculate_allocation_usage_by_device(df: pd.DataFrame, host: str = "", inclu
 
         for device_type in device_types:
             # Skip old/uncommon GPU types for cleaner output (unless requested to include all)
-            if not include_all_devices and any(
-                old_gpu in device_type for old_gpu in ["GTX 1080", "P100", "Quadro", "A30", "A40"]
-            ):
+            if not include_all_devices and _is_old_device(device_type):
                 continue
 
             interval_usage_percentages = []
@@ -511,14 +1058,9 @@ def calculate_allocation_usage_by_device(df: pd.DataFrame, host: str = "", inclu
                 if device_df.empty:
                     continue
 
-                # Count unique GPUs for this utilization type and device in this interval
-                # Fixed: Get all GPUs for this utilization type, then count claimed vs total to avoid double-counting
-                if utilization_type == "Priority":
-                    all_gpus_df = filter_df(device_df, "Priority", "", host)
-                elif utilization_type == "Shared":
-                    all_gpus_df = filter_df(device_df, "Shared", "", host)
-                elif utilization_type == "Backfill":
-                    all_gpus_df = filter_df(device_df, "Backfill", "", host)
+                # Get all GPUs for this utilization type, then count claimed vs total
+                # to avoid double-counting
+                all_gpus_df = filter_df(device_df, utilization_type, "", host)
 
                 # Count unique GPUs (total available for this utilization type)
                 unique_gpu_ids = set(all_gpus_df["AssignedGPUs"].dropna().unique())
@@ -526,20 +1068,15 @@ def calculate_allocation_usage_by_device(df: pd.DataFrame, host: str = "", inclu
 
                 # Count how many of these unique GPUs are currently claimed
                 claimed_gpus_df = all_gpus_df[all_gpus_df["State"] == "Claimed"]
-                claimed_unique_gpu_ids = set(claimed_gpus_df["AssignedGPUs"].dropna().unique())
-                claimed_gpus = len(claimed_unique_gpu_ids)
+                claimed_gpus = len(set(claimed_gpus_df["AssignedGPUs"].dropna().unique()))
 
                 # Count how many of these unique GPUs are currently drained
                 drained_gpus_df = all_gpus_df[all_gpus_df["State"] == "Drained"]
-                drained_unique_gpu_ids = set(drained_gpus_df["AssignedGPUs"].dropna().unique())
-                drained_gpus = len(drained_unique_gpu_ids)
+                drained_gpus = len(set(drained_gpus_df["AssignedGPUs"].dropna().unique()))
 
                 if total_gpus_this_interval > 0:
-                    interval_usage = (claimed_gpus / total_gpus_this_interval) * 100
-                    interval_usage_percentages.append(interval_usage)
-
-                    interval_drained = (drained_gpus / total_gpus_this_interval) * 100
-                    interval_drained_percentages.append(interval_drained)
+                    interval_usage_percentages.append((claimed_gpus / total_gpus_this_interval) * 100)
+                    interval_drained_percentages.append((drained_gpus / total_gpus_this_interval) * 100)
 
                     total_claimed_gpus += claimed_gpus
                     total_drained_gpus += drained_gpus
@@ -557,7 +1094,6 @@ def calculate_allocation_usage_by_device(df: pd.DataFrame, host: str = "", inclu
                 )
 
                 # Calculate average GPU counts across ALL intervals (including those with 0 usage)
-                # This matches the user breakdown method and gives consistent results
                 total_intervals = len(df["15min_bucket"].unique())
                 avg_claimed = total_claimed_gpus / total_intervals if total_intervals > 0 else 0
                 avg_drained = total_drained_gpus / total_intervals if total_intervals > 0 else 0
@@ -573,613 +1109,6 @@ def calculate_allocation_usage_by_device(df: pd.DataFrame, host: str = "", inclu
                 }
 
     return stats
-
-
-def calculate_allocation_usage_by_memory(df: pd.DataFrame, host: str = "", include_all_devices: bool = True) -> dict:
-    """
-    Calculate allocation-based usage grouped by memory category for Real slots only.
-    Uses GPUs_GlobalMemoryMb field for dynamic memory categorization.
-    Args:
-        df: DataFrame with GPU state data
-        host: Optional host filter
-        include_all_devices: Whether to include all device types or filter out older ones
-    Returns:
-        Dictionary with usage statistics for each memory category (for Real slots only)
-    """
-    # Use cached preprocessing to avoid repeated timestamp/bucket operations
-    # Generate unified cache key based on DataFrame identity
-    cache_key = f"preprocessed_{len(df)}_{hash(str(df['timestamp'].iloc[0])) if len(df) > 0 else 'empty'}"
-    df = get_preprocessed_dataframe(df, cache_key)
-
-    # Add memory category column based on GPUs_GlobalMemoryMb
-    df["memory_category"] = df["GPUs_GlobalMemoryMb"].apply(get_memory_category_from_mb)
-
-    # Filter out old/uncommon GPU types for consistency with device-based reporting
-    if not include_all_devices:
-        old_gpus = ["GTX 1080", "P100", "Quadro", "A30", "A40"]
-        df = df[~df["GPUs_DeviceName"].str.contains("|".join(old_gpus), na=False)]
-
-    # Get unique memory categories
-    memory_categories = df["memory_category"].dropna().unique()
-
-    stats = {}
-
-    # Only calculate for Real slot classes (Priority-ResearcherOwned + Priority-CHTCOwned + Shared)
-    real_slot_classes = ["Priority-ResearcherOwned", "Priority-CHTCOwned", "Shared"]
-
-    # Pre-filter data by class and memory category to avoid repeated filtering
-    filtered_memory_data = {}
-    for memory_cat in memory_categories:
-        filtered_memory_data[memory_cat] = {}
-        for class_name in real_slot_classes:
-            # Create cache key for this specific filter combination
-            filter_cache_key = f"memory_{class_name}_{memory_cat}_{len(df)}_{hash(str(df['timestamp'].iloc[0])) if len(df) > 0 else 'empty'}"
-
-            # Filter by memory category first, then by class
-            memory_cat_df = df[df["memory_category"] == memory_cat]
-            if not memory_cat_df.empty:
-                # Get filtered dataset (cached if available)
-                # filter_df_enhanced(df, utilization, state, host)
-                filtered_df = get_cached_filtered_dataframe(
-                    memory_cat_df, filter_df_enhanced, (class_name, "", host), filter_cache_key
-                )
-                filtered_memory_data[memory_cat][class_name] = filtered_df
-
-    for memory_cat in memory_categories:
-        total_claimed_across_intervals = 0
-        total_drained_across_intervals = 0
-        total_available_across_intervals = 0
-        num_intervals_with_data = 0
-        interval_usage_percentages = []
-        interval_drained_percentages = []
-
-        # Get unique time buckets
-        unique_buckets = df["15min_bucket"].unique()
-
-        for bucket_time in unique_buckets:
-            bucket_claimed_ids = set()
-            bucket_drained_ids = set()
-            bucket_total_ids = set()
-
-            # Collect GPU IDs across all Real slot classes for this memory category
-            # First pass: collect all claimed and total GPUs
-            for class_name in real_slot_classes:
-                # Use pre-filtered data for this memory category and class
-                if class_name not in filtered_memory_data[memory_cat]:
-                    continue
-
-                class_filtered_df = filtered_memory_data[memory_cat][class_name]
-
-                # Filter by bucket time
-                bucket_class_df = class_filtered_df[class_filtered_df["15min_bucket"] == bucket_time]
-
-                if not bucket_class_df.empty:
-                    # Collect unique GPU IDs for this class
-                    unique_gpu_ids = set(bucket_class_df["AssignedGPUs"].dropna().unique())
-                    bucket_total_ids.update(unique_gpu_ids)
-
-                    # Collect unique claimed GPUs
-                    claimed_gpus_df = bucket_class_df[bucket_class_df["State"] == "Claimed"]
-                    claimed_unique_gpu_ids = set(claimed_gpus_df["AssignedGPUs"].dropna().unique())
-                    bucket_claimed_ids.update(claimed_unique_gpu_ids)
-
-                    # Collect unique drained GPUs (will deduplicate later)
-                    drained_gpus_df = bucket_class_df[bucket_class_df["State"] == "Drained"]
-                    drained_unique_gpu_ids = set(drained_gpus_df["AssignedGPUs"].dropna().unique())
-                    bucket_drained_ids.update(drained_unique_gpu_ids)
-
-            # Deduplicate: remove GPUs counted as claimed from drained
-            bucket_drained_ids -= bucket_claimed_ids
-
-            bucket_claimed = len(bucket_claimed_ids)
-            bucket_drained = len(bucket_drained_ids)
-            bucket_total = len(bucket_total_ids)
-
-            if bucket_total > 0:
-                total_claimed_across_intervals += bucket_claimed
-                total_drained_across_intervals += bucket_drained
-                total_available_across_intervals += bucket_total
-                num_intervals_with_data += 1
-
-                # Track percentages for this interval
-                interval_usage_pct = (bucket_claimed / bucket_total * 100) if bucket_total > 0 else 0
-                interval_drained_pct = (bucket_drained / bucket_total * 100) if bucket_total > 0 else 0
-                interval_usage_percentages.append(interval_usage_pct)
-                interval_drained_percentages.append(interval_drained_pct)
-
-        # Calculate averages
-        if num_intervals_with_data > 0:
-            # Average percentages across intervals (correct approach when GPUs can change state)
-            avg_usage_percentage = sum(interval_usage_percentages) / len(interval_usage_percentages)
-            avg_drained_percentage = (
-                sum(interval_drained_percentages) / len(interval_drained_percentages)
-                if interval_drained_percentages
-                else 0.0
-            )
-
-            avg_claimed = total_claimed_across_intervals / num_intervals_with_data
-            avg_drained = total_drained_across_intervals / num_intervals_with_data
-            avg_total = total_available_across_intervals / num_intervals_with_data
-
-            stats[memory_cat] = {
-                "avg_claimed": avg_claimed,
-                "avg_drained": avg_drained,
-                "avg_total_available": avg_total,
-                "allocation_usage_percent": avg_usage_percentage,
-                "drained_percent": avg_drained_percentage,
-                "num_intervals": num_intervals_with_data,
-            }
-
-    return stats
-
-
-def calculate_h200_user_breakdown(df: pd.DataFrame, host: str = "", hours_back: int = 1) -> dict:
-    """
-    Calculate H200 usage breakdown by user and slot type.
-
-    Args:
-        df: DataFrame with GPU state data
-        host: Optional host filter
-        hours_back: Lookback period in hours
-
-    Returns:
-        Dictionary with H200 usage statistics by user and slot type
-    """
-    # Filter for H200 GPUs only
-    h200_df = df[df["GPUs_DeviceName"] == "NVIDIA H200"].copy()
-
-    if h200_df.empty:
-        return {}
-
-    # Use cached preprocessing for H200 data
-    # Generate unified cache key based on DataFrame identity
-    cache_key = (
-        f"preprocessed_{len(h200_df)}_{hash(str(h200_df['timestamp'].iloc[0])) if len(h200_df) > 0 else 'empty'}"
-    )
-    h200_df = get_preprocessed_dataframe(h200_df, cache_key)
-
-    # Apply host filter if specified
-    if host:
-        h200_df = h200_df[h200_df["Machine"].str.contains(host, case=False, na=False)]
-
-    # Use the actual lookback period to match the device allocation method
-    # (Device allocation uses averages across buckets multiplied by lookback period)
-    actual_duration_hours = hours_back
-
-    user_stats = {}
-    slot_types = CLASS_ORDER
-
-    # For each slot type, analyze user usage using averaging approach like device allocation
-    for slot_type in slot_types:
-        # Get slots of this type
-        filtered_df = filter_df_enhanced(h200_df, slot_type, "", host)
-
-        if filtered_df.empty:
-            continue
-
-        # Only look at claimed slots (where jobs are running)
-        claimed_df = filtered_df[filtered_df["State"] == "Claimed"]
-
-        if claimed_df.empty:
-            continue
-
-        # For each user, calculate their average GPU usage across buckets, then multiply by actual time
-        user_bucket_totals = {}
-
-        # Get all possible buckets for this slot type (from the entire H200 dataset)
-        # This ensures we count all time intervals, including those where user has 0 GPUs
-        all_buckets = sorted(h200_df["15min_bucket"].unique())
-        num_buckets = len(all_buckets)
-
-        for bucket in all_buckets:
-            bucket_df = claimed_df[claimed_df["15min_bucket"] == bucket]
-
-            if not bucket_df.empty:
-                # Group by user within this time bucket
-                user_gpu_counts = bucket_df.groupby("RemoteOwner")["AssignedGPUs"].nunique()
-
-                for user, gpu_count in user_gpu_counts.items():
-                    if pd.isna(user) or user == "" or user is None:
-                        user = "Unknown"
-
-                    if user not in user_bucket_totals:
-                        user_bucket_totals[user] = 0
-
-                    user_bucket_totals[user] += gpu_count
-
-        # Convert totals to averages, then multiply by actual time duration
-        for user, total_gpus in user_bucket_totals.items():
-            avg_gpus = total_gpus / num_buckets if num_buckets > 0 else 0
-            gpu_hours = avg_gpus * actual_duration_hours
-
-            if user not in user_stats:
-                user_stats[user] = {
-                    "Priority-ResearcherOwned": 0,
-                    "Priority-CHTCOwned": 0,
-                    "Shared": 0,
-                    "Backfill-ResearcherOwned": 0,
-                    "Backfill-CHTCOwned": 0,
-                }
-
-            user_stats[user][slot_type] = gpu_hours
-
-    # Calculate final statistics
-    final_stats = {}
-    for user, slot_data in user_stats.items():
-        total_gpu_hours = sum(gpu_hours for gpu_hours in slot_data.values())
-
-        if total_gpu_hours > 0:
-            final_stats[user] = {"total_gpu_hours": total_gpu_hours, "slot_breakdown": {}}
-
-            # Add breakdown by slot type (only include non-zero usage)
-            for slot_type, gpu_hours in slot_data.items():
-                if gpu_hours > 0:
-                    final_stats[user]["slot_breakdown"][slot_type] = {
-                        "gpu_hours": gpu_hours,
-                        "percentage": (gpu_hours / total_gpu_hours) * 100,
-                    }
-
-    return final_stats
-
-
-def calculate_backfill_usage_by_user(
-    df: pd.DataFrame, host: str = "", hours_back: int = 1, include_all_devices: bool = False
-) -> dict:
-    """
-    Calculate backfill slot usage breakdown by user and slot type.
-
-    Args:
-        df: DataFrame with GPU state data
-        host: Optional host filter
-        hours_back: Lookback period in hours
-
-    Returns:
-        Dictionary with backfill usage statistics by user and slot type
-    """
-    if df.empty:
-        return {}
-
-    # Filter out old/uncommon GPU types for consistency with allocation calculations
-    if not include_all_devices:
-        old_gpu_types = ["GTX 1080", "P100", "Quadro", "A30", "A40"]
-        mask = ~df["GPUs_DeviceName"].str.contains("|".join(old_gpu_types), case=False, na=False)
-        df = df[mask]
-
-        if df.empty:
-            return {}
-
-    # Use cached preprocessing for data
-    cache_key = f"preprocessed_backfill_{len(df)}_{hash(str(df['timestamp'].iloc[0])) if len(df) > 0 else 'empty'}_{include_all_devices}"
-    df = get_preprocessed_dataframe(df, cache_key)
-
-    # Apply host filter if specified
-    if host:
-        df = df[df["Machine"].str.contains(host, case=False, na=False)]
-
-    actual_duration_hours = hours_back
-    user_stats = {}
-
-    # Only focus on backfill slot types
-    backfill_slot_types = BACKFILL_SLOT_TYPES
-
-    # For each backfill slot type, analyze user usage
-    for slot_type in backfill_slot_types:
-        # Get slots of this type
-        filtered_df = filter_df_enhanced(df, slot_type, "", host)
-        if filtered_df.empty:
-            continue
-
-        # Only look at claimed slots (where jobs are running)
-        claimed_df = filtered_df[filtered_df["State"] == "Claimed"]
-        if claimed_df.empty:
-            continue
-
-        # For each user, calculate their average GPU usage across buckets, then multiply by actual time
-        user_bucket_totals = {}
-
-        # Get all possible buckets for this slot type
-        all_buckets = sorted(df["15min_bucket"].unique())
-        num_buckets = len(all_buckets)
-
-        for bucket in all_buckets:
-            bucket_df = claimed_df[claimed_df["15min_bucket"] == bucket]
-            if not bucket_df.empty:
-                # Group by user within this time bucket
-                user_gpu_counts = bucket_df.groupby("RemoteOwner")["AssignedGPUs"].nunique()
-                for user, gpu_count in user_gpu_counts.items():
-                    if pd.isna(user) or user == "" or user is None:
-                        user = "Unknown"
-                    if user not in user_bucket_totals:
-                        user_bucket_totals[user] = 0
-                    user_bucket_totals[user] += gpu_count
-
-        # Convert totals to averages, then multiply by actual time duration
-        for user, total_gpus in user_bucket_totals.items():
-            avg_gpus = total_gpus / num_buckets if num_buckets > 0 else 0
-            gpu_hours = avg_gpus * actual_duration_hours
-
-            if user not in user_stats:
-                user_stats[user] = {"Backfill-ResearcherOwned": 0, "Backfill-CHTCOwned": 0}
-            user_stats[user][slot_type] = gpu_hours
-
-    # Calculate final statistics
-    final_stats = {}
-    for user, slot_data in user_stats.items():
-        total_gpu_hours = sum(gpu_hours for gpu_hours in slot_data.values())
-        if total_gpu_hours > 0:
-            final_stats[user] = {"total_gpu_hours": total_gpu_hours, "slot_breakdown": {}}
-            # Add breakdown by slot type (only include non-zero usage)
-            for slot_type, gpu_hours in slot_data.items():
-                if gpu_hours > 0:
-                    final_stats[user]["slot_breakdown"][slot_type] = {
-                        "gpu_hours": gpu_hours,
-                        "percentage": (gpu_hours / total_gpu_hours) * 100,
-                    }
-
-    return final_stats
-
-
-def calculate_unique_cluster_totals_from_raw_data(df: pd.DataFrame, host: str = "") -> dict:
-    """
-    Calculate cluster totals from raw data without double-counting GPUs across categories.
-
-    The issue is that GPUs can appear in both Priority and Backfill categories
-    (e.g., when a prioritized GPU is idle, it's available for both prioritized and backfill jobs).
-    For the TOTAL row, we want to count each unique GPU only once.
-
-    This function goes back to the raw data to count unique AssignedGPUs.
-
-    Args:
-        df: Raw DataFrame with GPU state data
-        host: Optional host filter
-
-    Returns:
-        Dictionary with unique 'claimed' and 'total' counts
-    """
-    # Create 15-minute time buckets like in the main calculation
-    df = df.copy()
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
-    df["15min_bucket"] = df["timestamp"].dt.floor("15min")
-
-    total_claimed_across_intervals = 0
-    total_available_across_intervals = 0
-    num_intervals = 0
-
-    # For each 15-minute interval, count unique GPUs across all categories
-    for bucket in sorted(df["15min_bucket"].unique()):
-        bucket_df = df[df["15min_bucket"] == bucket]
-
-        if bucket_df.empty:
-            continue
-
-        # Get all unique GPUs across all categories (Priority, Shared, and Backfill)
-        # Some GPUs may only appear in Backfill category (backfill-only GPUs)
-        all_claimed_gpus = set()
-        all_available_gpus = set()
-
-        # Collect from all three categories to ensure we don't miss backfill-only GPUs
-        for utilization_type in UTILIZATION_TYPES:
-            claimed_df = filter_df(bucket_df, utilization_type, "Claimed", host)
-            unclaimed_df = filter_df(bucket_df, utilization_type, "Unclaimed", host)
-
-            # Add unique GPUs from this category
-            claimed_gpus = set(claimed_df["AssignedGPUs"].dropna().unique())
-            unclaimed_gpus = set(unclaimed_df["AssignedGPUs"].dropna().unique())
-
-            all_claimed_gpus.update(claimed_gpus)
-            all_available_gpus.update(claimed_gpus)  # claimed GPUs are part of available
-            all_available_gpus.update(unclaimed_gpus)
-
-        total_claimed_across_intervals += len(all_claimed_gpus)
-        total_available_across_intervals += len(all_available_gpus)
-        num_intervals += 1
-
-    # Calculate averages
-    avg_claimed = total_claimed_across_intervals / num_intervals if num_intervals > 0 else 0
-    avg_available = total_available_across_intervals / num_intervals if num_intervals > 0 else 0
-
-    return {"claimed": avg_claimed, "total": avg_available}
-
-
-def calculate_machines_with_zero_active_gpus(
-    df: pd.DataFrame, host: str = "", include_all_devices: bool = True
-) -> dict:
-    """
-    Calculate machines that had ZERO active (claimed) GPUs across the entire time span.
-
-    This identifies machines that had GPUs available but never had any claimed during
-    the analysis period, which may indicate underutilized or problematic hosts.
-
-    Args:
-        df: Raw DataFrame with GPU state data
-        host: Optional host filter
-        include_all_devices: Whether to include all device types or filter out older ones
-
-    Returns:
-        Dictionary with machine information for hosts with zero claimed GPUs:
-        {
-            "machines": [
-                {
-                    "machine": str,
-                    "gpu_model": str,
-                    "total_gpus": int,
-                    "total_observations": int,
-                    "prioritized_projects": set
-                },
-                ...
-            ],
-            "summary": {
-                "total_machines": int,
-                "total_gpus_idle": int
-            }
-        }
-    """
-    # Ensure timestamp is datetime and create 15-minute buckets for consistency
-    df = df.copy()
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
-
-    # Apply host exclusions if configured (respects masked_hosts.yaml)
-    if gpu_utils.HOST_EXCLUSIONS:
-        for excluded_host in gpu_utils.HOST_EXCLUSIONS.keys():
-            df = df[~df["Machine"].str.contains(excluded_host, case=False, na=False)]
-
-    # Apply host filter if specified
-    if host:
-        df = df[df["Machine"] == host]
-
-    # Track per machine: total GPUs seen, claimed GPUs seen, device name, prioritized projects
-    machine_stats = {}
-
-    for machine in df["Machine"].unique():
-        machine_df = df[df["Machine"] == machine]
-
-        # Separate primary slots from backfill slots (use .copy() to avoid SettingWithCopyWarning)
-        primary_df = machine_df[~machine_df["Name"].str.contains("backfill", case=False, na=False)].copy()
-        backfill_df = machine_df[machine_df["Name"].str.contains("backfill", case=False, na=False)].copy()
-
-        # Get all unique GPUs on this machine (primary slots)
-        all_gpus = set(primary_df["AssignedGPUs"].dropna().unique())
-
-        # Get claimed GPUs on this machine (primary slots)
-        claimed_df = primary_df[primary_df["State"] == "Claimed"]
-        claimed_gpus = set(claimed_df["AssignedGPUs"].dropna().unique())
-
-        # Calculate average backfill slots in use across 15-minute intervals
-        if not backfill_df.empty:
-            backfill_df["15min_bucket"] = backfill_df["timestamp"].dt.floor("15min")
-            total_backfill_claimed = 0
-            num_intervals = 0
-
-            for bucket in sorted(backfill_df["15min_bucket"].unique()):
-                bucket_df = backfill_df[backfill_df["15min_bucket"] == bucket]
-                claimed_backfill = bucket_df[bucket_df["State"] == "Claimed"]
-                total_backfill_claimed += len(claimed_backfill["AssignedGPUs"].dropna().unique())
-                num_intervals += 1
-
-            avg_backfill = total_backfill_claimed / num_intervals if num_intervals > 0 else 0
-        else:
-            avg_backfill = 0
-
-        # Get GPU device name (most common one)
-        gpu_models = machine_df["GPUs_DeviceName"].value_counts()
-        gpu_model = gpu_models.index[0] if len(gpu_models) > 0 else "Unknown"
-
-        # Get prioritized projects
-        prioritized_projects = set()
-        for proj in machine_df["PrioritizedProjects"].dropna().unique():
-            if proj.strip():
-                prioritized_projects.add(proj.strip())
-
-        machine_stats[machine] = {
-            "all_gpus": all_gpus,
-            "claimed_gpus": claimed_gpus,
-            "gpu_model": gpu_model,
-            "total_observations": len(machine_df),
-            "prioritized_projects": prioritized_projects,
-            "avg_backfill_claimed": avg_backfill,
-        }
-
-    # Find machines with ZERO claimed GPUs
-    machines_with_zero_active = []
-    total_gpus_idle = 0
-
-    for machine, stats in machine_stats.items():
-        if len(stats["claimed_gpus"]) == 0 and len(stats["all_gpus"]) > 0:
-            # Skip old/uncommon GPU types for cleaner output (unless requested to include all)
-            gpu_model = stats["gpu_model"]
-            if not include_all_devices and any(
-                old_gpu in gpu_model for old_gpu in ["GTX 1080", "P100", "Quadro", "A30", "A40"]
-            ):
-                continue
-
-            # This machine had GPUs but none were ever claimed
-            machines_with_zero_active.append(
-                {
-                    "machine": machine,
-                    "gpu_model": gpu_model,
-                    "total_gpus": len(stats["all_gpus"]),
-                    "total_observations": stats["total_observations"],
-                    "prioritized_projects": stats["prioritized_projects"],
-                    "avg_backfill_claimed": stats["avg_backfill_claimed"],
-                }
-            )
-            total_gpus_idle += len(stats["all_gpus"])
-
-    # Sort by machine name
-    machines_with_zero_active.sort(key=lambda x: x["machine"])
-
-    return {
-        "machines": machines_with_zero_active,
-        "summary": {
-            "total_machines": len(machines_with_zero_active),
-            "total_gpus_idle": total_gpus_idle,
-        },
-    }
-
-
-def calculate_monthly_summary(data_dir: str, end_time: datetime.datetime | None = None) -> dict:
-    """
-    Calculate complete monthly GPU usage summary for the previous month.
-
-    Args:
-        data_dir: Directory containing gpu_state Parquet files
-        end_time: Optional end time (defaults to latest data)
-
-    Returns:
-        Dictionary containing monthly usage statistics
-    """
-    import calendar
-
-    if end_time is None:
-        end_time = get_latest_timestamp(data_dir)
-        if end_time is None:
-            end_time = datetime.datetime.now()
-
-    # Calculate previous month range
-    current_month = end_time.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    prev_month_end = current_month - datetime.timedelta(seconds=1)
-    prev_month_start = prev_month_end.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-
-    # Calculate total hours in the previous month
-    days_in_month = calendar.monthrange(prev_month_start.year, prev_month_start.month)[1]
-    total_hours = days_in_month * 24
-
-    print(f"Calculating monthly summary for {prev_month_start.strftime('%B %Y')}")
-    print(f"Period: {prev_month_start} to {prev_month_end}")
-    print(f"Total hours in month: {total_hours}")
-
-    # Get data for the entire previous month
-    df = get_time_filtered_data(data_dir, total_hours, prev_month_end + datetime.timedelta(seconds=1))
-
-    if df.empty:
-        return {
-            "error": f"No data found for {prev_month_start.strftime('%B %Y')}",
-            "month": prev_month_start.strftime("%B %Y"),
-            "start_date": prev_month_start,
-            "end_date": prev_month_end,
-            "total_hours": total_hours,
-        }
-
-    # Calculate statistics for the month
-    device_stats = calculate_allocation_usage_by_device_enhanced(df, "", False)  # All devices, no host filter
-    memory_stats = calculate_allocation_usage_by_memory(df, "", False)  # All devices, no host filter
-    h200_stats = calculate_h200_user_breakdown(df, "", total_hours)
-
-    return {
-        "month": prev_month_start.strftime("%B %Y"),
-        "start_date": prev_month_start,
-        "end_date": prev_month_end,
-        "total_hours": total_hours,
-        "device_stats": device_stats,
-        "memory_stats": memory_stats,
-        "h200_user_stats": h200_stats,
-        "data_coverage": {
-            "start_time": df["timestamp"].min(),
-            "end_time": df["timestamp"].max(),
-            "total_records": len(df),
-            "unique_intervals": len(df["15min_bucket"].unique()) if "15min_bucket" in df.columns else 0,
-        },
-    }
 
 
 def get_gpu_models_at_time(data_dir: str, target_time: datetime.datetime, window_minutes: int = 5) -> list:
@@ -1367,224 +1296,4 @@ def analyze_gpu_model_at_time(
         "active_jobs": active_jobs.to_dict("records") if len(active_jobs) > 0 else [],
         "inactive_gpus": inactive_gpus.to_dict("records") if len(inactive_gpus) > 0 else [],
         "raw_data": snapshot_df,
-    }
-
-
-def calculate_prevent_jobs_stats(df: pd.DataFrame) -> dict:
-    """
-    Calculate summary statistics for GPUs with PreventJobsReason set.
-
-    Args:
-        df: Main GPU state DataFrame (full time window)
-
-    Returns:
-        Dictionary with per-host breakdown (including last_seen and whether the reason
-        is still active), reason groupings, and per-class counts: per_class_avg feeds
-        the Real Slots table Prevented (avg.) column. A GPU counts as Prevented only
-        when its representative slot (after duplicate cleanup) is idle with
-        PreventJobsReason set.
-    """
-    _CLASS_NAMES = [
-        "Priority-ResearcherOwned",
-        "Priority-CHTCOwned",
-        "Shared",
-        "Backfill-ResearcherOwned",
-        "Backfill-CHTCOwned",
-    ]
-    _empty = {
-        "has_prevent_jobs": False,
-        "num_hosts": 0,
-        "num_unique_gpus": 0,
-        "per_host": {},
-        "by_reason": {},
-        "per_class_avg": dict.fromkeys(_CLASS_NAMES, 0.0),
-        "per_class_device_avg": {c: {} for c in _CLASS_NAMES},
-        "pj_buckets": 0,
-        "total_buckets": 0,
-    }
-
-    if "PreventJobsReason" not in df.columns:
-        return _empty
-
-    filtered = df[df["PreventJobsReason"].notna() & (df["PreventJobsReason"].astype(str).str.strip() != "")].copy()
-
-    if filtered.empty:
-        return _empty
-
-    by_reason = {}
-    for reason, grp in filtered.groupby("PreventJobsReason"):
-        by_reason[str(reason)] = {
-            "num_hosts": grp["Machine"].nunique(),
-            "num_gpus": grp["AssignedGPUs"].nunique(),
-        }
-
-    df_bucketed = df.copy()
-    df_bucketed["timestamp"] = pd.to_datetime(df_bucketed["timestamp"])
-    df_bucketed["15min_bucket"] = df_bucketed["timestamp"].dt.floor("15min")
-    buckets = df_bucketed["15min_bucket"].unique()
-    num_buckets = len(buckets)
-
-    # Buckets that have any PreventJobsReason data at all (across all machines/classes).
-    # Used to assess data coverage and to decide whether a host's reason is still active.
-    pj_mask = df_bucketed["PreventJobsReason"].notna() & (
-        df_bucketed["PreventJobsReason"].astype(str).str.strip() != ""
-    )
-    pj_rows = df_bucketed[pj_mask]
-    pj_buckets_global = sorted(pj_rows["15min_bucket"].unique())
-    num_pj_buckets = len(pj_buckets_global)
-    last_pj_bucket = pj_buckets_global[-1] if pj_buckets_global else None
-
-    # A host is "active" if its reason is still set in the most recent bucket with PJ
-    # data; otherwise the reason was lifted partway through the window.
-    active_machines = (
-        set(pj_rows.loc[pj_rows["15min_bucket"] == last_pj_bucket, "Machine"]) if last_pj_bucket is not None else set()
-    )
-    per_host = {}
-    for machine, grp in pj_rows.groupby("Machine"):
-        per_host[machine] = {
-            "num_gpus": grp["AssignedGPUs"].nunique(),
-            "reasons": sorted(grp["PreventJobsReason"].dropna().unique().tolist()),
-            "last_seen": grp["timestamp"].max().strftime("%Y-%m-%d %H:%M"),
-            "active": machine in active_machines,
-        }
-
-    per_class_avg: dict[str, float] = {}
-    per_class_device_avg: dict[str, dict[str, float]] = {}
-
-    # PreventJobsReason does not evict running jobs — it only stops new ones, so only
-    # idle GPUs count as Prevented. The duplicate-cleanup ranking inside
-    # filter_df_enhanced resolves multi-slot GPUs: a Claimed slot outranks an idle
-    # prevented one, so a GPU still finishing a job surfaces here as Claimed (or, for
-    # a backfill-slot job, drops out of the primary class) and counts as Allocated.
-    for class_name in _CLASS_NAMES:
-        class_df = filter_df_enhanced(df_bucketed, class_name, "", "")
-        prevented = class_df[
-            class_df["PreventJobsReason"].notna()
-            & (class_df["PreventJobsReason"].astype(str).str.strip() != "")
-            & (class_df["State"] != "Claimed")
-        ]
-        if prevented.empty or num_buckets == 0:
-            per_class_avg[class_name] = 0.0
-            per_class_device_avg[class_name] = {}
-        else:
-            total = sum(prevented[prevented["15min_bucket"] == b]["AssignedGPUs"].nunique() for b in buckets)
-            per_class_avg[class_name] = total / num_buckets
-
-            # Per-device breakdown within this class (used for Flagship/Standard tier split)
-            device_avgs: dict[str, float] = {}
-            for device_type, dev_grp in prevented.groupby("GPUs_DeviceName"):
-                dev_total = sum(dev_grp[dev_grp["15min_bucket"] == b]["AssignedGPUs"].nunique() for b in buckets)
-                if dev_total > 0:
-                    device_avgs[str(device_type)] = dev_total / num_buckets
-            per_class_device_avg[class_name] = device_avgs
-
-    return {
-        "has_prevent_jobs": True,
-        "num_hosts": filtered["Machine"].nunique(),
-        "num_unique_gpus": filtered["AssignedGPUs"].nunique(),
-        "per_host": per_host,
-        "by_reason": by_reason,
-        "per_class_avg": per_class_avg,
-        "per_class_device_avg": per_class_device_avg,
-        "pj_buckets": num_pj_buckets,
-        "total_buckets": num_buckets,
-    }
-
-
-def calculate_draining_stats(df: pd.DataFrame) -> dict:
-    """
-    Calculate summary statistics for drained GPUs.
-
-    Args:
-        df: DataFrame with draining data (Machine, AssignedGPUs, timestamp)
-
-    Returns:
-        Dictionary with draining summary and per-host breakdown
-    """
-    if df.empty:
-        return {
-            "has_draining": False,
-            "num_hosts": 0,
-            "num_unique_gpus": 0,
-            "num_intervals": 0,
-            "total_hours": 0.0,
-            "per_host": {},
-        }
-
-    # Group by machine+GPU and create intervals
-    draining_intervals = []
-    df = df.copy()
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
-
-    for (machine, gpu_id), gpu_df in df.groupby(["Machine", "AssignedGPUs"]):
-        gpu_df = gpu_df.sort_values("timestamp").copy()
-        gpu_df["time_diff"] = gpu_df["timestamp"].diff()
-
-        # Start new interval if gap > 20 minutes
-        gpu_df["new_interval"] = gpu_df["time_diff"] > pd.Timedelta(minutes=20)
-        gpu_df["interval_id"] = gpu_df["new_interval"].cumsum()
-
-        for _interval_id, group in gpu_df.groupby("interval_id"):
-            start = group["timestamp"].min()
-            end = group["timestamp"].max()
-
-            # If single data point, assume 15 min duration
-            if start == end:
-                end = start + pd.Timedelta(minutes=15)
-
-            duration_hours = (end - start).total_seconds() / 3600
-            draining_intervals.append(
-                {
-                    "machine": machine,
-                    "gpu_id": gpu_id,
-                    "start": start,
-                    "end": end,
-                    "duration_hours": duration_hours,
-                }
-            )
-
-    if not draining_intervals:
-        return {
-            "has_draining": False,
-            "num_hosts": 0,
-            "num_unique_gpus": 0,
-            "num_intervals": 0,
-            "total_hours": 0.0,
-            "per_host": {},
-        }
-
-    intervals_df = pd.DataFrame(draining_intervals)
-
-    # Calculate totals
-    unique_hosts = intervals_df["machine"].nunique()
-    unique_gpus = intervals_df["gpu_id"].nunique()
-    total_intervals = len(intervals_df)
-    total_hours = intervals_df["duration_hours"].sum()
-
-    # Per-host breakdown
-    per_host = {}
-    for machine in sorted(intervals_df["machine"].unique()):
-        machine_data = intervals_df[intervals_df["machine"] == machine]
-        host_gpus = machine_data["gpu_id"].unique()
-
-        per_host[machine] = {
-            "num_gpus": len(host_gpus),
-            "num_intervals": len(machine_data),
-            "total_hours": machine_data["duration_hours"].sum(),
-            "gpu_details": {
-                str(gpu_id): {
-                    "num_intervals": len(machine_data[machine_data["gpu_id"] == gpu_id]),
-                    "total_hours": machine_data[machine_data["gpu_id"] == gpu_id]["duration_hours"].sum(),
-                }
-                for gpu_id in sorted(host_gpus)
-            },
-        }
-
-    return {
-        "has_draining": True,
-        "num_hosts": unique_hosts,
-        "num_unique_gpus": unique_gpus,
-        "num_intervals": total_intervals,
-        "total_hours": total_hours,
-        "per_host": per_host,
     }

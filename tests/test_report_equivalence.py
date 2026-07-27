@@ -23,7 +23,7 @@ import polars as pl
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from stats_calculations import calculate_prevent_jobs_stats  # noqa: E402
+from stats_calculations import calculate_prevent_jobs_stats, prepare_frames  # noqa: E402
 from stats_data import get_draining_data, get_time_filtered_data  # noqa: E402
 from stats_reporting import generate_html_report  # noqa: E402
 
@@ -154,34 +154,29 @@ class TestMemoryCategorySortDeterminism:
             assert i_lt < i_eq, f"'<48GB' must render before '48GB' for insertion {order}"
 
 
+def _frames(rows, drop_prevent_jobs_column=False):
+    """Build PreparedFrames from test rows (optionally without the PJ column)."""
+    df = pl.DataFrame(rows).cast(_SCHEMA)
+    if drop_prevent_jobs_column:
+        df = df.drop("PreventJobsReason")
+    return prepare_frames(df.lazy())
+
+
 class TestPreventJobsStats:
     """calculate_prevent_jobs_stats correctly detects and counts blocked GPUs."""
 
     _ts = datetime.datetime(2026, 7, 2, 12, 0, 0)
 
-    def _make_df(self, rows):
-        import pandas as pd
-
-        return pd.DataFrame(rows).astype(
-            {
-                "Name": "object",
-                "AssignedGPUs": "object",
-                "State": "object",
-                "Machine": "object",
-                "PreventJobsReason": "object",
-            }
-        )
-
     def test_detect_prevent_jobs_reason(self):
         """Rows with PreventJobsReason are counted; rows without are excluded."""
-        df = self._make_df(
+        frames = _frames(
             [
                 _row(self._ts, "hostA", "GPU-1", "Claimed", prevent_jobs_reason="GPUHealthy == False"),
                 _row(self._ts, "hostA", "GPU-2", "Claimed", prevent_jobs_reason="GPUHealthy == False"),
                 _row(self._ts, "hostB", "GPU-3", "Unclaimed"),  # no reason → excluded
             ]
         )
-        result = calculate_prevent_jobs_stats(df)
+        result = calculate_prevent_jobs_stats(frames)
         assert result["has_prevent_jobs"] is True
         assert result["num_hosts"] == 1
         assert result["num_unique_gpus"] == 2
@@ -198,8 +193,6 @@ class TestPreventJobsStats:
         (whole-window summary), active flips to False because a later bucket has PJ
         data without it, and per_class_avg reflects the partial-window coverage.
         """
-        import pandas as pd
-
         ts2 = self._ts + datetime.timedelta(minutes=15)
         rows = [
             # bucket 1: both hosts idle + prevented
@@ -209,7 +202,7 @@ class TestPreventJobsStats:
             {**_row(ts2, "hostA", "GPU-A", "Claimed"), "PrioritizedProjects": ""},
             {**_row(ts2, "hostB", "GPU-B", "Unclaimed", prevent_jobs_reason="INF-2"), "PrioritizedProjects": ""},
         ]
-        result = calculate_prevent_jobs_stats(pd.DataFrame(rows))
+        result = calculate_prevent_jobs_stats(_frames(rows))
         assert result["per_host"]["hostA"]["active"] is False
         assert result["per_host"]["hostA"]["last_seen"] == "2026-07-02 12:00"
         assert result["per_host"]["hostB"]["active"] is True
@@ -218,13 +211,13 @@ class TestPreventJobsStats:
 
     def test_empty_string_excluded(self):
         """PreventJobsReason='' is treated the same as absent."""
-        df = self._make_df(
+        frames = _frames(
             [
                 _row(self._ts, "hostA", "GPU-1", "Claimed", prevent_jobs_reason=""),
                 _row(self._ts, "hostA", "GPU-1", "Claimed", prevent_jobs_reason="   "),
             ]
         )
-        result = calculate_prevent_jobs_stats(df)
+        result = calculate_prevent_jobs_stats(frames)
         assert result["has_prevent_jobs"] is False
 
     def test_claimed_gpus_excluded_from_per_class_counts(self):
@@ -235,8 +228,6 @@ class TestPreventJobsStats:
         prevented on its primary slot but Claimed on a backfill slot is busy and
         must also be excluded.
         """
-        import pandas as pd
-
         rows = [
             # Idle prevented GPU on a Shared machine -> counted
             {
@@ -259,8 +250,7 @@ class TestPreventJobsStats:
                 "PrioritizedProjects": "",
             },
         ]
-        df = pd.DataFrame(rows)
-        result = calculate_prevent_jobs_stats(df)
+        result = calculate_prevent_jobs_stats(_frames(rows))
         assert result["per_class_avg"]["Shared"] == 1.0  # only GPU-idle
         # The summary (attribute-is-set) counts still include all three GPUs
         assert result["num_unique_gpus"] == 3
@@ -271,8 +261,6 @@ class TestPreventJobsStats:
         The dedup ranking must keep the prevented primary row over an idle backfill
         row; only a Claimed backfill slot may displace it.
         """
-        import pandas as pd
-
         rows = [
             {
                 **_row(self._ts, "hostA", "GPU-1", "Unclaimed", prevent_jobs_reason="INF-1"),
@@ -284,16 +272,16 @@ class TestPreventJobsStats:
                 "PrioritizedProjects": "",
             },
         ]
-        df = pd.DataFrame(rows)
-        result = calculate_prevent_jobs_stats(df)
+        result = calculate_prevent_jobs_stats(_frames(rows))
         assert result["per_class_avg"]["Shared"] == 1.0
 
     def test_missing_column_returns_false(self):
-        """DataFrame without PreventJobsReason column returns has_prevent_jobs=False."""
-        import pandas as pd
-
-        df = pd.DataFrame([{"AssignedGPUs": "GPU-1", "Machine": "hostA", "State": "Claimed"}])
-        result = calculate_prevent_jobs_stats(df)
+        """Data without a PreventJobsReason column returns has_prevent_jobs=False."""
+        frames = _frames(
+            [_row(self._ts, "hostA", "GPU-1", "Claimed")],
+            drop_prevent_jobs_column=True,
+        )
+        result = calculate_prevent_jobs_stats(frames)
         assert result["has_prevent_jobs"] is False
         assert result["num_hosts"] == 0
 
