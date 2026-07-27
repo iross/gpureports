@@ -7,6 +7,7 @@ Consolidates duplicate functions from across the codebase.
 """
 
 import datetime
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -158,9 +159,9 @@ def filter_df(df: pd.DataFrame, utilization: str = "", state: str = "", host: st
     # Apply host exclusions if configured
     if HOST_EXCLUSIONS:
         original_count = len(df)
-        # Filter out excluded hosts
-        for excluded_host in HOST_EXCLUSIONS.keys():
-            df = df[~df["Machine"].str.contains(excluded_host, case=False, na=False)]
+        # Filter out excluded hosts in a single scan
+        excluded_pattern = "|".join(re.escape(excluded_host) for excluded_host in HOST_EXCLUSIONS)
+        df = df[~df["Machine"].str.contains(excluded_pattern, case=False, na=False)]
 
         filtered_count = len(df)
         if filtered_count < original_count:
@@ -371,9 +372,9 @@ def filter_df_enhanced(df: pd.DataFrame, utilization: str = "", state: str = "",
     # Apply host exclusions if configured
     if HOST_EXCLUSIONS:
         original_count = len(df)
-        # Filter out excluded hosts
-        for excluded_host in HOST_EXCLUSIONS.keys():
-            df = df[~df["Machine"].str.contains(excluded_host, case=False, na=False)]
+        # Filter out excluded hosts in a single scan
+        excluded_pattern = "|".join(re.escape(excluded_host) for excluded_host in HOST_EXCLUSIONS)
+        df = df[~df["Machine"].str.contains(excluded_pattern, case=False, na=False)]
 
         filtered_count = len(df)
         if filtered_count < original_count:
