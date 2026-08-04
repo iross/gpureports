@@ -8,7 +8,6 @@ A FastAPI web dashboard for real-time GPU state monitoring. Reads the same
 ## What it does (when finished)
 
 - Heatmap of GPU utilization across the cluster over a selectable time window
-- Per-slot job table for open capacity slots
 - GPU counts by category over time
 
 ## How to run locally

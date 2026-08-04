@@ -47,7 +47,6 @@ const REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 
 let heatmapData = null;
 let countsData = null;
-let jobsData = null;
 let usersData = null;
 let filteredMachines = [];
 let currentRows = [];
@@ -77,20 +76,17 @@ async function fetchAll(params) {
     currentParams = { ...params };
 
     try {
-        const [hRes, cRes, jRes, uRes] = await Promise.all([
+        const [hRes, cRes, uRes] = await Promise.all([
             fetch(buildUrl('/api/heatmap', params)),
             fetch(buildUrl('/api/counts', params)),
-            fetch('/api/jobs'),
             fetch(buildUrl('/api/opencap_users', params)),
         ]);
         if (!hRes.ok) throw new Error(`heatmap HTTP ${hRes.status}`);
         if (!cRes.ok) throw new Error(`counts HTTP ${cRes.status}`);
-        if (!jRes.ok) throw new Error(`jobs HTTP ${jRes.status}`);
         if (!uRes.ok) throw new Error(`users HTTP ${uRes.status}`);
 
         heatmapData = await hRes.json();
         countsData  = await cRes.json();
-        jobsData    = await jRes.json();
         usersData   = await uRes.json();
 
         applyFilter();
@@ -106,7 +102,6 @@ async function fetchAll(params) {
     }
     renderCharts();
     renderUsersChart();
-    renderJobs();
 }
 
 // --- Status bar ---
@@ -479,48 +474,6 @@ function renderUsersChart() {
     });
 }
 
-// --- Jobs tab ---
-
-function renderJobs() {
-    if (!jobsData) return;
-    const jobs    = jobsData.jobs || [];
-    const criteria = jobsData.criteria || {};
-    const tbody   = document.getElementById('jobsBody');
-    const empty   = document.getElementById('jobsEmpty');
-    const subtitle = document.getElementById('jobsSubtitle');
-
-    const patterns = (criteria.cmd_patterns || []).join(', ') || '(none)';
-    const minHours = criteria.min_runtime_hours != null ? criteria.min_runtime_hours : '?';
-    subtitle.textContent =
-        `Claimed open-capacity slots — suspicious when cmd matches [${patterns}] and runtime ≥ ${minHours}h`;
-
-    tbody.innerHTML = '';
-
-    if (jobs.length === 0) {
-        empty.classList.remove('hidden');
-        document.getElementById('jobsTable').classList.add('hidden');
-        return;
-    }
-
-    empty.classList.add('hidden');
-    document.getElementById('jobsTable').classList.remove('hidden');
-
-    jobs.forEach(j => {
-        const tr = document.createElement('tr');
-        if (j.suspicious) tr.classList.add('job-suspicious');
-        const runtime = j.runtime_hours != null ? j.runtime_hours.toFixed(1) : '—';
-        tr.innerHTML =
-            `<td>${j.machine}</td>` +
-            `<td>${j.gpu_id}</td>` +
-            `<td>${j.Owner || '—'}</td>` +
-            `<td class="job-cmd">${j.Cmd || '—'}</td>` +
-            `<td class="job-args">${j.Args || ''}</td>` +
-            `<td>${runtime}</td>` +
-            `<td class="job-id">${j.GlobalJobId || '—'}</td>`;
-        tbody.appendChild(tr);
-    });
-}
-
 // --- Tab management ---
 
 function switchTab(tab) {
@@ -531,7 +484,6 @@ function switchTab(tab) {
     document.getElementById('heatmapControls').classList.toggle('hidden', tab !== 'heatmap');
     if (tab === 'charts') renderCharts();
     if (tab === 'users')  renderUsersChart();
-    if (tab === 'jobs')   renderJobs();
 }
 
 // --- Auto-refresh ---
