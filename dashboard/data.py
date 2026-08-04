@@ -18,6 +18,7 @@ from gpu_utils_polars import (
 from gpu_utils_polars import (
     get_required_parquet_files as get_required_databases,
 )
+from stats_data import GPU_STATE_SCHEMA, SCAN_CAST_OPTIONS
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +110,9 @@ def _query_dbs(
         try:
             if fmt == "parquet":
                 df = (
-                    pl.scan_parquet(path)
+                    pl.scan_parquet(
+                        path, schema=GPU_STATE_SCHEMA, missing_columns="insert", cast_options=SCAN_CAST_OPTIONS
+                    )
                     .filter((pl.col("timestamp") >= buffered_start) & (pl.col("timestamp") <= end))
                     .select(COLUMNS)
                     .collect()
@@ -455,7 +458,9 @@ def get_opencap_users_data(
         try:
             if fmt == "parquet":
                 df = (
-                    pl.scan_parquet(path)
+                    pl.scan_parquet(
+                        path, schema=GPU_STATE_SCHEMA, missing_columns="insert", cast_options=SCAN_CAST_OPTIONS
+                    )
                     .filter(
                         (pl.col("timestamp") >= buffered_start)
                         & (pl.col("timestamp") <= end)
