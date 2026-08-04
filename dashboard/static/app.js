@@ -1,16 +1,29 @@
 // GPU State Dashboard — Canvas heatmap + Chart.js count charts
 
-const STATE_LABELS = {
-    0: 'Idle, prioritized', 1: 'Idle, open capacity', 2: 'Busy, prioritized',
-    3: 'Busy, open capacity', 4: 'Busy, backfill', 5: 'N/A', 6: 'Idle, backfill'
-};
-const STATE_COLORS = ['#ff4444', '#ff8800', '#44ff44', '#00cc99', '#4488ff', '#cccccc', '#ff8800'];
+// State labels/colors come from the backend's /api/heatmap response
+// (state_map/state_colors) via stateLabel()/stateColor() below, so the two
+// copies can't drift apart the way a second hardcoded copy would.
+function stateLabel(code) {
+    const key = heatmapData && heatmapData.state_map ? heatmapData.state_map[code] : null;
+    if (!key) return 'N/A';
+    if (key === 'na') return 'N/A';
+    const [status, ...rest] = key.split('_');
+    const label = rest.map(w => w === 'shared' ? 'open capacity' : w).join(' ');
+    return status.charAt(0).toUpperCase() + status.slice(1) + ', ' + label;
+}
+
+function stateColor(code) {
+    if (heatmapData && heatmapData.state_colors && heatmapData.state_colors[code]) {
+        return heatmapData.state_colors[code];
+    }
+    return '#cccccc';
+}
 
 // State codes belonging to each category (for the heatmap category filter)
 const CATEGORY_CODES = {
     prioritized:  new Set([0, 2]),
     open_capacity: new Set([1, 3]),
-    backfill:     new Set([4]),
+    backfill:     new Set([4, 6]),
 };
 
 // Colors for the Charts tab (RGB components for rgba())
@@ -83,6 +96,7 @@ async function fetchAll(params) {
         applyFilter();
         render();
         updateStatus();
+        renderWarnings();
     } catch (err) {
         console.error('Fetch error:', err);
         document.getElementById('statusText').textContent = 'Error loading data';
@@ -107,6 +121,23 @@ function updateStatus() {
     const range = heatmapData.time_buckets[0].replace('T', ' ') + ' \u2013 ' +
                   heatmapData.time_buckets[heatmapData.time_buckets.length - 1].replace('T', ' ');
     document.getElementById('statusText').textContent = `${nMachines} machines, ${nGpus} GPUs | ${range}`;
+}
+
+function renderWarnings() {
+    const banner = document.getElementById('warningsBanner');
+    const warnings = [
+        ...(heatmapData && heatmapData.warnings ? heatmapData.warnings : []),
+        ...(countsData && countsData.warnings ? countsData.warnings : []),
+        ...(usersData && usersData.warnings ? usersData.warnings : []),
+    ];
+    const unique = [...new Set(warnings)];
+    if (unique.length === 0) {
+        banner.classList.add('hidden');
+        banner.innerHTML = '';
+        return;
+    }
+    banner.innerHTML = `⚠️ Some data could not be loaded and the range below may be incomplete: ${unique.join('; ')}`;
+    banner.classList.remove('hidden');
 }
 
 // --- Filtering ---
@@ -221,7 +252,7 @@ function renderHeatmap() {
     currentRows.forEach((row, ri) => {
         const y = ri * ROW_HEIGHT;
         row.states.forEach((state, ci) => {
-            ctx.fillStyle = STATE_COLORS[state] || '#cccccc';
+            ctx.fillStyle = stateColor(state);
             ctx.fillRect(ci * COL_WIDTH, y, COL_WIDTH - 0.5, ROW_HEIGHT - 0.5);
         });
         if (row.isFirst && ri > 0) {
@@ -231,12 +262,22 @@ function renderHeatmap() {
     });
 }
 
+function renderLegend() {
+    const legend = document.getElementById('legend');
+    if (!heatmapData || !heatmapData.state_map) return;
+    const codes = Object.keys(heatmapData.state_map).map(Number).sort((a, b) => a - b);
+    legend.innerHTML = codes.map(code =>
+        `<div class="legend-item"><div class="legend-swatch" style="background:${stateColor(code)}"></div>${stateLabel(code)}</div>`
+    ).join('');
+}
+
 function render() {
     if (!heatmapData) return;
     applyFilter();
     renderLabels();
     renderTimeHeader();
     renderHeatmap();
+    renderLegend();
     setupTooltip();
     syncScroll();
 }
@@ -276,7 +317,7 @@ function setupTooltip() {
                 `<div class="tt-gpu">${r.gpu_id}</div>` +
                 `<div class="tt-device">${r.device_name}</div>` +
                 `<div class="tt-time">${heatmapData.time_buckets[col].replace('T', ' ')}</div>` +
-                `<div class="tt-state" style="color:${STATE_COLORS[state]}">${STATE_LABELS[state]}</div>`;
+                `<div class="tt-state" style="color:${stateColor(state)}">${stateLabel(state)}</div>`;
             tooltip.style.display = 'block';
             let tx = e.clientX + 14;
             let ty = e.clientY + 14;

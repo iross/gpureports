@@ -5,6 +5,7 @@ structured dicts matching the API response shape.
 """
 
 import datetime
+import logging
 import re
 import sqlite3
 from pathlib import Path
@@ -18,6 +19,8 @@ from gpu_utils_polars import (
 from gpu_utils_polars import (
     get_required_parquet_files as get_required_databases,
 )
+
+logger = logging.getLogger(__name__)
 
 # State codes used in the API response (compact integer encoding)
 STATE_CODES = {
@@ -72,6 +75,11 @@ def _load_masked_hosts(base_dir: str = ".") -> set[str]:
     return set()
 
 
+def _file_month_label(path: str) -> str:
+    """Extract the YYYY-MM month label from a gpu_state_<month>.<ext> filename."""
+    return Path(path).stem.removeprefix("gpu_state_")
+
+
 def _read_sqlite(path: str, query: str) -> pl.DataFrame:
     """Run a query against a SQLite file and return the result as a Polars DataFrame."""
     conn = sqlite3.connect(str(Path(path).resolve()))
@@ -81,15 +89,20 @@ def _read_sqlite(path: str, query: str) -> pl.DataFrame:
         conn.close()
 
 
-def _query_dbs(file_specs: list[tuple[str, str]], start: datetime.datetime, end: datetime.datetime) -> pl.DataFrame:
+def _query_dbs(
+    file_specs: list[tuple[str, str]], start: datetime.datetime, end: datetime.datetime
+) -> tuple[pl.DataFrame, list[str]]:
     """Load data from Parquet and/or SQLite files and combine into one Polars DataFrame.
 
     file_specs is a list of (path, format) tuples where format is "parquet" or "sqlite".
+
+    Returns (combined DataFrame, list of warning messages for files that failed to load).
     """
     if not file_specs:
-        return pl.DataFrame()
+        return pl.DataFrame(), []
 
     frames = []
+    warnings: list[str] = []
     buffered_start = start - datetime.timedelta(seconds=1)
     col_select = ", ".join(f'"{c}"' for c in COLUMNS)
 
@@ -112,10 +125,11 @@ def _query_dbs(file_specs: list[tuple[str, str]], start: datetime.datetime, end:
             if df.height > 0:
                 frames.append(df)
         except Exception as e:
-            print(f"Warning: Could not load {path}: {e}")
+            logger.warning("Could not load %s: %s", path, e)
+            warnings.append(f"Failed to load data for {_file_month_label(path)}: {e}")
 
     if not frames:
-        return pl.DataFrame()
+        return pl.DataFrame(), warnings
 
     combined = pl.concat(frames, how="diagonal_relaxed")
     # Parquet yields Datetime; SQLite TEXT yields Utf8 — normalise to Datetime.
@@ -124,7 +138,7 @@ def _query_dbs(file_specs: list[tuple[str, str]], start: datetime.datetime, end:
     elif combined.schema["timestamp"] != pl.Datetime("us"):
         combined = combined.with_columns(pl.col("timestamp").cast(pl.Datetime("us")))
     combined = combined.filter((pl.col("timestamp") >= start) & (pl.col("timestamp") <= end))
-    return combined
+    return combined, warnings
 
 
 def _classify_states(df: pl.DataFrame) -> pl.DataFrame:
@@ -193,10 +207,10 @@ def _prepare_bucketed(
     bucket_minutes: int,
     base_dir: str,
     hours: int = 24,
-) -> tuple[pl.DataFrame, list, list[str]] | None:
+) -> tuple[pl.DataFrame, list, list[str], list[str]] | None:
     """Load, mask, dedup, bucket, and classify data.
 
-    Returns (df, all_buckets, bucket_strs) or None if no data is available.
+    Returns (df, all_buckets, bucket_strs, warnings) or None if no data is available.
     """
     if end is None:
         end = get_latest_timestamp_from_most_recent_db(base_dir)
@@ -209,9 +223,9 @@ def _prepare_bucketed(
     if not db_paths:
         return None
 
-    df = _query_dbs(db_paths, start, end)
+    df, warnings = _query_dbs(db_paths, start, end)
     if df.height == 0:
-        return None
+        return df, [], [], warnings
 
     masked = _load_masked_hosts(base_dir)
     if masked:
@@ -224,7 +238,7 @@ def _prepare_bucketed(
     all_buckets = sorted(df["time_bucket"].unique().to_list())
     bucket_strs = [t.strftime("%Y-%m-%dT%H:%M") for t in all_buckets]
 
-    return df, all_buckets, bucket_strs
+    return df, all_buckets, bucket_strs, warnings
 
 
 def get_heatmap_data(
@@ -253,7 +267,9 @@ def get_heatmap_data(
     if prepared is None:
         return _empty_heatmap_response()
 
-    df, all_buckets, bucket_strs = prepared
+    df, all_buckets, bucket_strs, warnings = prepared
+    if df.height == 0:
+        return _empty_heatmap_response(warnings)
     bucket_index = {t: i for i, t in enumerate(all_buckets)}
 
     # Build machine-grouped structure
@@ -301,6 +317,7 @@ def get_heatmap_data(
         "machines": machines_list,
         "state_map": STATE_MAP,
         "state_colors": STATE_COLORS,
+        "warnings": warnings,
     }
 
 
@@ -342,9 +359,9 @@ def get_counts_data(
     if not db_paths:
         return _empty_counts_response()
 
-    df_raw = _query_dbs(db_paths, start, end)
+    df_raw, warnings = _query_dbs(db_paths, start, end)
     if df_raw.height == 0:
-        return _empty_counts_response()
+        return _empty_counts_response(warnings)
 
     masked = _load_masked_hosts(base_dir)
     if masked:
@@ -392,15 +409,16 @@ def get_counts_data(
         "backfill": _count_series(backfill_df, pl.lit(True), is_claimed),
     }
 
-    return {"buckets": bucket_strs, "series": series}
+    return {"buckets": bucket_strs, "series": series, "warnings": warnings}
 
 
-def _empty_heatmap_response() -> dict:
+def _empty_heatmap_response(warnings: list[str] | None = None) -> dict:
     return {
         "time_buckets": [],
         "machines": [],
         "state_map": STATE_MAP,
         "state_colors": STATE_COLORS,
+        "warnings": warnings or [],
     }
 
 
@@ -420,19 +438,20 @@ def get_opencap_users_data(
     if end is None:
         end = get_latest_timestamp_from_most_recent_db(base_dir)
         if end is None:
-            return {"buckets": [], "series": {}}
+            return {"buckets": [], "series": {}, "warnings": []}
     if start is None:
         start = end - datetime.timedelta(hours=hours)
 
     db_paths = get_required_databases(start, end, base_dir)
     if not db_paths:
-        return {"buckets": [], "series": {}}
+        return {"buckets": [], "series": {}, "warnings": []}
 
     opencap_cols = ["Name", "AssignedGPUs", "State", "PrioritizedProjects", "Machine", "RemoteOwner", "timestamp"]
     col_select = ", ".join(f'"{c}"' for c in opencap_cols)
     buffered_start = start - datetime.timedelta(seconds=1)
 
     frames = []
+    warnings: list[str] = []
     for path, fmt in db_paths:
         try:
             if fmt == "parquet":
@@ -458,10 +477,11 @@ def get_opencap_users_data(
             if df.height > 0:
                 frames.append(df)
         except Exception as e:
-            print(f"Warning: could not load {path}: {e}")
+            logger.warning("Could not load %s: %s", path, e)
+            warnings.append(f"Failed to load data for {_file_month_label(path)}: {e}")
 
     if not frames:
-        return {"buckets": [], "series": {}}
+        return {"buckets": [], "series": {}, "warnings": warnings}
 
     df = pl.concat(frames, how="diagonal_relaxed")
     df = df.with_columns(pl.col("timestamp").cast(pl.Datetime("us")))
@@ -473,7 +493,7 @@ def get_opencap_users_data(
             df = df.filter(~pl.col("Machine").str.contains(host))
 
     if df.height == 0:
-        return {"buckets": [], "series": {}}
+        return {"buckets": [], "series": {}, "warnings": warnings}
 
     # Dedup: one row per (timestamp, GPU), prefer claimed primary over backfill.
     # Must dedup before filtering so a GPU isn't double-counted when it appears
@@ -501,7 +521,7 @@ def get_opencap_users_data(
     df = df.filter(is_claimed & ~is_backfill & ~has_priority & has_owner)
 
     if df.height == 0:
-        return {"buckets": [], "series": {}}
+        return {"buckets": [], "series": {}, "warnings": warnings}
 
     # Count distinct GPUs per (timestamp, owner) snapshot, then take max within bucket.
     # Using max (not sum) matches the script: "peak snapshot within the window".
@@ -534,10 +554,10 @@ def get_opencap_users_data(
         if bi is not None:
             series[label][bi] = row["gpu_count"]
 
-    return {"buckets": bucket_strs, "series": series}
+    return {"buckets": bucket_strs, "series": series, "warnings": warnings}
 
 
-def _empty_counts_response() -> dict:
+def _empty_counts_response(warnings: list[str] | None = None) -> dict:
     return {
         "buckets": [],
         "series": {
@@ -545,6 +565,7 @@ def _empty_counts_response() -> dict:
             "open_capacity": {"total": [], "claimed": []},
             "backfill": {"total": [], "claimed": []},
         },
+        "warnings": warnings or [],
     }
 
 

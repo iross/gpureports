@@ -322,8 +322,9 @@ class TestDashboardQueryDbs:
 
         start = datetime.datetime(2026, 4, 10, 0, 0, 0)
         end = datetime.datetime(2026, 4, 10, 23, 59, 59)
-        result = dash_data._query_dbs([(str(tmp_path / "gpu_state_2026-04.parquet"), "parquet")], start, end)
+        result, warnings = dash_data._query_dbs([(str(tmp_path / "gpu_state_2026-04.parquet"), "parquet")], start, end)
         assert result.height == 6
+        assert warnings == []
 
     def test_sqlite_fallback(self, tmp_path):
         import data as dash_data
@@ -334,8 +335,9 @@ class TestDashboardQueryDbs:
 
         start = datetime.datetime(2026, 4, 10, 0, 0, 0)
         end = datetime.datetime(2026, 4, 10, 23, 59, 59)
-        result = dash_data._query_dbs([(str(tmp_path / "gpu_state_2026-04.db"), "sqlite")], start, end)
+        result, warnings = dash_data._query_dbs([(str(tmp_path / "gpu_state_2026-04.db"), "sqlite")], start, end)
         assert result.height == 4
+        assert warnings == []
 
     def test_filters_by_time_range(self, tmp_path):
         import data as dash_data
@@ -347,13 +349,31 @@ class TestDashboardQueryDbs:
 
         start = datetime.datetime(2026, 4, 10, 0, 0, 0)
         end = datetime.datetime(2026, 4, 10, 23, 59, 59)
-        result = dash_data._query_dbs([(str(tmp_path / "gpu_state_2026-04.parquet"), "parquet")], start, end)
+        result, warnings = dash_data._query_dbs([(str(tmp_path / "gpu_state_2026-04.parquet"), "parquet")], start, end)
         assert result.height == 3
+        assert warnings == []
 
     def test_empty_when_no_files(self, tmp_path):
         import data as dash_data
 
         start = datetime.datetime(2026, 4, 10, 0, 0, 0)
         end = datetime.datetime(2026, 4, 10, 23, 59, 59)
-        result = dash_data._query_dbs([], start, end)
+        result, warnings = dash_data._query_dbs([], start, end)
         assert result.height == 0
+        assert warnings == []
+
+    def test_warns_and_skips_unreadable_file(self, tmp_path):
+        import data as dash_data
+
+        ts = datetime.datetime(2026, 4, 10, 12, 0, 0)
+        rows = _make_rows(ts, n=3)
+        good = self._make_parquet(tmp_path, "2026-04", rows)
+        bad = tmp_path / "gpu_state_2026-05.parquet"
+        bad.write_bytes(b"not a real parquet file")
+
+        start = datetime.datetime(2026, 4, 1, 0, 0, 0)
+        end = datetime.datetime(2026, 5, 31, 23, 59, 59)
+        result, warnings = dash_data._query_dbs([(str(good), "parquet"), (str(bad), "parquet")], start, end)
+        assert result.height == 3
+        assert len(warnings) == 1
+        assert "2026-05" in warnings[0]

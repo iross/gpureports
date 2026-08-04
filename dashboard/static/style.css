@@ -123,6 +123,16 @@ body {
     white-space: nowrap;
 }
 
+/* Warnings banner (shown when an API response reports failed-to-load months) */
+.warnings-banner {
+    background: #4a3a1a;
+    color: #ffcc66;
+    border-bottom: 1px solid #6a5a2a;
+    padding: 6px 16px;
+    font-size: 12px;
+}
+.warnings-banner.hidden { display: none; }
+
 /* Tab content visibility */
 .tab-content.hidden { display: none; }
 
