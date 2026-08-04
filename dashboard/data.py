@@ -18,6 +18,7 @@ from gpu_utils_polars import (
 from gpu_utils_polars import (
     get_required_parquet_files as get_required_databases,
 )
+from stats_calculations import slot_dedup_rank
 from stats_data import GPU_STATE_SCHEMA, SCAN_CAST_OPTIONS
 
 logger = logging.getLogger(__name__)
@@ -59,6 +60,7 @@ COLUMNS = [
     "PrioritizedProjects",
     "Machine",
     "GPUs_DeviceName",
+    "PreventJobsReason",
     "timestamp",
 ]
 
@@ -143,6 +145,16 @@ def _query_dbs(
     return combined, warnings
 
 
+def _rank_inputs() -> tuple[pl.Expr, pl.Expr, pl.Expr]:
+    """(is_bf, state, prev_idle) expressions for slot_dedup_rank, matching how
+    stats_calculations.prepare_frames() derives them from the same raw columns."""
+    is_bf = pl.col("Name").str.contains("backfill").fill_null(False)
+    state = pl.col("State")
+    pj_set = pl.col("PreventJobsReason").is_not_null() & (pl.col("PreventJobsReason").str.strip_chars() != "")
+    prev_idle = pj_set & (state != "Claimed")
+    return is_bf, state, prev_idle
+
+
 def _classify_states(df: pl.DataFrame) -> pl.DataFrame:
     """Classify each row into one of 6 GPU state codes."""
     return df.with_columns(
@@ -180,20 +192,7 @@ def _dedup_and_bucket(df: pl.DataFrame, bucket_minutes: int) -> pl.DataFrame:
     """Floor timestamps to buckets, rank duplicates, keep highest-priority entry."""
     df = df.with_columns(pl.col("timestamp").dt.truncate(f"{bucket_minutes}m").alias("time_bucket"))
 
-    # Rank: claimed+primary(3) > claimed+backfill(2) > unclaimed+primary(1) > unclaimed+backfill(0)
-    is_claimed = pl.col("State").str.to_lowercase() == "claimed"
-    is_backfill = pl.col("Name").str.to_lowercase().str.contains("backfill")
-
-    df = df.with_columns(
-        pl.when(is_claimed & ~is_backfill)
-        .then(pl.lit(3))
-        .when(is_claimed & is_backfill)
-        .then(pl.lit(2))
-        .when(~is_claimed & ~is_backfill)
-        .then(pl.lit(1))
-        .otherwise(pl.lit(0))
-        .alias("_rank")
-    )
+    df = df.with_columns(slot_dedup_rank(*_rank_inputs()).alias("_rank"))
 
     # Sort by rank descending so first row per group wins
     df = df.sort(["time_bucket", "AssignedGPUs", "_rank"], descending=[False, False, True])
@@ -448,7 +447,16 @@ def get_opencap_users_data(
     if not db_paths:
         return {"buckets": [], "series": {}, "warnings": []}
 
-    opencap_cols = ["Name", "AssignedGPUs", "State", "PrioritizedProjects", "Machine", "RemoteOwner", "timestamp"]
+    opencap_cols = [
+        "Name",
+        "AssignedGPUs",
+        "State",
+        "PrioritizedProjects",
+        "Machine",
+        "RemoteOwner",
+        "PreventJobsReason",
+        "timestamp",
+    ]
     col_select = ", ".join(f'"{c}"' for c in opencap_cols)
     buffered_start = start - datetime.timedelta(seconds=1)
 
@@ -499,25 +507,16 @@ def get_opencap_users_data(
     if df.height == 0:
         return {"buckets": [], "series": {}, "warnings": warnings}
 
-    # Dedup: one row per (timestamp, GPU), prefer claimed primary over backfill.
+    # Dedup: one row per (timestamp, GPU), using the canonical cross-pipeline rank.
     # Must dedup before filtering so a GPU isn't double-counted when it appears
     # in both a primary and a backfill slot simultaneously.
-    is_backfill = pl.col("Name").str.to_lowercase().str.contains("backfill")
-    is_claimed = pl.col("State").str.to_lowercase() == "claimed"
-
-    df = df.with_columns(
-        pl.when(is_claimed & ~is_backfill)
-        .then(pl.lit(3))
-        .when(~is_claimed & ~is_backfill)
-        .then(pl.lit(2))
-        .when(is_claimed & is_backfill)
-        .then(pl.lit(1))
-        .otherwise(pl.lit(0))
-        .alias("_rank")
-    )
+    df = df.with_columns(slot_dedup_rank(*_rank_inputs()).alias("_rank"))
     df = df.sort(["timestamp", "AssignedGPUs", "_rank"], descending=[False, False, True])
     df = df.unique(subset=["timestamp", "AssignedGPUs"], keep="first")
     df = df.drop("_rank")
+
+    is_backfill = pl.col("Name").str.to_lowercase().str.contains("backfill")
+    is_claimed = pl.col("State").str.to_lowercase() == "claimed"
 
     # Filter to claimed open-cap slots with a known owner
     has_priority = pl.col("PrioritizedProjects").is_not_null() & (pl.col("PrioritizedProjects") != "")

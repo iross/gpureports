@@ -75,6 +75,44 @@ def _host_exclusion_expr(exclusions: dict) -> pl.Expr:
     return pl.col("Machine").str.contains(f"(?i)({pattern})").fill_null(False)
 
 
+def slot_dedup_rank(is_bf: pl.Expr, state: pl.Expr, prev_idle: pl.Expr) -> pl.Expr:
+    """Canonical rank for picking the winning row when a GPU has multiple concurrent
+    slot rows in the same time bucket (e.g. a primary slot and a backfill slot on the
+    same GPU). Highest rank wins.
+
+    Tiers, highest to lowest: claimed primary; unclaimed primary; primary in another
+    state (e.g. Drained); claimed backfill; primary marked prevented-from-jobs
+    (PreventJobsReason set) that isn't claimed; unclaimed backfill; anything else
+    (backfill in another state).
+
+    Args:
+        is_bf: Whether the row's slot Name identifies it as a backfill slot
+        state: The row's State column
+        prev_idle: Whether the row is a non-claimed primary slot with PreventJobsReason set
+
+    Returns:
+        Integer rank expression (0-6); the highest-ranked row per group should win a
+        dedup by sorting on this and keeping the last (or max) row.
+    """
+    claimed = state == "Claimed"
+    unclaimed = state == "Unclaimed"
+    return (
+        pl.when(~is_bf & claimed)
+        .then(6)
+        .when(~is_bf & prev_idle)
+        .then(2)
+        .when(~is_bf & unclaimed)
+        .then(5)
+        .when(~is_bf)
+        .then(4)
+        .when(is_bf & claimed)
+        .then(3)
+        .when(is_bf & unclaimed)
+        .then(1)
+        .otherwise(0)
+    )
+
+
 def prepare_frames(lf: pl.LazyFrame) -> PreparedFrames:
     """Derive classification columns and collect the shared dedup/backfill frames.
 
@@ -118,24 +156,7 @@ def prepare_frames(lf: pl.LazyFrame) -> PreparedFrames:
     )
 
     is_bf = pl.col("_is_bf")
-    claimed = state == "Claimed"
-    unclaimed = state == "Unclaimed"
-    rank = (
-        pl.when(~is_bf & claimed)
-        .then(6)
-        .when(~is_bf & pl.col("_prev_idle"))
-        .then(2)
-        .when(~is_bf & unclaimed)
-        .then(5)
-        .when(~is_bf)
-        .then(4)
-        .when(is_bf & claimed)
-        .then(3)
-        .when(is_bf & unclaimed)
-        .then(1)
-        .otherwise(0)
-        .alias("_rank")
-    )
+    rank = slot_dedup_rank(is_bf, state, pl.col("_prev_idle")).alias("_rank")
 
     dedup_cols = [
         "State",
