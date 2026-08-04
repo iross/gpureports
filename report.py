@@ -18,8 +18,8 @@ import polars as pl
 from gpu_utils_polars import (
     UTILIZATION_TYPES,
     filter_df,
-    get_latest_timestamp_from_most_recent_db,
-    get_required_databases,
+    get_latest_timestamp_from_most_recent_parquet,
+    get_required_parquet_files,
 )
 
 # Global cache for preprocessed DataFrames
@@ -88,12 +88,12 @@ def get_time_filtered_data(
 ) -> pl.DataFrame:
     """
     Get GPU state data filtered by time range.
-    Automatically handles month boundaries by loading data from multiple database files.
+    Automatically handles month boundaries by loading data from multiple gpu_state files.
 
     Args:
-        db_path: Path to SQLite database (used to determine base directory for multi-db queries)
+        db_path: Path to a gpu_state data file (used to determine base directory for multi-file queries)
         hours_back: Number of hours to look back from end_time
-        end_time: End time for the range (defaults to latest timestamp in primary DB)
+        end_time: End time for the range (defaults to latest timestamp in the most recent file)
 
     Returns:
         Polars DataFrame filtered to the specified time range
@@ -102,128 +102,37 @@ def get_time_filtered_data(
     db_path_obj = Path(db_path)
     base_dir = str(db_path_obj.parent) if db_path_obj.parent != Path(".") else "."
 
-    # If end_time is not provided, use the latest timestamp from the most recent database
+    # If end_time is not provided, use the latest timestamp from the most recent file
     if end_time is None:
-        # First try to get the latest timestamp from the most recent database
-        end_time = get_latest_timestamp_from_most_recent_db(base_dir)
-
-        # If that fails, fall back to the specified database
+        end_time = get_latest_timestamp_from_most_recent_parquet(base_dir)
         if end_time is None:
-            try:
-                conn = sqlite3.connect(db_path)
-                df_temp = pl.read_database("SELECT MAX(timestamp) as max_time FROM gpu_state", conn)
-                conn.close()
-
-                if len(df_temp) > 0 and df_temp["max_time"][0] is not None:
-                    max_time = df_temp["max_time"][0]
-                    if isinstance(max_time, str):
-                        end_time = datetime.datetime.fromisoformat(max_time)
-                    else:
-                        end_time = max_time
-                else:
-                    end_time = datetime.datetime.now()
-            except Exception:
-                # Final fallback to current time if there's any issue with the database
-                end_time = datetime.datetime.now()
+            end_time = datetime.datetime.now()
 
     # Calculate start time
     start_time = end_time - datetime.timedelta(hours=hours_back)
 
-    # Check if the time range spans multiple months
-    start_month = (start_time.year, start_time.month)
-    end_month = (end_time.year, end_time.month)
-
-    if start_month == end_month:
-        # Single month - optimized approach with SQL-level filtering
-        try:
-            conn = sqlite3.connect(db_path)
-            # OPTIMIZATION: Filter at SQL level instead of loading entire database
-            optimized_query = """
-            SELECT * FROM gpu_state
-            WHERE timestamp >= ? AND timestamp <= ?
-            ORDER BY timestamp
-            """
-            df = pl.read_database(
-                optimized_query,
-                conn,
-                # Note: Polars handles parameter binding differently, constructing query directly
-            )
-            conn.close()
-
-            # Apply time filtering with Polars (construct parameterized query manually)
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-            cursor.execute(
-                optimized_query,
-                (start_time.strftime("%Y-%m-%d %H:%M:%S.%f"), end_time.strftime("%Y-%m-%d %H:%M:%S.%f")),
-            )
-
-            # Read results into Polars
-            columns = [description[0] for description in cursor.description]
-            rows = cursor.fetchall()
-            conn.close()
-
-            if rows:
-                df = pl.DataFrame(rows, schema=columns, orient="row")
-                # Convert timestamp column
-                if "timestamp" in df.columns:
-                    df = df.with_columns(pl.col("timestamp").str.strptime(pl.Datetime, "%Y-%m-%d %H:%M:%S%.f"))
-                return df
-            return pl.DataFrame()
-
-        except Exception as e:
-            # If single-db approach fails, fall back to multi-db approach
-            print(f"Warning: Single database query failed, trying multi-database approach: {e}")
-
-    # Multi-month query - use the multi-database functionality
-    try:
-        db_paths = get_required_databases(start_time, end_time, base_dir)
-        return get_multi_db_data(db_paths, start_time, end_time)
-    except Exception as e:
-        # Final fallback: try just the specified database file
-        print(f"Warning: Multi-database query failed, falling back to single database: {e}")
-        try:
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-            query = """
-            SELECT * FROM gpu_state
-            WHERE timestamp BETWEEN ? AND ?
-            ORDER BY timestamp
-            """
-            cursor.execute(
-                query, (start_time.strftime("%Y-%m-%d %H:%M:%S.%f"), end_time.strftime("%Y-%m-%d %H:%M:%S.%f"))
-            )
-
-            columns = [description[0] for description in cursor.description]
-            rows = cursor.fetchall()
-            conn.close()
-
-            if rows:
-                df = pl.DataFrame(rows, schema=columns, orient="row")
-                if "timestamp" in df.columns:
-                    df = df.with_columns(pl.col("timestamp").str.strptime(pl.Datetime, "%Y-%m-%d %H:%M:%S%.f"))
-                return df
-            return pl.DataFrame()
-        except Exception as final_e:
-            print(f"Error: All database query methods failed: {final_e}")
-            return pl.DataFrame()
+    file_specs = get_required_parquet_files(start_time, end_time, base_dir)
+    return get_multi_db_data(file_specs, start_time, end_time)
 
 
-def get_multi_db_data(db_paths: list, start_time: datetime.datetime, end_time: datetime.datetime) -> pl.DataFrame:
+def get_multi_db_data(
+    file_specs: list[tuple[str, str]], start_time: datetime.datetime, end_time: datetime.datetime
+) -> pl.DataFrame:
     """
-    Load and merge data from multiple database files.
+    Load and merge data from multiple gpu_state files (Parquet or, for months predating
+    the Parquet migration, SQLite).
 
     This is a critical performance function - Polars concat is much faster than pandas.
 
     Args:
-        db_paths: List of database file paths
+        file_specs: List of (path, format) tuples, format being "parquet" or "sqlite"
         start_time: Start time for filtering
         end_time: End time for filtering
 
     Returns:
-        Combined Polars DataFrame with data from all databases, filtered by time range
+        Combined Polars DataFrame with data from all files, filtered by time range
     """
-    if not db_paths:
+    if not file_specs:
         return pl.DataFrame()
 
     all_dataframes = []
@@ -231,45 +140,48 @@ def get_multi_db_data(db_paths: list, start_time: datetime.datetime, end_time: d
     # Add a small buffer to start_time to handle microsecond precision issues
     buffered_start = start_time - datetime.timedelta(seconds=1)
 
-    for db_path in db_paths:
+    for path, file_format in file_specs:
         try:
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
+            if file_format == "parquet":
+                df = pl.scan_parquet(path).filter(pl.col("timestamp").is_between(buffered_start, end_time)).collect()
+            else:
+                conn = sqlite3.connect(path)
+                cursor = conn.cursor()
 
-            # Use parameterized query for time filtering at the database level
-            query = """
-            SELECT * FROM gpu_state
-            WHERE timestamp BETWEEN ? AND ?
-            ORDER BY timestamp
-            """
-            cursor.execute(
-                query, (buffered_start.strftime("%Y-%m-%d %H:%M:%S.%f"), end_time.strftime("%Y-%m-%d %H:%M:%S.%f"))
-            )
+                # Use parameterized query for time filtering at the database level
+                query = """
+                SELECT * FROM gpu_state
+                WHERE timestamp BETWEEN ? AND ?
+                ORDER BY timestamp
+                """
+                cursor.execute(
+                    query,
+                    (buffered_start.strftime("%Y-%m-%d %H:%M:%S.%f"), end_time.strftime("%Y-%m-%d %H:%M:%S.%f")),
+                )
 
-            columns = [description[0] for description in cursor.description]
-            rows = cursor.fetchall()
-            conn.close()
+                columns = [description[0] for description in cursor.description]
+                rows = cursor.fetchall()
+                conn.close()
 
-            if rows:
+                if not rows:
+                    continue
+
                 df = pl.DataFrame(rows, schema=columns, orient="row")
-                # Convert timestamp
                 df = df.with_columns(pl.col("timestamp").str.strptime(pl.Datetime, "%Y-%m-%d %H:%M:%S%.f"))
-
-                # Apply the precise time filtering after loading
                 df = df.filter((pl.col("timestamp") >= start_time) & (pl.col("timestamp") <= end_time))
 
-                if len(df) > 0:
-                    all_dataframes.append(df)
+            if len(df) > 0:
+                all_dataframes.append(df)
 
         except Exception as e:
-            print(f"Warning: Could not load data from {db_path}: {e}")
+            print(f"Warning: Could not load data from {path}: {e}")
             continue
 
     if not all_dataframes:
         return pl.DataFrame()
 
     # Combine all dataframes - MUCH faster with Polars than pandas!
-    combined_df = pl.concat(all_dataframes)
+    combined_df = pl.concat(all_dataframes, how="diagonal_relaxed")
 
     # Sort by timestamp to ensure proper ordering
     combined_df = combined_df.sort("timestamp")
@@ -753,7 +665,7 @@ def main(
     Args:
         hours_back: Number of hours to analyze (default: 24)
         host: Host name to filter results
-        db_path: Path to SQLite database (defaults to current month)
+        db_path: Path to a gpu_state data file (defaults to current month)
         group_by_device: Group results by GPU device type
         all_devices: Include all device types (if False, filters out older GPUs)
         exclude_hosts_yaml: Path to YAML file containing host exclusions
@@ -776,29 +688,30 @@ def main(
         # calculate_allocation_usage_by_device_enhanced,
         # calculate_allocation_usage_by_memory,
         calculate_h200_user_breakdown,
+        prepare_frames,
     )
     from stats_reporting import print_analysis_results
 
     analysis_start_time = time.time()
     analysis_start_datetime = datetime.datetime.now()
 
-    # Auto-detect database path if not provided
+    # Auto-detect data file path if not provided
     if db_path is None:
         current_date = datetime.datetime.now()
-        current_month_db = f"gpu_state_{current_date.strftime('%Y-%m')}.db"
+        current_month_parquet = f"gpu_state_{current_date.strftime('%Y-%m')}.parquet"
 
-        if os.path.exists(current_month_db):
-            db_path = current_month_db
-            print(f"Using current month database: {db_path}")
+        if os.path.exists(current_month_parquet):
+            db_path = current_month_parquet
+            print(f"Using current month data file: {db_path}")
         else:
             import glob
 
-            db_files = glob.glob("gpu_state_*.db")
-            if db_files:
-                db_path = sorted(db_files)[-1]
-                print(f"Current month database not found, using most recent: {db_path}")
+            parquet_files = glob.glob("gpu_state_*.parquet")
+            if parquet_files:
+                db_path = sorted(parquet_files)[-1]
+                print(f"Current month file not found, using most recent: {db_path}")
             else:
-                print("Error: No database files found. Please specify --db-path.")
+                print("Error: No gpu_state data files found. Please specify --db-path.")
                 return
 
     # Set up host exclusions (using pandas version's logic)
@@ -842,10 +755,13 @@ def main(
         results["device_stats"] = calculate_allocation_usage_by_device_enhanced(df_polars, host, all_devices)
         results["memory_stats"] = calculate_allocation_usage_by_memory(df_polars, host, all_devices)
 
-        print("Calculating user statistics with pandas...")
-        # Use pandas for user breakdown (not yet migrated to Polars)
-        results["h200_user_stats"] = calculate_h200_user_breakdown(df_pandas, host, hours_back)
-        results["backfill_user_stats"] = calculate_backfill_usage_by_user(df_pandas, host, hours_back, all_devices)
+        print("Calculating user statistics...")
+        # calculate_h200_user_breakdown/calculate_backfill_usage_by_user were migrated to
+        # take PreparedFrames (see stats_calculations.prepare_frames) rather than a raw
+        # pandas DataFrame; build one from the already-loaded Polars data.
+        frames = prepare_frames(df_polars.lazy())
+        results["h200_user_stats"] = calculate_h200_user_breakdown(frames, host, hours_back)
+        results["backfill_user_stats"] = calculate_backfill_usage_by_user(frames, host, hours_back, all_devices)
         results["raw_data"] = df_pandas
         results["host_filter"] = host
     else:
