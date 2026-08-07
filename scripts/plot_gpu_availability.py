@@ -11,6 +11,7 @@ Supports filtering by host and a configurable time window (default: 1 week).
 """
 
 import argparse
+import re
 import sqlite3
 import sys
 from datetime import datetime, timedelta
@@ -27,12 +28,11 @@ except ImportError:
     MATPLOTLIB_AVAILABLE = False
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+import gpu_utils
+from gpu_utils import load_chtc_owned_hosts, load_host_exclusions
 from gpu_utils_polars import (
-    HOST_EXCLUSIONS,
     get_latest_timestamp_from_most_recent_db,
     get_required_databases,
-    load_chtc_owned_hosts,
-    load_host_exclusions,
 )
 
 NEEDED_COLUMNS = [
@@ -142,8 +142,9 @@ def compute_bucket_stats(
         )
 
     # Apply global host exclusions
-    for excluded_host in HOST_EXCLUSIONS:
-        df = df.filter(~pl.col("Machine").str.contains(f"(?i){excluded_host}").fill_null(False))
+    if gpu_utils.HOST_EXCLUSIONS:
+        excluded_pattern = "|".join(re.escape(excluded_host) for excluded_host in gpu_utils.HOST_EXCLUSIONS)
+        df = df.filter(~pl.col("Machine").str.contains(f"(?i){excluded_pattern}").fill_null(False))
 
     # Apply user host filter (comma-separated list of substrings, OR logic)
     if host:
@@ -383,9 +384,7 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    import gpu_utils_polars
-
-    gpu_utils_polars.HOST_EXCLUSIONS = load_host_exclusions(yaml_file=args.exclusions_yaml)
+    gpu_utils.HOST_EXCLUSIONS = load_host_exclusions(yaml_file=args.exclusions_yaml)
 
     # Resolve end time
     if args.end_time:

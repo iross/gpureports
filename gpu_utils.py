@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """
-GPU Utilities Module
+GPU Utilities Module (pandas)
 
-Common utilities for GPU data filtering, counting, and processing.
-Consolidates duplicate functions from across the codebase.
+Host-exclusion/CHTC-hosts config loading (shared with the canonical
+stats_calculations.prepare_frames() pipeline) plus filter_df/filter_df_enhanced
+and related pandas DataFrame filtering, still needed by pandas-backed callers
+(scripts/host_report.py, stats_calculations.py's small-window pandas tail,
+website_generator/, analysis/analyze_task7_troubleshoot.py). See
+gpu_utils_polars.py for Parquet/SQLite file discovery.
 """
 
-import datetime
 import re
 from pathlib import Path
 
@@ -251,108 +254,6 @@ def filter_df(df: pd.DataFrame, utilization: str = "", state: str = "", host: st
     return df
 
 
-def count_backfill(df: pd.DataFrame, state: str = "", host: str = "") -> int:
-    """Count backfill GPUs."""
-    df = filter_df(df, "Backfill", state, host)
-    return df.shape[0]
-
-
-def count_shared(df: pd.DataFrame, state: str = "", host: str = "") -> int:
-    """Count shared GPUs."""
-    df = filter_df(df, "Shared", state, host)
-    return df.shape[0]
-
-
-def count_prioritized(df: pd.DataFrame, state: str = "", host: str = "") -> int:
-    """Count prioritized GPUs."""
-    df = filter_df(df, "Priority", state, host)
-    return df.shape[0]
-
-
-def classify_machine_category(machine: str, prioritized_projects: str) -> str:
-    """
-    Classify a machine into one of the new categories.
-
-    Args:
-        machine: Machine name/hostname
-        prioritized_projects: PrioritizedProjects field value
-
-    Returns:
-        Category: "CHTC Owned", "Researcher Owned", or "Open Capacity"
-    """
-    chtc_owned_hosts = load_chtc_owned_hosts()
-
-    # Check if machine is in CHTC owned list
-    if machine in chtc_owned_hosts:
-        return "CHTC Owned"
-
-    # Check if machine has non-empty PrioritizedProjects
-    if prioritized_projects and prioritized_projects.strip():
-        return "Researcher Owned"
-
-    # Default to Open Capacity
-    return "Open Capacity"
-
-
-def filter_df_by_machine_category(df: pd.DataFrame, category: str) -> pd.DataFrame:
-    """
-    Filter DataFrame by machine category.
-
-    Args:
-        df: Input DataFrame with GPU state data
-        category: Machine category ("CHTC Owned", "Researcher Owned", "Open Capacity")
-
-    Returns:
-        Filtered DataFrame
-    """
-    df = df.copy()
-    chtc_owned_hosts = load_chtc_owned_hosts()
-
-    if category == "CHTC Owned":
-        df = df[df["Machine"].isin(chtc_owned_hosts)]
-    elif category == "Researcher Owned":
-        # Researcher owned: has PrioritizedProjects AND not in CHTC owned list
-        df = df[
-            (df["PrioritizedProjects"] != "")
-            & (df["PrioritizedProjects"].notna())
-            & (~df["Machine"].isin(chtc_owned_hosts))
-        ]
-    elif category == "Open Capacity":
-        # Open capacity: no PrioritizedProjects AND not in CHTC owned list
-        df = df[
-            ((df["PrioritizedProjects"] == "") | (df["PrioritizedProjects"].isna()))
-            & (~df["Machine"].isin(chtc_owned_hosts))
-        ]
-
-    return df
-
-
-def get_machines_by_category(df: pd.DataFrame) -> dict:
-    """
-    Get list of machines in each category.
-
-    Args:
-        df: DataFrame with Machine and PrioritizedProjects columns
-
-    Returns:
-        Dictionary mapping category names to lists of machine names
-    """
-    # Get unique machines with their PrioritizedProjects
-    unique_machines = df.groupby("Machine")["PrioritizedProjects"].first().reset_index()
-
-    categories = {"CHTC Owned": [], "Researcher Owned": [], "Open Capacity": []}
-
-    for _, row in unique_machines.iterrows():
-        category = classify_machine_category(row["Machine"], row["PrioritizedProjects"])
-        categories[category].append(row["Machine"])
-
-    # Sort lists for consistent output
-    for category in categories:
-        categories[category].sort()
-
-    return categories
-
-
 def filter_df_enhanced(df: pd.DataFrame, utilization: str = "", state: str = "", host: str = "") -> pd.DataFrame:
     """
     Filter DataFrame with new classification categories.
@@ -562,24 +463,6 @@ def filter_df_enhanced(df: pd.DataFrame, utilization: str = "", state: str = "",
     return df
 
 
-def count_backfill_researcher_owned(df: pd.DataFrame, state: str = "", host: str = "") -> int:
-    """Count backfill GPUs on researcher owned machines."""
-    df = filter_df_enhanced(df, "Backfill-ResearcherOwned", state, host)
-    return df.shape[0]
-
-
-def count_backfill_chtc_owned(df: pd.DataFrame, state: str = "", host: str = "") -> int:
-    """Count backfill GPUs on CHTC owned machines."""
-    df = filter_df_enhanced(df, "Backfill-CHTCOwned", state, host)
-    return df.shape[0]
-
-
-def count_glidein(df: pd.DataFrame, state: str = "", host: str = "") -> int:
-    """Count Backfill-OpenCapacity GPUs (formerly backfill on open capacity)."""
-    df = filter_df_enhanced(df, "Backfill-OpenCapacity", state, host)
-    return df.shape[0]
-
-
 def get_gpu_performance_tier(device_name: str) -> str:
     """
     Classify GPU device into performance tier.
@@ -624,92 +507,6 @@ def get_display_name(class_name: str) -> str:
         "Open Capacity (Standard)": "Open Capacity (Standard)",
     }
     return display_names.get(class_name, class_name)
-
-
-def get_required_databases(start_time: datetime.datetime, end_time: datetime.datetime, base_dir: str = ".") -> list:
-    """
-    Get list of database files needed to cover the specified time range.
-
-    Args:
-        start_time: Start of time range
-        end_time: End of time range
-        base_dir: Directory containing database files
-
-    Returns:
-        List of database file paths
-    """
-    db_files = []
-
-    # Generate list of months between start and end
-    current = start_time.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    end_month = end_time.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-
-    while current <= end_month:
-        db_file = Path(base_dir) / f"gpu_state_{current.strftime('%Y-%m')}.db"
-        if db_file.exists():
-            db_files.append(str(db_file))
-
-        # Move to next month
-        if current.month == 12:
-            current = current.replace(year=current.year + 1, month=1)
-        else:
-            current = current.replace(month=current.month + 1)
-
-    return db_files
-
-
-def get_most_recent_database(base_dir: str = ".") -> str | None:
-    """
-    Find the most recent database file in the given directory.
-
-    Args:
-        base_dir: Directory to search for database files
-
-    Returns:
-        Path to the most recent database file, or None if none found
-    """
-    import re
-    from pathlib import Path
-
-    # Match only exact gpu_state_YYYY-MM.db files, not variants like _dev or _backup
-    pattern = re.compile(r"gpu_state_\d{4}-\d{2}\.db$")
-    db_files = sorted(str(p) for p in Path(base_dir).glob("gpu_state_*.db") if pattern.search(p.name))
-
-    if not db_files:
-        return None
-
-    return db_files[-1]
-
-
-def get_latest_timestamp_from_most_recent_db(base_dir: str = ".") -> datetime.datetime | None:
-    """
-    Get the latest timestamp from the most recent database file.
-
-    Args:
-        base_dir: Directory containing database files
-
-    Returns:
-        Latest timestamp from the most recent database, or None if not found
-    """
-    import sqlite3
-
-    import pandas as pd
-
-    most_recent_db = get_most_recent_database(base_dir)
-    if not most_recent_db:
-        return None
-
-    try:
-        conn = sqlite3.connect(most_recent_db)
-        print("reading max_time from gpu_state db in the gpu_utils code")
-        df_temp = pd.read_sql_query("SELECT MAX(timestamp) as max_time FROM gpu_state", conn)
-        conn.close()
-        if len(df_temp) > 0 and df_temp["max_time"].iloc[0] is not None:
-            return pd.to_datetime(df_temp["max_time"].iloc[0])
-    except Exception:
-        pass
-
-    return None
 
 
 def analyze_backfill_utilization_by_day(df: pd.DataFrame) -> pd.DataFrame:

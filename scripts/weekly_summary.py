@@ -11,6 +11,7 @@ and the same week boundaries (Monday-aligned, 7-day complete weeks only).
 """
 
 import argparse
+import re
 import sqlite3
 import sys
 from pathlib import Path
@@ -27,7 +28,8 @@ except ImportError:
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from gpu_utils_polars import HOST_EXCLUSIONS, load_chtc_owned_hosts
+import gpu_utils
+from gpu_utils import load_chtc_owned_hosts
 
 NEEDED_COLUMNS = [
     "Name",
@@ -112,9 +114,9 @@ def classify_rows(df: pl.DataFrame) -> pl.DataFrame:
     is_chtc = pl.col("Machine").is_in(chtc_list)
 
     # Host exclusions
-    if HOST_EXCLUSIONS:
-        for excluded_host in HOST_EXCLUSIONS.keys():
-            df = df.filter(~pl.col("Machine").str.contains(f"(?i){excluded_host}").fill_null(False))
+    if gpu_utils.HOST_EXCLUSIONS:
+        excluded_pattern = "|".join(re.escape(excluded_host) for excluded_host in gpu_utils.HOST_EXCLUSIONS)
+        df = df.filter(~pl.col("Machine").str.contains(f"(?i){excluded_pattern}").fill_null(False))
 
     # Filter out old/uncommon GPU types and null device names
     old_pattern = "|".join(OLD_GPU_TYPES)
