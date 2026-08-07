@@ -4,23 +4,26 @@ This system monitors GPU utilization across a compute cluster and provides detai
 
 ## Production deployment
 
-Running on a CHTC baremetal host as `iaross`. Data is collected every 5 minutes from the
-HTCondor collector and written to monthly SQLite databases. Email reports go out daily,
-weekly, and monthly via cron.
+Runs as containers on Kubernetes. Data is collected (intended: every 5 minutes) from
+the HTCondor collector and written to monthly Parquet files on a shared PVC. Email
+reports go out daily, weekly, and monthly.
 
 ```
 HTCondor → collector.py → gpu_state_YYYY-MM.parquet → usage_stats.py → email
 ```
 
-See [OPERATIONS.md](OPERATIONS.md) for crontab entries, log locations, and troubleshooting.
+See [OPERATIONS.md](OPERATIONS.md) for the current architecture, schedule, and
+troubleshooting.
 
 ## Project Structure
 
 ```
-├── gpu_utils.py               # Core utilities for GPU data filtering and processing
-├── gpu_utils_polars.py        # Polars-based utilities for fast multi-DB loading
+├── gpu_utils.py               # Host-exclusion config, pandas filtering (small-window/script use)
+├── gpu_utils_polars.py        # Parquet/SQLite file discovery, host-exclusion config
+├── stats_data.py              # Canonical Parquet loading (scan_time_filtered)
+├── stats_calculations.py      # Canonical dedup/classify pipeline (prepare_frames)
 ├── usage_stats.py             # Main analysis and reporting (full features, email)
-├── usage_stats_polars.py      # Polars-accelerated reporting (fast, basic features)
+├── report.py                  # Ad-hoc CLI report (just last-day/last-hour), no email
 ├── collector.py                # Data collection from HTCondor, writes Parquet
 ├── weekly_gpu_hours_analysis.py  # Weekly GPU hours trend analysis
 ├── check_unused_gpus.py       # Detect flagship/standard GPUs unused in last week
@@ -49,26 +52,31 @@ See [OPERATIONS.md](OPERATIONS.md) for crontab entries, log locations, and troub
 
 ## Core Modules
 
+### stats_data.py / stats_calculations.py
+The canonical gpu_state pipeline, shared by usage_stats.py, report.py, and the
+dashboard: `scan_time_filtered()` lazily scans Parquet, `prepare_frames()`
+dedups/classifies once per window. See `stats_calculations.slot_dedup_rank()` for
+the tie-breaking rule when a GPU has multiple concurrent slot rows.
+
 ### gpu_utils.py / gpu_utils_polars.py
-Centralized utilities for:
-- GPU data filtering by utilization type (Priority, Shared, Backfill)
-- Counting functions for different GPU categories
-- Host exclusion management
-- Database file discovery
+- `gpu_utils.py`: host-exclusion/CHTC-hosts config loading (shared with the
+  canonical pipeline above) plus pandas `filter_df`/`filter_df_enhanced`, still used
+  by a handful of small-window scripts (`scripts/host_report.py`,
+  `analysis/analyze_task7_troubleshoot.py`) and stats_calculations.py's own
+  small-window pandas functions.
+- `gpu_utils_polars.py`: Parquet/SQLite file discovery only
+  (`get_required_parquet_files`, `get_latest_timestamp_from_most_recent_parquet`, etc).
 
 ### usage_stats.py
 Full-featured analysis engine:
-- Time-filtered data retrieval across multiple database files
-- Allocation and performance usage calculations
+- Allocation and performance usage calculations via the canonical pipeline
 - HTML and text report generation
 - Email notification support
 - Monthly summaries and GPU model snapshots
 
-### usage_stats_polars.py
-Polars-accelerated version for large datasets:
-- 10-100x faster for multi-month queries
-- Same CLI interface for basic usage
-- Does not support email or monthly analysis (use usage_stats.py for those)
+### report.py
+Ad-hoc CLI report (`just last-day`/`last-hour`/`last-day-html`) — no automated
+caller, no email support. Same canonical pipeline as usage_stats.py.
 
 ## Usage
 
@@ -85,14 +93,14 @@ just dashboard          # Start real-time dashboard at localhost:8051
 ### Direct CLI
 
 ```bash
-# 24-hour report
-uv run usage_stats_polars.py --exclude-hosts-yaml masked_hosts.yaml --hours-back 24
+# 24-hour ad-hoc report, no email
+uv run report.py --exclude-hosts-yaml masked_hosts.yaml --hours-back 24
 
-# Weekly report (all months)
-uv run usage_stats_polars.py --exclude-hosts-yaml masked_hosts.yaml --hours-back 168
+# Weekly ad-hoc report (all months)
+uv run report.py --exclude-hosts-yaml masked_hosts.yaml --hours-back 168
 
 # Full-featured report with email
-uv run usage_stats.py --email-to admin@example.com --email-config smtp_config.yaml
+uv run usage_stats.py --exclude-hosts-yaml masked_hosts.yaml --hours-back 24 --group-by-device --email-to admin@example.com
 ```
 
 ## Testing

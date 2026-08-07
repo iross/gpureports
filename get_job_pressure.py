@@ -12,9 +12,8 @@ Schema change from the original: timestamp TEXT column is replaced by
 first_seen INTEGER and last_seen INTEGER; column order differs.
 Existing old-schema DBs are read by migrate_job_pressure.py.
 
-Crontab entry (on the production host):
-    */5 * * * * /home/iaross/gpureports/.venv/bin/python \
-        /home/iaross/gpureports/get_job_pressure.py &> /tmp/job_pressure.log
+Runs as a k8s CronJob (intended every 5 minutes), bundled in the same container
+image as collector.py -- see OPERATIONS.md.
 """
 
 import datetime

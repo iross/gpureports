@@ -5,16 +5,13 @@ set -euo pipefail
 #
 # Usage: bash emailer.sh <mode>
 #
-#   daily    24h allocation report → full recipient list (runs 06:00 daily)
-#   weekly   168h allocation report → full recipient list (runs 06:00 Mondays)
-#   monthly  monthly summary → full recipient list (runs 06:00 on the 1st)
+#   daily    24h allocation report → full recipient list (intended: 06:00 daily)
+#   weekly   168h allocation report → full recipient list (intended: 06:00 Mondays)
+#   monthly  monthly summary → full recipient list (intended: 06:00 on the 1st)
 #   test     24h allocation report → iaross only (safe to run anytime)
 #
-# Crontab entries (on the production host):
-#   0 6 * * *    bash /home/iaross/gpureports/emailer.sh daily  &> /tmp/gpu_emailer.log
-#   0 6 * * 1    bash /home/iaross/gpureports/emailer.sh weekly &> /tmp/gpu_emailer_weekly.log
-#   0 6 1 * *    bash /home/iaross/gpureports/emailer.sh monthly &> /tmp/gpu_emailer_monthly.log
-#   41 12 * * *  bash /home/iaross/gpureports/emailer.sh test   &> /tmp/gpu_emailer.log
+# Runs as a k8s CronJob per mode (see OPERATIONS.md for the current deployment
+# and PVC details -- the manifests themselves live outside this repo).
 
 RECIPIENTS="chtc-reports@g-groups.wisc.edu,iaross@wisc.edu,gitter@biostat.wisc.edu"
 TEST_RECIPIENT="iaross@wisc.edu"
