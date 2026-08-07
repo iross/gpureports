@@ -1,7 +1,7 @@
 """Data layer for the GPU state dashboard.
 
 Queries gpu_state Parquet (or, for months predating the migration, SQLite)
-files, dedups/classifies via stats_calculations.prepare_frames(), and
+files, dedups/classifies via classify_slots.prepare_frames(), and
 returns structured dicts matching the API response shape.
 """
 
@@ -12,15 +12,19 @@ from pathlib import Path
 
 import polars as pl
 
-import gpu_utils
-from gpu_utils_polars import (
+import classify_slots
+from classify_slots import prepare_frames, slot_dedup_rank
+from read_data import (
+    GPU_STATE_SCHEMA,
+    SCAN_CAST_OPTIONS,
+    load_host_exclusions,
+)
+from read_data import (
     get_latest_timestamp_from_most_recent_parquet as get_latest_timestamp_from_most_recent_db,
 )
-from gpu_utils_polars import (
+from read_data import (
     get_required_parquet_files as get_required_databases,
 )
-from stats_calculations import prepare_frames, slot_dedup_rank
-from stats_data import GPU_STATE_SCHEMA, SCAN_CAST_OPTIONS
 
 logger = logging.getLogger(__name__)
 
@@ -69,11 +73,11 @@ COLUMNS = [
 
 
 def _set_host_exclusions(base_dir: str = ".") -> None:
-    """Load masked_hosts.yaml into gpu_utils.HOST_EXCLUSIONS, the global
+    """Load masked_hosts.yaml into classify_slots.HOST_EXCLUSIONS, the global
     prepare_frames() reads -- mirrors the pattern report.py/usage_stats.py
     use before calling it."""
     yaml_path = Path(base_dir) / "masked_hosts.yaml"
-    gpu_utils.HOST_EXCLUSIONS = gpu_utils.load_host_exclusions(None, str(yaml_path) if yaml_path.exists() else None)
+    classify_slots.HOST_EXCLUSIONS = load_host_exclusions(None, str(yaml_path) if yaml_path.exists() else None)
 
 
 def _file_month_label(path: str) -> str:

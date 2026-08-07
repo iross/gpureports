@@ -18,17 +18,16 @@ troubleshooting.
 ## Project Structure
 
 ```
-├── gpu_utils.py               # Host-exclusion config, pandas filtering (small-window/script use)
-├── gpu_utils_polars.py        # Parquet/SQLite file discovery, host-exclusion config
-├── stats_data.py              # Canonical Parquet loading (scan_time_filtered)
-├── stats_calculations.py      # Canonical dedup/classify pipeline (prepare_frames)
+├── read_data.py                # Canonical Parquet/SQLite loading, file discovery, host-config loading
+├── classify_slots.py           # Canonical dedup/classify pipeline (prepare_frames, filter_df/filter_df_enhanced)
+├── reporting.py                # HTML/text/email report generation
 ├── usage_stats.py             # Main analysis and reporting (full features, email)
 ├── report.py                  # Ad-hoc CLI report (just last-day/last-hour), no email
 ├── collector.py                # Data collection from HTCondor, writes Parquet
 ├── weekly_gpu_hours_analysis.py  # Weekly GPU hours trend analysis
 ├── check_unused_gpus.py       # Detect flagship/standard GPUs unused in last week
 ├── draining_report.py         # Report on draining GPU nodes
-├── device_name_mappings.py    # GPU device name normalization
+├── devices.py                  # GPU device name normalization
 ├── scripts/                   # Analysis and plotting scripts
 │   ├── analyze_evictions.py
 │   ├── plot_usage_stats.py
@@ -52,20 +51,19 @@ troubleshooting.
 
 ## Core Modules
 
-### stats_data.py / stats_calculations.py
+### read_data.py / classify_slots.py
 The canonical gpu_state pipeline, shared by usage_stats.py, report.py, and the
 dashboard: `scan_time_filtered()` lazily scans Parquet, `prepare_frames()`
-dedups/classifies once per window. See `stats_calculations.slot_dedup_rank()` for
-the tie-breaking rule when a GPU has multiple concurrent slot rows.
-
-### gpu_utils.py / gpu_utils_polars.py
-- `gpu_utils.py`: host-exclusion/CHTC-hosts config loading (shared with the
-  canonical pipeline above) plus pandas `filter_df`/`filter_df_enhanced`, still used
-  by a handful of small-window scripts (`scripts/host_report.py`,
-  `analysis/analyze_task7_troubleshoot.py`) and stats_calculations.py's own
-  small-window pandas functions.
-- `gpu_utils_polars.py`: Parquet/SQLite file discovery only
-  (`get_required_parquet_files`, `get_latest_timestamp_from_most_recent_parquet`, etc).
+dedups/classifies once per window. See `classify_slots.slot_dedup_rank()` for
+the tie-breaking rule when a GPU has multiple concurrent slot rows. read_data.py
+also owns per-month gpu_state file discovery (`get_required_parquet_files`,
+`get_latest_timestamp_from_most_recent_parquet`, etc.), preferring Parquet with a
+SQLite fallback for months predating the Parquet migration, plus loading the
+host-exclusion/CHTC-owned-hosts config files. classify_slots.py also carries
+pandas `filter_df`/`filter_df_enhanced` -- the small-window classification
+implementation still used by a handful of scripts (`scripts/host_report.py`,
+`analysis/analyze_task7_troubleshoot.py`) and its own small-window pandas
+functions -- alongside the polars `prepare_frames()` path.
 
 ### usage_stats.py
 Full-featured analysis engine:

@@ -4,11 +4,11 @@ _query_dbs used to call pl.scan_parquet() with no explicit schema. That's fine a
 as every file scanned individually happens to have the exact same column order/set as
 the code expects, but breaks the moment a file has columns reordered or is missing a
 newer column (e.g. PreventJobsReason, added after some files were already written) --
-exactly the scenario stats_data.py's GPU_STATE_SCHEMA/missing_columns="insert"/
+exactly the scenario read_data.py's GPU_STATE_SCHEMA/missing_columns="insert"/
 SCAN_CAST_OPTIONS combination exists to tolerate.
 
 Dashboard's dedup/classify used to be its own hand-rolled implementation (removed in
-TASK-49.1 in favor of stats_calculations.prepare_frames()); _collapse_to_bucket_winner
+TASK-49.1 in favor of classify_slots.prepare_frames()); _collapse_to_bucket_winner
 is the one piece of dashboard-specific logic that remains -- picking a single row per
 display bucket when prepare_frames()'s per-raw-timestamp dedup leaves more than one
 winner in the same bucket -- and it must agree with the canonical rank tiers.
@@ -22,8 +22,8 @@ import polars as pl
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from classify_slots import slot_dedup_rank  # noqa: E402
 from dashboard.data import STATE_CODES, _collapse_to_bucket_winner, _map_state_codes, _query_dbs  # noqa: E402
-from stats_calculations import slot_dedup_rank  # noqa: E402
 
 
 def test_query_dbs_tolerates_reordered_and_missing_columns(tmp_path):
@@ -79,7 +79,7 @@ def test_query_dbs_tolerates_reordered_and_missing_columns(tmp_path):
 
 def test_collapse_to_bucket_winner_matches_canonical_rank_on_backfill_vs_primary():
     """A pre-task-47 4-tier rank picked claimed-backfill over unclaimed-primary
-    (backwards from stats_calculations.slot_dedup_rank, which ranks unclaimed-primary(5)
+    (backwards from classify_slots.slot_dedup_rank, which ranks unclaimed-primary(5)
     above claimed-backfill(3)). Same GPU, same display bucket, one primary slot
     Unclaimed and one backfill slot Claimed (as prepare_frames()'s per-timestamp dedup
     would emit if both were the sole survivor of their own raw timestamp): the collapse

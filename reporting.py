@@ -12,12 +12,54 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
 
-from device_name_mappings import get_human_readable_device_name
-from gpu_utils import (
-    CLASS_ORDER,
-    get_display_name,
-    get_gpu_performance_tier,
-)
+from classify_slots import CLASS_ORDER
+from devices import get_human_readable_device_name
+
+
+def get_gpu_performance_tier(device_name: str) -> str:
+    """
+    Classify GPU device into performance tier.
+
+    Args:
+        device_name: Full GPU device name (e.g., 'NVIDIA H100 80GB HBM3')
+
+    Returns:
+        Performance tier: 'Flagship' or 'Standard'
+    """
+    # Flagship tier: H100, H200, and 80GB A100
+    flagship_patterns = [
+        "H100",
+        "H200",
+        "A100-SXM4-80GB",
+        "A100 80GB",
+    ]
+
+    for pattern in flagship_patterns:
+        if pattern in device_name:
+            return "Flagship"
+
+    return "Standard"
+
+
+def get_display_name(class_name: str) -> str:
+    """Convert internal class names to user-friendly display names."""
+    display_names = {
+        "Priority": "Prioritized service",  # Legacy support
+        "Priority-ResearcherOwned": "Researcher-Owned Hardware",
+        "Priority-CHTCOwned": "Researcher-Reserved Capacity",
+        "Shared": "Open Capacity",
+        "Backfill": "Secondary (Backfill)",  # Legacy support
+        "Backfill-ResearcherOwned": "Researcher-Owned Hardware",
+        "Backfill-CHTCOwned": "Researcher-Reserved Capacity",
+        "Backfill-OpenCapacity": "Secondary (Backfill) — Open Capacity",
+        "CHTC Owned": "Researcher-Reserved Capacity",
+        "Researcher Owned": "Researcher-Owned Hardware",
+        "Open Capacity": "Open Capacity",
+        # New tier-based display names for Open Capacity breakdown
+        "Open Capacity (Flagship)": "Open Capacity (Flagship)",
+        "Open Capacity (Standard)": "Open Capacity (Standard)",
+    }
+    return display_names.get(class_name, class_name)
 
 
 def print_gpu_model_analysis(analysis: dict):

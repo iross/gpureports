@@ -3,7 +3,7 @@
 
 Manual, on-demand reports (see justfile's last-day/last-hour/last-day-html
 targets). The automated email cron uses usage_stats.py, which already runs
-on this same canonical pipeline -- see stats_calculations.py/stats_data.py
+on this same canonical pipeline -- see classify_slots.py/read_data.py
 for the implementation.
 """
 
@@ -36,17 +36,16 @@ def main(
     import os
     import time
 
-    import gpu_utils
-    from gpu_utils import load_host_exclusions
-    from stats_calculations import (
+    import classify_slots
+    from classify_slots import (
         calculate_allocation_usage_by_device_enhanced,
         calculate_allocation_usage_by_memory,
         calculate_backfill_usage_by_user,
         calculate_h200_user_breakdown,
         prepare_frames,
     )
-    from stats_data import scan_time_filtered
-    from stats_reporting import print_analysis_results
+    from read_data import load_host_exclusions, scan_time_filtered
+    from reporting import print_analysis_results
 
     analysis_start_time = time.time()
     analysis_start_datetime = datetime.datetime.now()
@@ -68,8 +67,8 @@ def main(
                 print("Error: No gpu_state data files found. Please specify --db-path.")
                 return
 
-    gpu_utils.HOST_EXCLUSIONS = load_host_exclusions(None, exclude_hosts_yaml)
-    gpu_utils.FILTERED_HOSTS_INFO = []
+    classify_slots.HOST_EXCLUSIONS = load_host_exclusions(None, exclude_hosts_yaml)
+    classify_slots.FILTERED_HOSTS_INFO = []
 
     db_path_obj = Path(db_path)
     data_dir = str(db_path_obj.parent) if db_path_obj.parent != Path(".") else "."
@@ -88,8 +87,8 @@ def main(
             "num_intervals": frames.total_buckets,
             "total_records": frames.original_count,
             "hours_back": hours_back,
-            "excluded_hosts": gpu_utils.HOST_EXCLUSIONS,
-            "filtered_hosts_info": gpu_utils.FILTERED_HOSTS_INFO,
+            "excluded_hosts": classify_slots.HOST_EXCLUSIONS,
+            "filtered_hosts_info": classify_slots.FILTERED_HOSTS_INFO,
         }
     }
 

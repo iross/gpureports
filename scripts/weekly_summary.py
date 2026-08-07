@@ -28,8 +28,8 @@ except ImportError:
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
-import gpu_utils
-from gpu_utils import load_chtc_owned_hosts
+import classify_slots
+from read_data import load_chtc_owned_hosts
 
 NEEDED_COLUMNS = [
     "Name",
@@ -114,8 +114,8 @@ def classify_rows(df: pl.DataFrame) -> pl.DataFrame:
     is_chtc = pl.col("Machine").is_in(chtc_list)
 
     # Host exclusions
-    if gpu_utils.HOST_EXCLUSIONS:
-        excluded_pattern = "|".join(re.escape(excluded_host) for excluded_host in gpu_utils.HOST_EXCLUSIONS)
+    if classify_slots.HOST_EXCLUSIONS:
+        excluded_pattern = "|".join(re.escape(excluded_host) for excluded_host in classify_slots.HOST_EXCLUSIONS)
         df = df.filter(~pl.col("Machine").str.contains(f"(?i){excluded_pattern}").fill_null(False))
 
     # Filter out old/uncommon GPU types and null device names

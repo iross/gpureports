@@ -21,7 +21,7 @@ import seaborn as sns
 
 # Add parent directory to path to import device name mappings
 sys.path.append(str(Path(__file__).parent.parent))
-from device_name_mappings import get_human_readable_device_name
+from devices import get_human_readable_device_name
 
 
 def create_eviction_heatmaps(evictions, all_job_configs, output_file):

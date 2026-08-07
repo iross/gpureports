@@ -23,9 +23,9 @@ import polars as pl
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from stats_calculations import calculate_prevent_jobs_stats, prepare_frames  # noqa: E402
-from stats_data import get_draining_data, get_time_filtered_data  # noqa: E402
-from stats_reporting import generate_html_report  # noqa: E402
+from classify_slots import calculate_prevent_jobs_stats, prepare_frames  # noqa: E402
+from read_data import get_draining_data, get_time_filtered_data  # noqa: E402
+from reporting import generate_html_report  # noqa: E402
 
 _SCHEMA = {
     "Name": pl.Utf8,

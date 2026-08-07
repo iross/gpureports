@@ -22,8 +22,8 @@ import typer
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from gpu_utils import filter_df_enhanced, load_chtc_owned_hosts
-from stats_data import get_preprocessed_dataframe, get_time_filtered_data
+from classify_slots import filter_df_enhanced
+from read_data import get_preprocessed_dataframe, get_time_filtered_data, load_chtc_owned_hosts
 
 try:
     import seaborn as sns  # noqa: F401

@@ -1,7 +1,7 @@
 """Tests for Parquet-based gpu_state storage.
 
 Covers:
-  - gpu_utils_polars: Parquet file discovery and latest-timestamp lookup
+  - read_data: Parquet file discovery and latest-timestamp lookup
   - collector: collector write, append, and atomic rename
   - dashboard/data.py: _query_dbs reading Parquet (and SQLite fallback)
 """
@@ -24,7 +24,7 @@ _htcondor_stub.Collector = MagicMock()
 _htcondor_stub.AdTypes = MagicMock()
 sys.modules.setdefault("htcondor", _htcondor_stub)
 
-from gpu_utils_polars import get_latest_timestamp_from_most_recent_parquet, get_required_parquet_files  # noqa: E402
+from read_data import get_latest_timestamp_from_most_recent_parquet, get_required_parquet_files  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Shared fixture helpers
@@ -68,7 +68,7 @@ def _make_rows(ts: datetime.datetime, n: int = 3) -> pl.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# gpu_utils_polars: get_required_parquet_files
+# read_data: get_required_parquet_files
 # ---------------------------------------------------------------------------
 
 
@@ -129,7 +129,7 @@ class TestGetRequiredParquetFiles:
 
 
 # ---------------------------------------------------------------------------
-# gpu_utils_polars: get_latest_timestamp_from_most_recent_parquet
+# read_data: get_latest_timestamp_from_most_recent_parquet
 # ---------------------------------------------------------------------------
 
 

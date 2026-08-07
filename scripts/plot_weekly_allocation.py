@@ -24,16 +24,15 @@ import polars as pl
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import gpu_utils  # noqa: E402
-from gpu_utils import load_host_exclusions  # noqa: E402
-from stats_calculations import (  # noqa: E402
+import classify_slots  # noqa: E402
+from classify_slots import (  # noqa: E402
     _REAL_CLASS_EXPRS,
     OLD_GPU_TYPES,
     PreparedFrames,
     _researcher_scope,
     prepare_frames,
 )
-from stats_data import get_latest_timestamp, scan_time_filtered  # noqa: E402
+from read_data import get_latest_timestamp, load_host_exclusions, scan_time_filtered  # noqa: E402
 
 SURFACE = "#fcfcfb"
 TEXT_PRIMARY = "#0b0b0b"
@@ -200,7 +199,7 @@ def main():
     if start >= end:
         print(f"Error: start {start} is not before end {end}")
         sys.exit(1)
-    gpu_utils.HOST_EXCLUSIONS = load_host_exclusions(None, args.exclude_hosts_yaml)
+    classify_slots.HOST_EXCLUSIONS = load_host_exclusions(None, args.exclude_hosts_yaml)
 
     print(f"Preparing window {start} – {end} from {args.data_dir}...")
     hours_back = (end - start).total_seconds() / 3600

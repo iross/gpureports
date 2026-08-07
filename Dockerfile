@@ -17,7 +17,7 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync
 RUN uv pip install htcondor
 
-COPY collector.py get_job_pressure.py usage_stats.py gpu_utils.py gpu_utils_polars.py device_name_mappings.py ./
-COPY _emailer.sh stats_data.py stats_reporting.py stats_calculations.py emailer.sh methodology.md masked_hosts.yaml chtc_owned ./
+COPY collector.py get_job_pressure.py usage_stats.py devices.py ./
+COPY _emailer.sh read_data.py reporting.py classify_slots.py emailer.sh methodology.md masked_hosts.yaml chtc_owned ./
 
 CMD ["uv", "run", "collector.py", "./"]

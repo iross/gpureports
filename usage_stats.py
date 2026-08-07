@@ -3,17 +3,16 @@
 GPU Usage Statistics Calculator
 
 Thin orchestration layer that coordinates data loading, calculations,
-and reporting for GPU usage analysis. See stats_data, stats_calculations,
-and stats_reporting for the implementation details.
+and reporting for GPU usage analysis. See read_data, classify_slots,
+and reporting for the implementation details.
 """
 
 import datetime
 
 import typer
 
-import gpu_utils
-from gpu_utils import load_host_exclusions
-from stats_calculations import (
+import classify_slots
+from classify_slots import (
     analyze_gpu_model_at_time,
     calculate_allocation_usage_by_device_enhanced,
     calculate_allocation_usage_by_memory,
@@ -28,8 +27,8 @@ from stats_calculations import (
     get_gpu_models_at_time,
     prepare_frames,
 )
-from stats_data import get_draining_data, get_time_filtered_data, scan_time_filtered
-from stats_reporting import (
+from read_data import get_draining_data, get_time_filtered_data, load_host_exclusions, scan_time_filtered
+from reporting import (
     generate_html_report,
     print_analysis_results,
     print_gpu_model_analysis,
@@ -67,8 +66,8 @@ def run_analysis(
     analysis_start_datetime = datetime.datetime.now()
 
     # Set up host exclusions
-    gpu_utils.HOST_EXCLUSIONS = load_host_exclusions(exclude_hosts, exclude_hosts_yaml)
-    gpu_utils.FILTERED_HOSTS_INFO = []  # Reset tracking
+    classify_slots.HOST_EXCLUSIONS = load_host_exclusions(exclude_hosts, exclude_hosts_yaml)
+    classify_slots.FILTERED_HOSTS_INFO = []  # Reset tracking
 
     # Prepare lazy frames over the Parquet window; the full window is never
     # materialized as a pandas DataFrame
@@ -83,7 +82,7 @@ def run_analysis(
             {
                 "original_count": frames.original_count,
                 "filtered_count": frames.original_count - frames.excluded_count,
-                "excluded_hosts": gpu_utils.HOST_EXCLUSIONS,
+                "excluded_hosts": classify_slots.HOST_EXCLUSIONS,
             }
         )
 
@@ -94,7 +93,7 @@ def run_analysis(
             "num_intervals": frames.total_buckets,
             "total_records": frames.original_count,
             "hours_back": hours_back,
-            "excluded_hosts": gpu_utils.HOST_EXCLUSIONS,
+            "excluded_hosts": classify_slots.HOST_EXCLUSIONS,
             "filtered_hosts_info": filtered_hosts_info,
         }
     }
@@ -111,12 +110,12 @@ def run_analysis(
             df = get_time_filtered_data(data_dir, hours_back, end_time)
             result["allocation_stats"] = calculate_allocation_usage_enhanced(df, host)
             # The pandas filters append per-call filtering counts to this list
-            result["metadata"]["filtered_hosts_info"] = gpu_utils.FILTERED_HOSTS_INFO
+            result["metadata"]["filtered_hosts_info"] = classify_slots.FILTERED_HOSTS_INFO
 
     elif analysis_type == "timeseries":
         df = get_time_filtered_data(data_dir, hours_back, end_time)
         result["timeseries_data"] = calculate_time_series_usage(df, bucket_minutes, host)
-        result["metadata"]["filtered_hosts_info"] = gpu_utils.FILTERED_HOSTS_INFO
+        result["metadata"]["filtered_hosts_info"] = classify_slots.FILTERED_HOSTS_INFO
 
     elif analysis_type == "monthly":
         result["monthly_stats"] = calculate_monthly_summary(data_dir, end_time)

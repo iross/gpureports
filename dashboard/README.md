@@ -7,7 +7,7 @@ publicly accessible.**
 
 A FastAPI web dashboard for real-time GPU state monitoring. Reads gpu_state Parquet
 files (or, for months predating the Parquet migration, SQLite) through the same
-canonical pipeline as the email reports (`stats_calculations.prepare_frames()`).
+canonical pipeline as the email reports (`classify_slots.prepare_frames()`).
 
 ## What it does
 
@@ -45,7 +45,7 @@ You'll need at least one such file present.
 ```
 dashboard/
 ├── server.py       # FastAPI app, API routes, response caching
-├── data.py         # Parquet/SQLite loading, dedup/classify via stats_calculations.prepare_frames()
+├── data.py         # Parquet/SQLite loading, dedup/classify via classify_slots.prepare_frames()
 ├── templates/      # Jinja2 HTML templates
 └── static/         # CSS, JS
 ```

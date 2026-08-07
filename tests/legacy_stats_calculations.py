@@ -21,15 +21,15 @@ from legacy_stats_data import (
     parquet_glob,
 )
 
-import gpu_utils
-from device_name_mappings import get_memory_category_from_mb
-from gpu_utils import (
+import classify_slots
+from classify_slots import (
     BACKFILL_SLOT_TYPES,
     CLASS_ORDER,
     UTILIZATION_TYPES,
     filter_df,
     filter_df_enhanced,
 )
+from devices import get_memory_category_from_mb
 
 
 def calculate_allocation_usage(df: pd.DataFrame, host: str = "") -> dict:
@@ -1022,8 +1022,8 @@ def calculate_machines_with_zero_active_gpus(
     df["timestamp"] = pd.to_datetime(df["timestamp"])
 
     # Apply host exclusions if configured (respects masked_hosts.yaml)
-    if gpu_utils.HOST_EXCLUSIONS:
-        for excluded_host in gpu_utils.HOST_EXCLUSIONS.keys():
+    if classify_slots.HOST_EXCLUSIONS:
+        for excluded_host in classify_slots.HOST_EXCLUSIONS.keys():
             df = df[~df["Machine"].str.contains(excluded_host, case=False, na=False)]
 
     # Apply host filter if specified

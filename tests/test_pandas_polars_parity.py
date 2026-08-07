@@ -1,15 +1,16 @@
 """Regression tests comparing the pre-migration pandas pipeline against the
 current polars pipeline, on identical input.
 
-The polars migration (task-40) replaced stats_calculations.py's calculation
-functions in place (same names, pandas DataFrame -> PreparedFrames), so the
-old implementation no longer exists in the live tree to compare against. The
-task's implementation notes describe a one-time manual comparison on 24h/168h
-windows, with no automated test locking in the result and no coverage of the
-monthly summary path. legacy_stats_data.py and legacy_stats_calculations.py
-are a frozen, verbatim copy of stats_data.py/stats_calculations.py as of
-commit c972c6c (the last commit before the migration) kept only so this test
-can run both implementations side by side and catch future drift.
+The polars migration (task-40) replaced stats_calculations.py's (now
+classify_slots.py's) calculation functions in place (same names, pandas
+DataFrame -> PreparedFrames), so the old implementation no longer exists in
+the live tree to compare against. The task's implementation notes describe a
+one-time manual comparison on 24h/168h windows, with no automated test
+locking in the result and no coverage of the monthly summary path.
+legacy_stats_data.py and legacy_stats_calculations.py are a frozen, verbatim
+copy of stats_data.py/stats_calculations.py as of commit c972c6c (the last
+commit before the migration) kept only so this test can run both
+implementations side by side and catch future drift.
 
 Two differences are intentional (documented in the task-40 notes) and are
 special-cased below instead of asserted equal:
@@ -33,9 +34,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import legacy_stats_calculations as legacy_calc  # noqa: E402
 import legacy_stats_data as legacy_data  # noqa: E402
 
-import gpu_utils  # noqa: E402
-import stats_calculations as calc  # noqa: E402
-import stats_data as data  # noqa: E402
+import classify_slots as calc  # noqa: E402
+import read_data as data  # noqa: E402
 
 _SCHEMA = {
     "Name": pl.Utf8,
@@ -111,9 +111,10 @@ def _build_rows():
 def parquet_data_dir(tmp_path, monkeypatch):
     """Write the synthetic window to gpu_state_2026-05.parquet and mark gpu2
     as CHTC-owned so the CHTCOwned/ResearcherOwned split is exercised on both
-    sides of the comparison (gpu_utils is shared by both implementations)."""
-    monkeypatch.setattr(gpu_utils, "_CHTC_OWNED_HOSTS", {"gpu2.chtc.wisc.edu"})
-    monkeypatch.setattr(gpu_utils, "HOST_EXCLUSIONS", {})
+    sides of the comparison (read_data/classify_slots state is shared by both
+    implementations)."""
+    monkeypatch.setattr(data, "_CHTC_OWNED_HOSTS", {"gpu2.chtc.wisc.edu"})
+    monkeypatch.setattr(calc, "HOST_EXCLUSIONS", {})
     df = pl.DataFrame(_build_rows()).cast(_SCHEMA)
     df.write_parquet(str(tmp_path / "gpu_state_2026-05.parquet"))
     return str(tmp_path)
