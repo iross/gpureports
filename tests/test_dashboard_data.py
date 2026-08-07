@@ -1,16 +1,17 @@
 """Regression tests for dashboard/data.py's parquet scans and dedup ranking.
 
-_query_dbs and get_opencap_users_data used to call pl.scan_parquet() with no explicit
-schema. That's fine as long as every file scanned individually happens to have the
-exact same column order/set as the code expects, but breaks the moment a file has
-columns reordered or is missing a newer column (e.g. PreventJobsReason, added after
-some files were already written) -- exactly the scenario stats_data.py's
-GPU_STATE_SCHEMA/missing_columns="insert"/SCAN_CAST_OPTIONS combination exists to
-tolerate.
+_query_dbs used to call pl.scan_parquet() with no explicit schema. That's fine as long
+as every file scanned individually happens to have the exact same column order/set as
+the code expects, but breaks the moment a file has columns reordered or is missing a
+newer column (e.g. PreventJobsReason, added after some files were already written) --
+exactly the scenario stats_data.py's GPU_STATE_SCHEMA/missing_columns="insert"/
+SCAN_CAST_OPTIONS combination exists to tolerate.
 
-_dedup_and_bucket and get_opencap_users_data also used to each hand-roll their own,
-disagreeing "which slot wins" rank instead of stats_calculations.slot_dedup_rank (the
-canonical, parity-tested ranking used by the email report pipeline).
+Dashboard's dedup/classify used to be its own hand-rolled implementation (removed in
+TASK-49.1 in favor of stats_calculations.prepare_frames()); _collapse_to_bucket_winner
+is the one piece of dashboard-specific logic that remains -- picking a single row per
+display bucket when prepare_frames()'s per-raw-timestamp dedup leaves more than one
+winner in the same bucket -- and it must agree with the canonical rank tiers.
 """
 
 import datetime
@@ -21,7 +22,7 @@ import polars as pl
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from dashboard.data import _dedup_and_bucket, _query_dbs  # noqa: E402
+from dashboard.data import STATE_CODES, _collapse_to_bucket_winner, _map_state_codes, _query_dbs  # noqa: E402
 from stats_calculations import slot_dedup_rank  # noqa: E402
 
 
@@ -76,31 +77,61 @@ def test_query_dbs_tolerates_reordered_and_missing_columns(tmp_path):
     assert set(combined["Name"]) == {"slot1@gpu1.chtc.wisc.edu", "slot1@gpu2.chtc.wisc.edu"}
 
 
-def test_dedup_and_bucket_matches_canonical_rank_on_backfill_vs_primary():
-    """dashboard/data.py's old 4-tier rank picked claimed-backfill over unclaimed-primary
+def test_collapse_to_bucket_winner_matches_canonical_rank_on_backfill_vs_primary():
+    """A pre-task-47 4-tier rank picked claimed-backfill over unclaimed-primary
     (backwards from stats_calculations.slot_dedup_rank, which ranks unclaimed-primary(5)
-    above claimed-backfill(3)) -- exactly the disagreement task-47 describes. Same GPU,
-    same bucket, one primary slot Unclaimed and one backfill slot Claimed: the canonical
-    rank must pick the primary row.
+    above claimed-backfill(3)). Same GPU, same display bucket, one primary slot
+    Unclaimed and one backfill slot Claimed (as prepare_frames()'s per-timestamp dedup
+    would emit if both were the sole survivor of their own raw timestamp): the collapse
+    step must pick the primary row.
     """
-    ts = datetime.datetime(2026, 5, 15, 10, 0, 0)
-    df = pl.DataFrame(
+    bucket = datetime.datetime(2026, 5, 15, 10, 0, 0)
+    dedup = pl.DataFrame(
         {
-            "Name": ["slot1@gpu1.chtc.wisc.edu", "slot1_backfill@gpu1.chtc.wisc.edu"],
+            "bucket": [bucket, bucket],
             "AssignedGPUs": ["GPU-1A", "GPU-1A"],
+            "Name": ["slot1@gpu1.chtc.wisc.edu", "slot1_backfill@gpu1.chtc.wisc.edu"],
             "State": ["Unclaimed", "Claimed"],
-            "PreventJobsReason": pl.Series([None, None], dtype=pl.Utf8),
-            "timestamp": [ts, ts],
+            "_is_bf": [False, True],
+            "_pj_set": [False, False],
         }
     )
 
-    result = _dedup_and_bucket(df, bucket_minutes=15)
+    result = _collapse_to_bucket_winner(dedup)
 
     assert result.height == 1
     assert result["Name"][0] == "slot1@gpu1.chtc.wisc.edu"
 
     # Cross-check directly against the canonical rank tiers.
-    is_bf = pl.col("Name").str.contains("backfill")
-    ranked = df.with_columns(slot_dedup_rank(is_bf, pl.col("State"), pl.lit(False)).alias("_rank"))
+    ranked = dedup.with_columns(slot_dedup_rank(pl.col("_is_bf"), pl.col("State"), pl.lit(False)).alias("_rank"))
     assert ranked.filter(pl.col("Name") == "slot1@gpu1.chtc.wisc.edu")["_rank"][0] == 5
     assert ranked.filter(pl.col("Name") == "slot1_backfill@gpu1.chtc.wisc.edu")["_rank"][0] == 3
+
+
+def test_map_state_codes_covers_all_six_states_and_na_fallback():
+    """_map_state_codes derives the dashboard's 6 STATE_CODES from
+    prepare_frames()'s _is_bf/_pp_prio/State columns (TASK-49.1); this pins the
+    mapping against every combination the old hand-rolled _classify_states covered,
+    plus the "na" fallback for a state that's neither Claimed nor Unclaimed."""
+    rows = [
+        # (State, _is_bf, _pp_prio) -> expected state code
+        ("Claimed", True, False, "busy_backfill"),
+        ("Claimed", True, True, "busy_backfill"),  # backfill wins over priority when claimed
+        ("Claimed", False, True, "busy_prioritized"),
+        ("Claimed", False, False, "busy_shared"),
+        ("Unclaimed", True, False, "idle_backfill"),
+        ("Unclaimed", True, True, "idle_backfill"),
+        ("Unclaimed", False, True, "idle_prioritized"),
+        ("Unclaimed", False, False, "idle_shared"),
+        ("Drained", False, False, "na"),
+    ]
+    df = pl.DataFrame(
+        {
+            "State": [r[0] for r in rows],
+            "_is_bf": [r[1] for r in rows],
+            "_pp_prio": [r[2] for r in rows],
+        }
+    )
+    result = _map_state_codes(df)
+    expected = [STATE_CODES[r[3]] for r in rows]
+    assert result["state_code"].to_list() == expected

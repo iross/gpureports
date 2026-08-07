@@ -113,17 +113,25 @@ def slot_dedup_rank(is_bf: pl.Expr, state: pl.Expr, prev_idle: pl.Expr) -> pl.Ex
     )
 
 
-def prepare_frames(lf: pl.LazyFrame) -> PreparedFrames:
+def prepare_frames(lf: pl.LazyFrame, bucket_minutes: int = 15) -> PreparedFrames:
     """Derive classification columns and collect the shared dedup/backfill frames.
 
     The duplicate-slot ranking (see gpu_utils._apply_duplicate_cleanup) is
     computed once for the whole window instead of once per class/device
     filter: each GPU maps to a single machine and device, so a global dedup
     is equivalent to the per-subset dedup the pandas filters performed.
+
+    bucket_minutes controls the truncation granularity of the returned
+    `bucket` column; it does not affect the dedup itself, which always
+    picks one winning row per exact raw timestamp. Callers that need a
+    single row per (bucket, GPU) -- e.g. a heatmap display cell -- must
+    do a further rank-based collapse over `dedup` when bucket_minutes
+    exceeds the raw collection interval (see dashboard/data.py).
     """
     exclusions = gpu_utils.HOST_EXCLUSIONS
     chtc_hosts = load_chtc_owned_hosts()
     has_pj = _PJ_COLUMN in lf.collect_schema().names()
+    bucket_str = f"{bucket_minutes}m"
 
     state = pl.col("State")
     if has_pj:
@@ -134,7 +142,7 @@ def prepare_frames(lf: pl.LazyFrame) -> PreparedFrames:
         prev_idle = pl.lit(False)
 
     raw = lf.with_columns(
-        pl.col("timestamp").dt.truncate("15m").alias("bucket"),
+        pl.col("timestamp").dt.truncate(bucket_str).alias("bucket"),
         pl.col("Name").str.contains("backfill").fill_null(False).alias("_is_bf"),
         pl.col("Name").str.contains("interactive").fill_null(False).alias("_is_inter"),
         # pandas object-dtype `!= ""` treats null as True and `== ""` as False;
@@ -178,7 +186,7 @@ def prepare_frames(lf: pl.LazyFrame) -> PreparedFrames:
         .group_by("timestamp", "AssignedGPUs")
         .agg(pl.struct(dedup_cols).sort_by("_rank").last().alias("_top"))
         .unnest("_top")
-        .with_columns(pl.col("timestamp").dt.truncate("15m").alias("bucket"))
+        .with_columns(pl.col("timestamp").dt.truncate(bucket_str).alias("bucket"))
         .drop("timestamp")
     )
 

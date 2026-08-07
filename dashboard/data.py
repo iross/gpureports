@@ -1,7 +1,8 @@
 """Data layer for the GPU state dashboard.
 
-Queries SQLite DBs, deduplicates, classifies GPU states, and returns
-structured dicts matching the API response shape.
+Queries gpu_state Parquet (or, for months predating the migration, SQLite)
+files, dedups/classifies via stats_calculations.prepare_frames(), and
+returns structured dicts matching the API response shape.
 """
 
 import datetime
@@ -10,15 +11,15 @@ import sqlite3
 from pathlib import Path
 
 import polars as pl
-import yaml
 
+import gpu_utils
 from gpu_utils_polars import (
     get_latest_timestamp_from_most_recent_parquet as get_latest_timestamp_from_most_recent_db,
 )
 from gpu_utils_polars import (
     get_required_parquet_files as get_required_databases,
 )
-from stats_calculations import slot_dedup_rank
+from stats_calculations import prepare_frames, slot_dedup_rank
 from stats_data import GPU_STATE_SCHEMA, SCAN_CAST_OPTIONS
 
 logger = logging.getLogger(__name__)
@@ -60,21 +61,19 @@ COLUMNS = [
     "PrioritizedProjects",
     "Machine",
     "GPUs_DeviceName",
+    "GPUs_GlobalMemoryMb",
+    "RemoteOwner",
     "PreventJobsReason",
     "timestamp",
 ]
 
 
-def _load_masked_hosts(base_dir: str = ".") -> set[str]:
-    """Load excluded hosts from masked_hosts.yaml."""
-    path = Path(base_dir) / "masked_hosts.yaml"
-    if not path.exists():
-        return set()
-    with open(path) as f:
-        data = yaml.safe_load(f)
-    if data and "excluded_hosts" in data:
-        return set(data["excluded_hosts"].keys())
-    return set()
+def _set_host_exclusions(base_dir: str = ".") -> None:
+    """Load masked_hosts.yaml into gpu_utils.HOST_EXCLUSIONS, the global
+    prepare_frames() reads -- mirrors the pattern report.py/usage_stats.py
+    use before calling it."""
+    yaml_path = Path(base_dir) / "masked_hosts.yaml"
+    gpu_utils.HOST_EXCLUSIONS = gpu_utils.load_host_exclusions(None, str(yaml_path) if yaml_path.exists() else None)
 
 
 def _file_month_label(path: str) -> str:
@@ -145,61 +144,52 @@ def _query_dbs(
     return combined, warnings
 
 
-def _rank_inputs() -> tuple[pl.Expr, pl.Expr, pl.Expr]:
-    """(is_bf, state, prev_idle) expressions for slot_dedup_rank, matching how
-    stats_calculations.prepare_frames() derives them from the same raw columns."""
-    is_bf = pl.col("Name").str.contains("backfill").fill_null(False)
-    state = pl.col("State")
-    pj_set = pl.col("PreventJobsReason").is_not_null() & (pl.col("PreventJobsReason").str.strip_chars() != "")
-    prev_idle = pj_set & (state != "Claimed")
-    return is_bf, state, prev_idle
+def _collapse_to_bucket_winner(dedup: pl.DataFrame) -> pl.DataFrame:
+    """Pick one winning row per (bucket, AssignedGPUs).
+
+    prepare_frames() dedups at raw-timestamp granularity, so when the
+    requested bucket is wider than the raw collection interval, multiple
+    per-timestamp winners can still land in the same display bucket. Collapse
+    those using the same canonical rank, then rename to the "time_bucket"
+    label the rest of this module uses.
+    """
+    prev_idle = pl.col("_pj_set") & (pl.col("State") != "Claimed")
+    rank = slot_dedup_rank(pl.col("_is_bf"), pl.col("State"), prev_idle)
+    return (
+        dedup.with_columns(rank.alias("_rank"))
+        .sort(["bucket", "AssignedGPUs", "_rank"], descending=[False, False, True])
+        .unique(subset=["bucket", "AssignedGPUs"], keep="first")
+        .drop("_rank")
+        .rename({"bucket": "time_bucket"})
+    )
 
 
-def _classify_states(df: pl.DataFrame) -> pl.DataFrame:
-    """Classify each row into one of 6 GPU state codes."""
+def _map_state_codes(df: pl.DataFrame) -> pl.DataFrame:
+    """Map prepare_frames()'s canonical classification columns to the
+    dashboard's 6 STATE_CODES. CHTC-owned priority slots are folded into the
+    same prioritized bucket as researcher-owned, and interactive slots are
+    not distinguished -- matching this module's pre-existing 6-state
+    vocabulary (see TASK-49.1)."""
+    claimed = pl.col("State") == "Claimed"
+    unclaimed = pl.col("State") == "Unclaimed"
+    is_bf = pl.col("_is_bf")
+    is_prio = pl.col("_pp_prio")
     return df.with_columns(
-        pl.when(
-            (pl.col("State").str.to_lowercase() == "claimed")
-            & (pl.col("PrioritizedProjects") != "")
-            & (~pl.col("Name").str.to_lowercase().str.contains("backfill"))
-        )
-        .then(pl.lit(STATE_CODES["busy_prioritized"]))
-        .when(
-            (pl.col("State").str.to_lowercase() == "claimed")
-            & (~pl.col("Name").str.to_lowercase().str.contains("backfill"))
-        )
-        .then(pl.lit(STATE_CODES["busy_shared"]))
-        .when(
-            (pl.col("State").str.to_lowercase() == "claimed")
-            & (pl.col("Name").str.to_lowercase().str.contains("backfill"))
-        )
+        pl.when(claimed & is_bf)
         .then(pl.lit(STATE_CODES["busy_backfill"]))
-        .when(
-            (pl.col("State").str.to_lowercase() == "unclaimed")
-            & (pl.col("Name").str.to_lowercase().str.contains("backfill"))
-        )
+        .when(claimed & is_prio)
+        .then(pl.lit(STATE_CODES["busy_prioritized"]))
+        .when(claimed)
+        .then(pl.lit(STATE_CODES["busy_shared"]))
+        .when(unclaimed & is_bf)
         .then(pl.lit(STATE_CODES["idle_backfill"]))
-        .when((pl.col("State").str.to_lowercase() == "unclaimed") & (pl.col("PrioritizedProjects") != ""))
+        .when(unclaimed & is_prio)
         .then(pl.lit(STATE_CODES["idle_prioritized"]))
-        .when(pl.col("State").str.to_lowercase() == "unclaimed")
+        .when(unclaimed)
         .then(pl.lit(STATE_CODES["idle_shared"]))
         .otherwise(pl.lit(STATE_CODES["na"]))
         .alias("state_code")
     )
-
-
-def _dedup_and_bucket(df: pl.DataFrame, bucket_minutes: int) -> pl.DataFrame:
-    """Floor timestamps to buckets, rank duplicates, keep highest-priority entry."""
-    df = df.with_columns(pl.col("timestamp").dt.truncate(f"{bucket_minutes}m").alias("time_bucket"))
-
-    df = df.with_columns(slot_dedup_rank(*_rank_inputs()).alias("_rank"))
-
-    # Sort by rank descending so first row per group wins
-    df = df.sort(["time_bucket", "AssignedGPUs", "_rank"], descending=[False, False, True])
-    df = df.unique(subset=["time_bucket", "AssignedGPUs"], keep="first")
-    df = df.drop("_rank")
-
-    return df
 
 
 def _prepare_bucketed(
@@ -228,13 +218,13 @@ def _prepare_bucketed(
     if df.height == 0:
         return df, [], [], warnings
 
-    masked = _load_masked_hosts(base_dir)
-    if masked:
-        for host in masked:
-            df = df.filter(~pl.col("Machine").str.contains(host))
+    _set_host_exclusions(base_dir)
+    frames = prepare_frames(df.lazy(), bucket_minutes=bucket_minutes)
+    dedup = frames.dedup.collect()
+    if dedup.height == 0:
+        return dedup, [], [], warnings
 
-    df = _dedup_and_bucket(df, bucket_minutes)
-    df = _classify_states(df)
+    df = _map_state_codes(_collapse_to_bucket_winner(dedup))
 
     all_buckets = sorted(df["time_bucket"].unique().to_list())
     bucket_strs = [t.strftime("%Y-%m-%dT%H:%M") for t in all_buckets]
@@ -273,10 +263,13 @@ def get_heatmap_data(
         return _empty_heatmap_response(warnings)
     bucket_index = {t: i for i, t in enumerate(all_buckets)}
 
-    # Build machine-grouped structure
+    # Build machine-grouped structure. Sort nulls last before taking one row per
+    # GPU so a bucket where GPUs_DeviceName happened to be unreported doesn't
+    # arbitrarily win over a bucket where it was (previously order-dependent).
     gpu_info = (
         df.select("Machine", "AssignedGPUs", "GPUs_DeviceName")
-        .unique(subset=["Machine", "AssignedGPUs"])
+        .sort("GPUs_DeviceName", nulls_last=True)
+        .unique(subset=["Machine", "AssignedGPUs"], keep="first")
         .sort(["Machine", "AssignedGPUs"])
     )
 
@@ -347,8 +340,6 @@ def get_counts_data(
     -------
     dict with 'buckets' list and 'series' dict per category.
     """
-    # Resolve time range and load raw data (same steps as _prepare_bucketed,
-    # but we need the pre-dedup DataFrame for accurate backfill counts).
     if end is None:
         end = get_latest_timestamp_from_most_recent_db(base_dir)
         if end is None:
@@ -364,43 +355,43 @@ def get_counts_data(
     if df_raw.height == 0:
         return _empty_counts_response(warnings)
 
-    masked = _load_masked_hosts(base_dir)
-    if masked:
-        for host in masked:
-            df_raw = df_raw.filter(~pl.col("Machine").str.contains(host))
+    _set_host_exclusions(base_dir)
+    frames = prepare_frames(df_raw.lazy(), bucket_minutes=bucket_minutes)
 
-    # Count all categories directly from raw (pre-dedup) slot rows.
+    # Count each slot type independently off pre-dedup, host-excluded rows.
     #
     # A GPU can appear in BOTH a primary slot and a backfill slot simultaneously.
     # Dedup merges these, causing GPUs to disappear from primary totals when
     # their backfill slot wins the rank competition (e.g. backfill-claimed > primary-idle).
     # Counting each slot type independently avoids this entirely.
-    df_raw_bucketed = df_raw.with_columns(pl.col("timestamp").dt.truncate(f"{bucket_minutes}m").alias("time_bucket"))
+    primary_df = frames.raw.filter(
+        ~pl.col("_excluded") & ~pl.col("_is_bf") & pl.col("AssignedGPUs").is_not_null()
+    ).collect()
+    backfill_df = frames.raw_bf.collect()
 
-    is_backfill = pl.col("Name").str.to_lowercase().str.contains("backfill")
-    is_claimed = pl.col("State").str.to_lowercase() == "claimed"
-    has_gpu = pl.col("AssignedGPUs").is_not_null()
-    has_priority = pl.col("PrioritizedProjects").is_not_null() & (pl.col("PrioritizedProjects") != "")
+    is_claimed = pl.col("State") == "Claimed"
+    has_priority = pl.col("_pp_prio")
 
-    primary_df = df_raw_bucketed.filter(~is_backfill & has_gpu)
-    backfill_df = df_raw_bucketed.filter(is_backfill & has_gpu)
-
-    all_buckets = sorted(df_raw_bucketed.filter(has_gpu)["time_bucket"].unique().to_list())
+    all_buckets = sorted(
+        pl.concat([primary_df.select("bucket"), backfill_df.select("bucket")], how="vertical")
+        .unique()["bucket"]
+        .to_list()
+    )
     bucket_strs = [t.strftime("%Y-%m-%dT%H:%M") for t in all_buckets]
-    buckets_df = pl.DataFrame({"time_bucket": all_buckets})
+    buckets_df = pl.DataFrame({"bucket": all_buckets})
 
     def _count_series(df: pl.DataFrame, total_mask: pl.Expr, claimed_mask: pl.Expr) -> dict[str, list]:
-        total_df = df.filter(total_mask).group_by("time_bucket").agg(pl.col("AssignedGPUs").n_unique().alias("total"))
+        total_df = df.filter(total_mask).group_by("bucket").agg(pl.col("AssignedGPUs").n_unique().alias("total"))
         claimed_df = (
             df.filter(total_mask & claimed_mask)
-            .group_by("time_bucket")
+            .group_by("bucket")
             .agg(pl.col("AssignedGPUs").n_unique().alias("claimed"))
         )
         merged = (
-            buckets_df.join(total_df, on="time_bucket", how="left")
-            .join(claimed_df, on="time_bucket", how="left")
+            buckets_df.join(total_df, on="bucket", how="left")
+            .join(claimed_df, on="bucket", how="left")
             .fill_null(0)
-            .sort("time_bucket")
+            .sort("bucket")
         )
         return {"total": merged["total"].to_list(), "claimed": merged["claimed"].to_list()}
 
@@ -447,104 +438,45 @@ def get_opencap_users_data(
     if not db_paths:
         return {"buckets": [], "series": {}, "warnings": []}
 
-    opencap_cols = [
-        "Name",
-        "AssignedGPUs",
-        "State",
-        "PrioritizedProjects",
-        "Machine",
-        "RemoteOwner",
-        "PreventJobsReason",
-        "timestamp",
-    ]
-    col_select = ", ".join(f'"{c}"' for c in opencap_cols)
-    buffered_start = start - datetime.timedelta(seconds=1)
-
-    frames = []
-    warnings: list[str] = []
-    for path, fmt in db_paths:
-        try:
-            if fmt == "parquet":
-                df = (
-                    pl.scan_parquet(
-                        path, schema=GPU_STATE_SCHEMA, missing_columns="insert", cast_options=SCAN_CAST_OPTIONS
-                    )
-                    .filter(
-                        (pl.col("timestamp") >= buffered_start)
-                        & (pl.col("timestamp") <= end)
-                        & pl.col("AssignedGPUs").is_not_null()
-                        & (pl.col("AssignedGPUs") != "")
-                    )
-                    .select([c for c in opencap_cols if c != "RemoteOwner"] + ["RemoteOwner"])
-                    .collect()
-                )
-            else:
-                query = (
-                    f"SELECT {col_select} FROM gpu_state "
-                    f"WHERE timestamp BETWEEN '{buffered_start.strftime('%Y-%m-%d %H:%M:%S.%f')}' "
-                    f"  AND '{end.strftime('%Y-%m-%d %H:%M:%S.%f')}' "
-                    f"  AND AssignedGPUs IS NOT NULL AND AssignedGPUs != ''"
-                )  # noqa: S608
-                df = _read_sqlite(path, query)
-            if df.height > 0:
-                frames.append(df)
-        except Exception as e:
-            logger.warning("Could not load %s: %s", path, e)
-            warnings.append(f"Failed to load data for {_file_month_label(path)}: {e}")
-
-    if not frames:
+    df_raw, warnings = _query_dbs(db_paths, start, end)
+    if df_raw.height == 0:
         return {"buckets": [], "series": {}, "warnings": warnings}
 
-    df = pl.concat(frames, how="diagonal_relaxed")
-    df = df.with_columns(pl.col("timestamp").cast(pl.Datetime("us")))
-    df = df.filter((pl.col("timestamp") >= start) & (pl.col("timestamp") <= end))
+    _set_host_exclusions(base_dir)
+    # bucket_minutes=1 keeps prepare_frames()'s internal "bucket" column at
+    # effectively raw-snapshot granularity (the collection interval is 5
+    # minutes) so per-snapshot GPU counts aren't merged before the
+    # peak-within-display-bucket step below.
+    frames = prepare_frames(df_raw.lazy(), bucket_minutes=1)
 
-    masked = _load_masked_hosts(base_dir)
-    if masked:
-        for host in masked:
-            df = df.filter(~pl.col("Machine").str.contains(host))
-
-    if df.height == 0:
-        return {"buckets": [], "series": {}, "warnings": warnings}
-
-    # Dedup: one row per (timestamp, GPU), using the canonical cross-pipeline rank.
-    # Must dedup before filtering so a GPU isn't double-counted when it appears
-    # in both a primary and a backfill slot simultaneously.
-    df = df.with_columns(slot_dedup_rank(*_rank_inputs()).alias("_rank"))
-    df = df.sort(["timestamp", "AssignedGPUs", "_rank"], descending=[False, False, True])
-    df = df.unique(subset=["timestamp", "AssignedGPUs"], keep="first")
-    df = df.drop("_rank")
-
-    is_backfill = pl.col("Name").str.to_lowercase().str.contains("backfill")
-    is_claimed = pl.col("State").str.to_lowercase() == "claimed"
-
-    # Filter to claimed open-cap slots with a known owner
-    has_priority = pl.col("PrioritizedProjects").is_not_null() & (pl.col("PrioritizedProjects") != "")
     has_owner = pl.col("RemoteOwner").is_not_null() & (pl.col("RemoteOwner") != "")
-    df = df.filter(is_claimed & ~is_backfill & ~has_priority & has_owner)
+    df = frames.dedup.filter(
+        (pl.col("State") == "Claimed") & ~pl.col("_is_bf") & ~pl.col("_pp_prio") & has_owner
+    ).collect()
 
     if df.height == 0:
         return {"buckets": [], "series": {}, "warnings": warnings}
 
-    # Count distinct GPUs per (timestamp, owner) snapshot, then take max within bucket.
-    # Using max (not sum) matches the script: "peak snapshot within the window".
-    snap = (
-        df.group_by(["timestamp", "RemoteOwner"])
-        .agg(pl.col("AssignedGPUs").n_unique().alias("snap_count"))
-        .with_columns(pl.col("timestamp").dt.truncate(f"{bucket_minutes}m").alias("bucket"))
-    )
-    bucketed = snap.group_by(["bucket", "RemoteOwner"]).agg(pl.col("snap_count").max().alias("gpu_count"))
+    # Count distinct GPUs per (snapshot, owner), then take max within the
+    # requested display bucket. Using max (not sum) matches the script:
+    # "peak snapshot within the window".
+    snap = df.group_by(["bucket", "RemoteOwner"]).agg(pl.col("AssignedGPUs").n_unique().alias("snap_count"))
+    snap = snap.with_columns(pl.col("bucket").dt.truncate(f"{bucket_minutes}m").alias("display_bucket"))
+    bucketed = snap.group_by(["display_bucket", "RemoteOwner"]).agg(pl.col("snap_count").max().alias("gpu_count"))
+    bucketed = bucketed.rename({"display_bucket": "bucket"})
 
     all_buckets = sorted(bucketed["bucket"].unique().to_list())
     bucket_strs = [t.strftime("%Y-%m-%dT%H:%M") for t in all_buckets]
     bucket_index = {b: i for i, b in enumerate(all_buckets)}
     n_buckets = len(all_buckets)
 
-    # Rank users by peak GPU count; anonymize as "User 1", "User 2", …
+    # Rank users by peak GPU count; anonymize as "User 1", "User 2", … Break ties
+    # on RemoteOwner so equal-peak users get a deterministic (if arbitrary) label
+    # instead of one that depends on incidental row order upstream.
     top_users = (
         bucketed.group_by("RemoteOwner")
         .agg(pl.col("gpu_count").max().alias("peak"))
-        .sort("peak", descending=True)
+        .sort(["peak", "RemoteOwner"], descending=[True, False])
         .head(top_n)["RemoteOwner"]
         .to_list()
     )
