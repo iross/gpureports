@@ -8,8 +8,8 @@ schedule.
 
 ```
 HTCondor collector
-    → get_gpu_state.py (every 5 min)
-    → gpu_state_YYYY-MM.db (SQLite, one file per calendar month)
+    → collector.py (every 5 min)
+    → gpu_state_YYYY-MM.parquet (one file per calendar month)
     → usage_stats.py (via emailer.sh)
     → email report
 
@@ -18,11 +18,13 @@ HTCondor schedds (all)
     → job_pressure_YYYY-MM.db (SQLite, one file per calendar month)
 ```
 
+Note: this section's crontab/paths describe the legacy baremetal deployment. collector.py's
+current invocation (cron vs. k8s CronJob) is being reconciled in TASK-49.3.
+
 ## Crontab entries
 
 ```
 # Data collection
-*/5 * * * * /home/iaross/gpureports/.venv/bin/python /home/iaross/gpureports/get_gpu_state.py &> /tmp/gpu_state.log
 */5 * * * * /home/iaross/gpureports/.venv/bin/python /home/iaross/gpureports/get_job_pressure.py &> /tmp/job_pressure.log
 
 # Email reports
@@ -38,7 +40,6 @@ To install: `crontab -e` on the production host and paste the above.
 
 | Log | Written by |
 |-----|-----------|
-| `/tmp/gpu_state.log` | `get_gpu_state.py` — GPU slot collection |
 | `/tmp/job_pressure.log` | `get_job_pressure.py` — idle GPU job collection |
 | `/tmp/gpu_emailer.log` | `emailer.sh daily` and `emailer.sh test` |
 | `/tmp/gpu_emailer_weekly.log` | `emailer.sh weekly` |
@@ -46,14 +47,9 @@ To install: `crontab -e` on the production host and paste the above.
 
 ## Database files
 
-SQLite databases live in the repo directory at `/home/iaross/gpureports/`:
-
 ```
-gpu_state_2025-06.db
-gpu_state_2025-07.db
-...
-gpu_state_YYYY-MM.db      ← GPU slot state, one per calendar month
-job_pressure_YYYY-MM.db   ← idle GPU job queue snapshots, one per calendar month
+gpu_state_YYYY-MM.parquet  ← GPU slot state (collector.py), one per calendar month
+job_pressure_YYYY-MM.db    ← idle GPU job queue snapshots (SQLite, get_job_pressure.py), one per calendar month
 ```
 
 Both scripts create a new file on the first run of each month.
@@ -81,16 +77,16 @@ bash emailer.sh daily    # or weekly / monthly / test
 - Confirm the venv is intact: `ls .venv/bin/python`
 
 **Empty report or wrong data**
-- Check `/tmp/gpu_state.log` — if collection is failing, the DB won't be updated
+- Confirm collector.py is running and the latest gpu_state_YYYY-MM.parquet is being updated
 - Confirm the HTCondor collector is reachable from the host:
   `python -c "import htcondor; print(htcondor.Collector().query()[:1])"`
 
-**Missing DB file / no data for time range**
-- Verify `get_gpu_state.py` cron is running: `crontab -l`
+**Missing data file / no data for time range**
+- Confirm collector.py is running (see TASK-49.3 for its current invocation mechanism)
 - Check disk space: `df -h /home/iaross/gpureports`
 
-**`get_gpu_state.py` or `get_job_pressure.py` exits silently**
-- The scripts use HTCondor Python bindings (`htcondor` package) which must be installed
+**`get_job_pressure.py` exits silently**
+- The script uses HTCondor Python bindings (`htcondor` package) which must be installed
   in the system Python or the venv. These are not in `pyproject.toml` because they're
   provided by the HTCondor installation on the host — not installable via pip on dev machines.
 

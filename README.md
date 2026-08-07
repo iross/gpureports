@@ -9,7 +9,7 @@ HTCondor collector and written to monthly SQLite databases. Email reports go out
 weekly, and monthly via cron.
 
 ```
-HTCondor → get_gpu_state.py → gpu_state_YYYY-MM.db → usage_stats.py → email
+HTCondor → collector.py → gpu_state_YYYY-MM.parquet → usage_stats.py → email
 ```
 
 See [OPERATIONS.md](OPERATIONS.md) for crontab entries, log locations, and troubleshooting.
@@ -21,8 +21,7 @@ See [OPERATIONS.md](OPERATIONS.md) for crontab entries, log locations, and troub
 ├── gpu_utils_polars.py        # Polars-based utilities for fast multi-DB loading
 ├── usage_stats.py             # Main analysis and reporting (full features, email)
 ├── usage_stats_polars.py      # Polars-accelerated reporting (fast, basic features)
-├── get_gpu_state.py           # Data collection from HTCondor
-├── get_gpu_state_polars.py    # Polars-based data collection
+├── collector.py                # Data collection from HTCondor, writes Parquet
 ├── weekly_gpu_hours_analysis.py  # Weekly GPU hours trend analysis
 ├── check_unused_gpus.py       # Detect flagship/standard GPUs unused in last week
 ├── draining_report.py         # Report on draining GPU nodes
