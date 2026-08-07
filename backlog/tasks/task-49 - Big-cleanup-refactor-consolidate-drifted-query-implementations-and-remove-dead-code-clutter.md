@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-07-31 21:00'
+updated_date: '2026-08-06 21:11'
 labels: []
 dependencies:
   - TASK-45
@@ -26,3 +27,15 @@ This codebase has accumulated real bloat, mostly from logic that got copied and 
 - [ ] #3 Operational docs (OPERATIONS.md, dashboard/README.md) accurately describe the current collector.py/Parquet-based architecture
 - [ ] #4 No pandas/polars utility module exists that duplicates logic already covered by its counterpart
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Land TASK-50 (Dockerfile.dashboard hotfix) first, independent of this refactor.
+2. Do TASK-49.2 (remove get_gpu_state.py) and the stray-file half of TASK-49.3 in parallel/either order -- both are cheap and fully independent.
+3. Do TASK-49.1 (unify dashboard/data.py + report.py onto scan_time_filtered()/prepare_frames()) before TASK-49.4. prepare_frames() currently depends on gpu_utils.HOST_EXCLUSIONS/load_chtc_owned_hosts; consolidating gpu_utils first would make 49.1 chase a moving dependency target. Doing 49.1 first means gpu_utils.py stays fixed while dashboard/report.py converge onto the canonical pipeline, so 49.4 only has one remaining call-site pattern to migrate instead of several independently-evolved ones.
+4. Do TASK-49.4 (consolidate gpu_utils.py into gpu_utils_polars.py, then rename to plain gpu_utils.py) after 49.1.
+5. Do the doc-rewrite half of TASK-49.3 (OPERATIONS.md, dashboard/README.md, root README.md) last, once the final architecture (single pipeline, single utils module) actually exists to describe -- writing it earlier means rewriting it twice.
+
+Risk notes: 49.1 is the highest-risk stage since it touches the live email-report cron (report.py via emailer.sh) and the live dashboard -- land dashboard and report.py changes as separate commits/PRs given their different blast radii, and verify via emailer.sh test before the next scheduled cron fire. 49.2's repo deletion doesn't guarantee a stale cron entry isn't still running get_gpu_state.py on the actual host outside this repo -- flag as an operational check, not assume it's covered.
+<!-- SECTION:PLAN:END -->

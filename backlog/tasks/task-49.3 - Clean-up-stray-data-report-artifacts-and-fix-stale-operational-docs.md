@@ -4,6 +4,7 @@ title: Clean up stray data/report artifacts and fix stale operational docs
 status: To Do
 assignee: []
 created_date: '2026-07-31 21:00'
+updated_date: '2026-08-06 21:11'
 labels: []
 dependencies: []
 parent_task_id: TASK-49
@@ -21,3 +22,18 @@ The repo root has accumulated stray files not meant to be long-term artifacts: t
 - [ ] #2 Generated analysis report markdown files are moved out of the repo root (e.g. into a gitignored output directory or deleted if superseded) or documented as intentional, checked-in artifacts if they should stay
 - [ ] #3 OPERATIONS.md and dashboard/README.md accurately describe the collector.py-based Kubernetes deployment instead of the legacy cron/get_gpu_state.py setup
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+Part A (do early, independent of 49.1/49.4):
+1. Delete test.parquet, gpus_2025-02-27.parquet, gpus_2025-02-27.csv (confirmed gitignored/untracked, no git history, zero code references by filename).
+2. Move or delete the root-level one-off report markdown files (bhaskar_report.md, gitter_report.md, isye_report.md, isye_report_plan.md, sqlite_vs_parquet_report_comparison.md) -- relocate anything worth keeping into backlog/docs/ or backlog/decisions/, following the existing precedent there.
+3. Also sweep the untracked _polars/_pandas comparison html artifacts at repo root (polars.html, pandas.html, last-day_polars.html, pandas_24h*.html) left over from the TASK-25/40 migration -- generated output, not source.
+
+Part B (do last, after 49.1 and 49.4 land, so it describes the final architecture):
+4. Rewrite OPERATIONS.md: replace the get_gpu_state.py/SQLite dataflow diagram, crontab entries, log table, and troubleshooting steps with collector.py's Parquet-based, k8s CronJob-deployed architecture (per backlog/decisions/task-48-dashboard-pvc-concurrency.md).
+5. Rewrite dashboard/README.md: remove the stale 'reads gpu_state_YYYY-MM.db'/'not currently deployed' language; describe Parquet-primary with SQLite fallback and the actual current k8s deployment status.
+6. Fix root README.md: remove references to usage_stats_polars.py and get_gpu_state_polars.py (neither file exists), point the CLI section at report.py, and update the dataflow diagram and Project Structure section to match the post-49.1/49.4 layout.
+7. If the actual k8s manifest/deployment topology isn't concretely knowable from backlog/decisions/task-48 alone, split off a small investigation task rather than write speculative docs.
+<!-- SECTION:PLAN:END -->
