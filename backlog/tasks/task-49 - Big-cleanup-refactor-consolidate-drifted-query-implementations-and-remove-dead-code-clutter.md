@@ -3,10 +3,11 @@ id: TASK-49
 title: >-
   Big cleanup/refactor: consolidate drifted query implementations and remove
   dead code/clutter
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - '@claude'
 created_date: '2026-07-31 21:00'
-updated_date: '2026-08-06 21:11'
+updated_date: '2026-08-07 16:00'
 labels: []
 dependencies:
   - TASK-45
@@ -22,10 +23,10 @@ This codebase has accumulated real bloat, mostly from logic that got copied and 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The codebase has one canonical query/classify/dedup implementation for gpu_state data, not three
-- [ ] #2 Dead legacy collector code and unused/stray data files are removed or clearly archived, not left live in the working tree
-- [ ] #3 Operational docs (OPERATIONS.md, dashboard/README.md) accurately describe the current collector.py/Parquet-based architecture
-- [ ] #4 No pandas/polars utility module exists that duplicates logic already covered by its counterpart
+- [x] #1 The codebase has one canonical query/classify/dedup implementation for gpu_state data, not three
+- [x] #2 Dead legacy collector code and unused/stray data files are removed or clearly archived, not left live in the working tree
+- [x] #3 Operational docs (OPERATIONS.md, dashboard/README.md) accurately describe the current collector.py/Parquet-based architecture
+- [x] #4 No pandas/polars utility module exists that duplicates logic already covered by its counterpart
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -39,3 +40,15 @@ This codebase has accumulated real bloat, mostly from logic that got copied and 
 
 Risk notes: correcting an assumption from initial planning -- the live email-report cron (emailer.sh/_emailer.sh) invokes usage_stats.py, NOT report.py, and usage_stats.py's only cron-exercised path (group_by_device=True, the default, is what every emailer.sh call passes) is already built on scan_time_filtered()/prepare_frames(). report.py is a secondary, human-run-only CLI tool (just last-day/last-day-html/last-hour) with no cron caller, so 49.1's report.py changes are lower-stakes than initially assessed -- verify by manually running those just targets, not by touching the production cron. The live dashboard is still a real (lower-stakes, read-only) risk for 49.1's dashboard/data.py changes. 49.2's repo deletion doesn't guarantee a stale cron entry isn't still running get_gpu_state.py on the actual host outside this repo -- flag as an operational check, not assume it's covered.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+All four subtasks (49.1-49.4) done, in the planned order: Dockerfile.dashboard hotfix (TASK-50) -> 49.2/49.3a (dead code + stray files) -> 49.1 (canonical pipeline unification, verified via before/after snapshots on real data) -> 49.4 (gpu_utils consolidation, scope corrected mid-flight based on a precise caller audit) -> 49.3b (doc rewrite, based on concrete CI/decision-doc evidence).
+
+One deliberate deviation from the original plan, documented in 49.1's and 49.4's own notes: dashboard/data.py keeps its own Parquet+SQLite mixed loader (_query_dbs) rather than fully collapsing onto stats_data.scan_time_filtered() (Parquet-only), since the dashboard's custom date-range picker can reach arbitrarily old SQLite-only months and dropping that silently wasn't part of this task's intent. report.py's equivalent loader WAS deleted since its only callers only ever query recent, Parquet-only windows. AC #1 is satisfied in substance (dedup/classify is canonical everywhere; only the load-path's SQLite fallback legitimately varies by caller need).
+
+Second deviation, documented in 49.4's notes: gpu_utils_polars.py was NOT renamed to plain gpu_utils.py. That rename's premise (gpu_utils.py having zero remaining callers) doesn't hold -- gpu_utils.py keeps real pandas-specific content (filter_df/filter_df_enhanced) with genuine live callers that can't safely move (they read host-exclusion state as plain module globals). AC #4 is satisfied without the rename: no DataFrame-processing duplication remains between the two modules after removing gpu_utils_polars.py's dead functions.
+
+All 90 tests pass. Live dashboard smoke-tested end-to-end (uvicorn + curl on all 3 API endpoints). report.py smoke-tested against real production data before/after.
+<!-- SECTION:NOTES:END -->
