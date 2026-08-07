@@ -10,7 +10,7 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --no-install-project --frozen
 
 # Copy only what the dashboard needs at runtime
-COPY gpu_utils.py gpu_utils_polars.py device_name_mappings.py ./
+COPY gpu_utils.py gpu_utils_polars.py device_name_mappings.py stats_data.py stats_calculations.py ./
 COPY dashboard/ ./dashboard/
 
 EXPOSE 8051
