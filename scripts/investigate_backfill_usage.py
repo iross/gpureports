@@ -17,9 +17,9 @@ import pandas as pd
 # Add parent directory to path to import project modules
 sys.path.append(str(Path(__file__).parent.parent))
 
-import gpu_utils
-from gpu_utils import analyze_backfill_utilization_by_day, load_host_exclusions
-from stats_data import get_time_filtered_data
+import classify_slots
+from classify_slots import analyze_backfill_utilization_by_day
+from read_data import get_time_filtered_data, load_host_exclusions
 
 
 def get_latest_db_file():
@@ -33,7 +33,7 @@ def get_latest_db_file():
     return str(db_files[0])
 
 
-# This function is now implemented in gpu_utils.py as analyze_backfill_utilization_by_day
+# This function is now implemented in classify_slots.py as analyze_backfill_utilization_by_day
 
 
 def create_usage_plots(usage_df, output_dir="plots"):
@@ -140,8 +140,8 @@ def main():
     print("Investigating backfill usage over the last two weeks...")
 
     # Set up GPU utils
-    gpu_utils.HOST_EXCLUSIONS = load_host_exclusions(None, "masked_hosts.yaml")
-    gpu_utils.FILTERED_HOSTS_INFO = []
+    classify_slots.HOST_EXCLUSIONS = load_host_exclusions(None, "masked_hosts.yaml")
+    classify_slots.FILTERED_HOSTS_INFO = []
 
     try:
         # Get the latest database file

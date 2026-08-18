@@ -12,12 +12,54 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
 
-from device_name_mappings import get_human_readable_device_name
-from gpu_utils import (
-    CLASS_ORDER,
-    get_display_name,
-    get_gpu_performance_tier,
-)
+from classify_slots import CLASS_ORDER
+from devices import get_human_readable_device_name
+
+
+def get_gpu_performance_tier(device_name: str) -> str:
+    """
+    Classify GPU device into performance tier.
+
+    Args:
+        device_name: Full GPU device name (e.g., 'NVIDIA H100 80GB HBM3')
+
+    Returns:
+        Performance tier: 'Flagship' or 'Standard'
+    """
+    # Flagship tier: H100, H200, and 80GB A100
+    flagship_patterns = [
+        "H100",
+        "H200",
+        "A100-SXM4-80GB",
+        "A100 80GB",
+    ]
+
+    for pattern in flagship_patterns:
+        if pattern in device_name:
+            return "Flagship"
+
+    return "Standard"
+
+
+def get_display_name(class_name: str) -> str:
+    """Convert internal class names to user-friendly display names."""
+    display_names = {
+        "Priority": "Prioritized service",  # Legacy support
+        "Priority-ResearcherOwned": "Researcher-Owned Hardware",
+        "Priority-CHTCOwned": "Researcher-Reserved Capacity",
+        "Shared": "Open Capacity",
+        "Backfill": "Secondary (Backfill)",  # Legacy support
+        "Backfill-ResearcherOwned": "Researcher-Owned Hardware",
+        "Backfill-CHTCOwned": "Researcher-Reserved Capacity",
+        "Backfill-OpenCapacity": "Secondary (Backfill) — Open Capacity",
+        "CHTC Owned": "Researcher-Reserved Capacity",
+        "Researcher Owned": "Researcher-Owned Hardware",
+        "Open Capacity": "Open Capacity",
+        # New tier-based display names for Open Capacity breakdown
+        "Open Capacity (Flagship)": "Open Capacity (Flagship)",
+        "Open Capacity (Standard)": "Open Capacity (Standard)",
+    }
+    return display_names.get(class_name, class_name)
 
 
 def print_gpu_model_analysis(analysis: dict):
@@ -405,6 +447,8 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
             regular_results["h200_user_stats"] = monthly_stats["h200_user_stats"]
         if "draining_stats" in monthly_stats:
             regular_results["draining_stats"] = monthly_stats["draining_stats"]
+        if "prevent_jobs_stats" in monthly_stats:
+            regular_results["prevent_jobs_stats"] = monthly_stats["prevent_jobs_stats"]
         if "raw_data" in monthly_stats:
             regular_results["raw_data"] = monthly_stats["raw_data"]
         if "host_filter" in monthly_stats:
@@ -525,12 +569,46 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
             else:
                 open_capacity_tiers[tier]["percent"] = 0
 
-        # Real Slots Table
+        # Prevent_jobs stats for the Real Slots table Prevented (avg.) column and section
+        # below. The column shows window averages, matching the other (avg.) columns.
+        pj = results.get("prevent_jobs_stats", {})
+        pca = pj.get("per_class_avg", {})
+        pcda = pj.get("per_class_device_avg", {})
+        pj_buckets_count = pj.get("pj_buckets", 0)
+        total_buckets_count = pj.get("total_buckets", 0)
+
+        def _pj_fmt(v):
+            return f"{v:.1f}" if v >= 0.05 else "—"
+
+        def _pj(class_name):
+            return _pj_fmt(pca.get(class_name, 0.0))
+
+        def _pj_sum(*class_names):
+            return _pj_fmt(sum(pca.get(c, 0.0) for c in class_names))
+
+        def _pj_tier(class_name, tier):
+            v = sum(
+                n
+                for device_type, n in pcda.get(class_name, {}).items()
+                if get_gpu_performance_tier(device_type) == tier
+            )
+            return _pj_fmt(v)
+
+        # Backfill classes run on the same physical GPUs as the Priority classes, so the
+        # TOTAL rows count only primary + open capacity — the same convention the
+        # Available column uses. The Secondary (Backfill) rows still show their own
+        # class values.
+        grand_prevented = _pj_sum("Priority-ResearcherOwned", "Priority-CHTCOwned", "Shared")
+        pri_total_prevented = _pj_sum("Priority-ResearcherOwned", "Priority-CHTCOwned")
+        pri_prevented = _pj_sum("Priority-ResearcherOwned", "Priority-CHTCOwned")
+        sec_prevented = _pj_sum("Backfill-ResearcherOwned", "Backfill-CHTCOwned")
+        oc_prevented = _pj("Shared")
+
         html_parts.append("<h2>Real Slots</h2>")
         html_parts.append("<table border='1' style='margin-top: 20px;'>")
         html_parts.append(
             "<tr style='background-color: #e0e0e0;'><th>Class</th><th>Allocated %</th><th>Allocated (avg.)</th>"
-            "<th>Drained (avg.)</th><th>Available (avg.)</th></tr>"
+            "<th>Drained (avg.)</th><th>Available (avg.)</th><th>Prevented (avg.)</th></tr>"
         )
 
         # Grand TOTAL row (primary + secondary + open capacity)
@@ -540,6 +618,7 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{grand_claimed:.1f}</td>")
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{grand_drained:.1f}</td>")
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{grand_total_avail:.1f}</td>")
+        html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{grand_prevented}</td>")
         html_parts.append("</tr>")
 
         # Prioritized (TOTAL) subtotal = primary + secondary
@@ -549,6 +628,7 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_total_claimed:.1f}</td>")
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_total_drained:.1f}</td>")
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_primary_total:.1f}</td>")
+        html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_total_prevented}</td>")
         html_parts.append("</tr>")
 
         # Primary sub-subtotal
@@ -558,6 +638,7 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_primary_claimed:.1f}</td>")
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_primary_drained:.1f}</td>")
         html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_primary_total:.1f}</td>")
+        html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_prevented}</td>")
         html_parts.append("</tr>")
 
         for class_name in primary_classes:
@@ -569,6 +650,7 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
                 html_parts.append(f"<td style='text-align: right;'>{totals['claimed']:.1f}</td>")
                 html_parts.append(f"<td style='text-align: right;'>{totals['drained']:.1f}</td>")
                 html_parts.append(f"<td style='text-align: right;'>{totals['total']:.1f}</td>")
+                html_parts.append(f"<td style='text-align: right;'>{_pj(class_name)}</td>")
                 html_parts.append("</tr>")
 
         # Secondary (Backfill) sub-subtotal
@@ -579,6 +661,7 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
             html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_secondary_claimed:.1f}</td>")
             html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_secondary_drained:.1f}</td>")
             html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{pri_secondary_total:.1f}</td>")
+            html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{sec_prevented}</td>")
             html_parts.append("</tr>")
 
             for class_name in secondary_classes:
@@ -590,9 +673,10 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
                     html_parts.append(f"<td style='text-align: right;'>{totals['claimed']:.1f}</td>")
                     html_parts.append(f"<td style='text-align: right;'>{totals['drained']:.1f}</td>")
                     html_parts.append(f"<td style='text-align: right;'>{totals['total']:.1f}</td>")
+                    html_parts.append(f"<td style='text-align: right;'>{_pj(class_name)}</td>")
                     html_parts.append("</tr>")
 
-        # Open Capacity subtotal row (unchanged structure)
+        # Open Capacity subtotal row
         if "Shared" in class_totals:
             oc_totals = class_totals["Shared"]
             html_parts.append("<tr style='background-color: #e8e8e8;'>")
@@ -601,6 +685,7 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
             html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{oc_totals['claimed']:.1f}</td>")
             html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{oc_totals['drained']:.1f}</td>")
             html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{oc_totals['total']:.1f}</td>")
+            html_parts.append(f"<td style='text-align: right; font-weight: bold;'>{oc_prevented}</td>")
             html_parts.append("</tr>")
 
             for tier in ["Flagship", "Standard"]:
@@ -612,6 +697,7 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
                     html_parts.append(f"<td style='text-align: right;'>{tier_data['claimed']:.1f}</td>")
                     html_parts.append(f"<td style='text-align: right;'>{tier_data['drained']:.1f}</td>")
                     html_parts.append(f"<td style='text-align: right;'>{tier_data['total']:.1f}</td>")
+                    html_parts.append(f"<td style='text-align: right;'>{_pj_tier('Shared', tier)}</td>")
                     html_parts.append("</tr>")
 
         html_parts.append("</table>")
@@ -654,7 +740,10 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
                             return 999  # Put Unknown at the end
                         elif cat.startswith("<"):
                             # Handle <48GB - extract the number after <
-                            return float(cat[1:-2])  # Remove "<" and "GB"
+                            # Remove "<" and "GB"; subtract a small epsilon so "<48GB"
+                            # sorts deterministically before an exact "48GB" (equal keys
+                            # otherwise fall back to non-deterministic input row order).
+                            return float(cat[1:-2]) - 0.1
                         elif cat.startswith(">"):
                             # Handle >80GB - extract the number after >
                             return float(cat[1:-2]) + 0.1  # Add 0.1 to sort after exact values
@@ -1137,9 +1226,9 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
     # Draining Status
     draining_stats = results.get("draining_stats", {})
     if draining_stats.get("has_draining", False):
-        html_parts.append("<h2 style='color: #d32f2f;'>GPU Draining Status</h2>")
-        html_parts.append("<table border='1' style='background-color: #ffebee;'>")
-        html_parts.append("<tr style='background-color: #ffcdd2;'><th>Metric</th><th>Value</th></tr>")
+        html_parts.append("<h2>GPU Draining Status</h2>")
+        html_parts.append("<table border='1'>")
+        html_parts.append("<tr style='background-color: #e0e0e0;'><th>Metric</th><th>Value</th></tr>")
 
         html_parts.append("<tr>")
         html_parts.append("<td><strong>Hosts with drained GPUs</strong></td>")
@@ -1156,7 +1245,7 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
         html_parts.append(f"<td style='text-align: right;'>{draining_stats['num_intervals']}</td>")
         html_parts.append("</tr>")
 
-        html_parts.append("<tr style='background-color: #ffcdd2; font-weight: bold;'>")
+        html_parts.append("<tr style='font-weight: bold;'>")
         html_parts.append("<td><strong>Total draining time</strong></td>")
         html_parts.append(
             f"<td style='text-align: right; font-weight: bold;'>{draining_stats['total_hours']:.2f} hours</td>"
@@ -1187,6 +1276,61 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
     elif draining_stats:
         html_parts.append("<h2>GPU Draining Status</h2>")
         html_parts.append("<p><em>No GPUs were drained during this period.</em></p>")
+
+    # PreventJobsReason Status
+    prevent_jobs_stats = results.get("prevent_jobs_stats", {})
+    if prevent_jobs_stats.get("has_prevent_jobs", False):
+        pj_sparse_note = ""
+        if pj_buckets_count > 0 and total_buckets_count > 0 and (pj_buckets_count / total_buckets_count) < 0.25:
+            pj_sparse_note = (
+                f" <span style='font-size:0.8em; color:#888;'>"
+                f"(data from {pj_buckets_count}/{total_buckets_count} intervals — collector recently updated)</span>"
+            )
+        html_parts.append(f"<h2>GPUs with PreventJobsReason Set{pj_sparse_note}</h2>")
+        html_parts.append("<table border='1'>")
+        html_parts.append("<tr style='background-color: #e0e0e0;'><th>Metric</th><th>Value</th></tr>")
+        html_parts.append("<tr>")
+        html_parts.append("<td><strong>Hosts affected</strong></td>")
+        html_parts.append(f"<td style='text-align: right;'>{prevent_jobs_stats['num_hosts']}</td>")
+        html_parts.append("</tr>")
+        html_parts.append("<tr>")
+        html_parts.append("<td><strong>Unique GPUs affected</strong></td>")
+        html_parts.append(f"<td style='text-align: right;'>{prevent_jobs_stats['num_unique_gpus']}</td>")
+        html_parts.append("</tr>")
+        html_parts.append("</table>")
+
+        per_host = prevent_jobs_stats.get("per_host", {})
+        if per_host:
+            html_parts.append("<h3>Per-Host Breakdown</h3>")
+            html_parts.append("<table border='1'>")
+            html_parts.append(
+                "<tr style='background-color: #e0e0e0;'><th>Host</th><th>GPUs</th><th>Reason(s)</th>"
+                "<th>Status</th><th>Last seen</th></tr>"
+            )
+            for host_name in sorted(per_host):
+                d = per_host[host_name]
+                reasons = "; ".join(d["reasons"]) or "—"
+                if d.get("active"):
+                    status = "<span style='font-weight: bold;'>Active</span>"
+                else:
+                    status = "<span style='color: #888;'>Lifted</span>"
+                html_parts.append("<tr>")
+                html_parts.append(f"<td><strong>{host_name}</strong></td>")
+                html_parts.append(f"<td style='text-align: right;'>{d['num_gpus']}</td>")
+                html_parts.append(f"<td>{reasons}</td>")
+                html_parts.append(f"<td>{status}</td>")
+                html_parts.append(f"<td>{d.get('last_seen', '—')}</td>")
+                html_parts.append("</tr>")
+            html_parts.append("</table>")
+            html_parts.append(
+                "<p style='font-size: 0.85em; color: #555;'>"
+                "This table covers the whole report window: a host is listed if any of its GPUs "
+                "had PreventJobsReason set at any point. Lifted means the reason was cleared "
+                "before the end of the window (last seen shows when).</p>"
+            )
+    elif prevent_jobs_stats:
+        html_parts.append("<h2>GPUs with PreventJobsReason Set</h2>")
+        html_parts.append("<p><em>No GPUs have PreventJobsReason set during this period.</em></p>")
 
     # Excluded hosts
     excluded_hosts = metadata.get("excluded_hosts", {})
@@ -1470,7 +1614,10 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
                             return 999  # Put Unknown at the end
                         elif cat.startswith("<"):
                             # Handle <48GB - extract the number after <
-                            return float(cat[1:-2])  # Remove "<" and "GB"
+                            # Remove "<" and "GB"; subtract a small epsilon so "<48GB"
+                            # sorts deterministically before an exact "48GB" (equal keys
+                            # otherwise fall back to non-deterministic input row order).
+                            return float(cat[1:-2]) - 0.1
                         elif cat.startswith(">"):
                             # Handle >80GB - extract the number after >
                             return float(cat[1:-2]) + 0.1  # Add 0.1 to sort after exact values
@@ -1707,6 +1854,21 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
                 f"Backfill {row['backfill_usage_percent']:.1f}% "
                 f"({int(row['backfill_claimed'])}/{int(row['backfill_total'])})"
             )
+
+    # PreventJobsReason summary
+    prevent_jobs_stats = results.get("prevent_jobs_stats", {})
+    if prevent_jobs_stats.get("has_prevent_jobs", False):
+        print(f"\n{'=' * 70}")
+        print("GPUs WITH PreventJobsReason SET:")
+        print(f"  Hosts affected:       {prevent_jobs_stats['num_hosts']}")
+        print(f"  Unique GPUs affected: {prevent_jobs_stats['num_unique_gpus']}")
+        per_host = prevent_jobs_stats.get("per_host", {})
+        if per_host:
+            for host_name in sorted(per_host):
+                d = per_host[host_name]
+                reasons = "; ".join(d["reasons"]) or "—"
+                status = "active" if d.get("active") else f"lifted, last seen {d.get('last_seen', '?')}"
+                print(f"  {host_name}: {d['num_gpus']} GPU(s) — {reasons} [{status}]")
 
     # Show host exclusion information at the bottom
     excluded_hosts = metadata.get("excluded_hosts", {})

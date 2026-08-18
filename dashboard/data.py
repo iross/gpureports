@@ -1,18 +1,32 @@
 """Data layer for the GPU state dashboard.
 
-Queries SQLite DBs, deduplicates, classifies GPU states, and returns
-structured dicts matching the API response shape.
+Queries gpu_state Parquet (or, for months predating the migration, SQLite)
+files, dedups/classifies via classify_slots.prepare_frames(), and
+returns structured dicts matching the API response shape.
 """
 
 import datetime
-import re
+import logging
 import sqlite3
 from pathlib import Path
 
 import polars as pl
-import yaml
 
-from gpu_utils import get_latest_timestamp_from_most_recent_db, get_required_databases
+import classify_slots
+from classify_slots import prepare_frames, slot_dedup_rank
+from read_data import (
+    GPU_STATE_SCHEMA,
+    SCAN_CAST_OPTIONS,
+    load_host_exclusions,
+)
+from read_data import (
+    get_latest_timestamp_from_most_recent_parquet as get_latest_timestamp_from_most_recent_db,
+)
+from read_data import (
+    get_required_parquet_files as get_required_databases,
+)
+
+logger = logging.getLogger(__name__)
 
 # State codes used in the API response (compact integer encoding)
 STATE_CODES = {
@@ -51,112 +65,135 @@ COLUMNS = [
     "PrioritizedProjects",
     "Machine",
     "GPUs_DeviceName",
+    "GPUs_GlobalMemoryMb",
+    "RemoteOwner",
+    "PreventJobsReason",
     "timestamp",
 ]
 
 
-def _load_masked_hosts(base_dir: str = ".") -> set[str]:
-    """Load excluded hosts from masked_hosts.yaml."""
-    path = Path(base_dir) / "masked_hosts.yaml"
-    if not path.exists():
-        return set()
-    with open(path) as f:
-        data = yaml.safe_load(f)
-    if data and "excluded_hosts" in data:
-        return set(data["excluded_hosts"].keys())
-    return set()
+def _set_host_exclusions(base_dir: str = ".") -> None:
+    """Load masked_hosts.yaml into classify_slots.HOST_EXCLUSIONS, the global
+    prepare_frames() reads -- mirrors the pattern report.py/usage_stats.py
+    use before calling it."""
+    yaml_path = Path(base_dir) / "masked_hosts.yaml"
+    classify_slots.HOST_EXCLUSIONS = load_host_exclusions(None, str(yaml_path) if yaml_path.exists() else None)
 
 
-def _query_dbs(db_paths: list[str], start: datetime.datetime, end: datetime.datetime) -> pl.DataFrame:
-    """Load data from multiple SQLite DBs and combine into one Polars DataFrame."""
+def _file_month_label(path: str) -> str:
+    """Extract the YYYY-MM month label from a gpu_state_<month>.<ext> filename."""
+    return Path(path).stem.removeprefix("gpu_state_")
+
+
+def _read_sqlite(path: str, query: str) -> pl.DataFrame:
+    """Run a query against a SQLite file and return the result as a Polars DataFrame."""
+    conn = sqlite3.connect(str(Path(path).resolve()))
+    try:
+        return pl.read_database(query, conn)
+    finally:
+        conn.close()
+
+
+def _query_dbs(
+    file_specs: list[tuple[str, str]], start: datetime.datetime, end: datetime.datetime
+) -> tuple[pl.DataFrame, list[str]]:
+    """Load data from Parquet and/or SQLite files and combine into one Polars DataFrame.
+
+    file_specs is a list of (path, format) tuples where format is "parquet" or "sqlite".
+
+    Returns (combined DataFrame, list of warning messages for files that failed to load).
+    """
+    if not file_specs:
+        return pl.DataFrame(), []
+
     frames = []
+    warnings: list[str] = []
     buffered_start = start - datetime.timedelta(seconds=1)
     col_select = ", ".join(f'"{c}"' for c in COLUMNS)
 
-    for db_path in db_paths:
+    for path, fmt in file_specs:
         try:
-            abs_path = str(Path(db_path).resolve())
-            query = f"""
-                SELECT {col_select}
-                FROM gpu_state
-                WHERE timestamp BETWEEN '{buffered_start.strftime("%Y-%m-%d %H:%M:%S.%f")}'
-                  AND '{end.strftime("%Y-%m-%d %H:%M:%S.%f")}'
-            """
-            df = pl.read_database_uri(query, f"sqlite:///{abs_path}")
+            if fmt == "parquet":
+                df = (
+                    pl.scan_parquet(
+                        path, schema=GPU_STATE_SCHEMA, missing_columns="insert", cast_options=SCAN_CAST_OPTIONS
+                    )
+                    .filter((pl.col("timestamp") >= buffered_start) & (pl.col("timestamp") <= end))
+                    .select(COLUMNS)
+                    .collect()
+                )
+            else:
+                query = (
+                    f"SELECT {col_select} FROM gpu_state "
+                    f"WHERE timestamp BETWEEN '{buffered_start.strftime('%Y-%m-%d %H:%M:%S.%f')}' "
+                    f"  AND '{end.strftime('%Y-%m-%d %H:%M:%S.%f')}'"
+                )
+                df = _read_sqlite(path, query)
             if df.height > 0:
                 frames.append(df)
         except Exception as e:
-            print(f"Warning: Could not load {db_path}: {e}")
+            logger.warning("Could not load %s: %s", path, e)
+            warnings.append(f"Failed to load data for {_file_month_label(path)}: {e}")
 
     if not frames:
-        return pl.DataFrame()
+        return pl.DataFrame(), warnings
 
-    combined = pl.concat(frames)
-
-    # Parse timestamps and apply precise time filter
-    combined = combined.with_columns(pl.col("timestamp").cast(pl.Datetime("us")))
+    combined = pl.concat(frames, how="diagonal_relaxed")
+    # Parquet yields Datetime; SQLite TEXT yields Utf8 — normalise to Datetime.
+    if combined.schema["timestamp"] in (pl.Utf8, pl.String):
+        combined = combined.with_columns(pl.col("timestamp").str.to_datetime(strict=False))
+    elif combined.schema["timestamp"] != pl.Datetime("us"):
+        combined = combined.with_columns(pl.col("timestamp").cast(pl.Datetime("us")))
     combined = combined.filter((pl.col("timestamp") >= start) & (pl.col("timestamp") <= end))
-    return combined
+    return combined, warnings
 
 
-def _classify_states(df: pl.DataFrame) -> pl.DataFrame:
-    """Classify each row into one of 6 GPU state codes."""
+def _collapse_to_bucket_winner(dedup: pl.DataFrame) -> pl.DataFrame:
+    """Pick one winning row per (bucket, AssignedGPUs).
+
+    prepare_frames() dedups at raw-timestamp granularity, so when the
+    requested bucket is wider than the raw collection interval, multiple
+    per-timestamp winners can still land in the same display bucket. Collapse
+    those using the same canonical rank, then rename to the "time_bucket"
+    label the rest of this module uses.
+    """
+    prev_idle = pl.col("_pj_set") & (pl.col("State") != "Claimed")
+    rank = slot_dedup_rank(pl.col("_is_bf"), pl.col("State"), prev_idle)
+    return (
+        dedup.with_columns(rank.alias("_rank"))
+        .sort(["bucket", "AssignedGPUs", "_rank"], descending=[False, False, True])
+        .unique(subset=["bucket", "AssignedGPUs"], keep="first")
+        .drop("_rank")
+        .rename({"bucket": "time_bucket"})
+    )
+
+
+def _map_state_codes(df: pl.DataFrame) -> pl.DataFrame:
+    """Map prepare_frames()'s canonical classification columns to the
+    dashboard's 6 STATE_CODES. CHTC-owned priority slots are folded into the
+    same prioritized bucket as researcher-owned, and interactive slots are
+    not distinguished -- matching this module's pre-existing 6-state
+    vocabulary (see TASK-49.1)."""
+    claimed = pl.col("State") == "Claimed"
+    unclaimed = pl.col("State") == "Unclaimed"
+    is_bf = pl.col("_is_bf")
+    is_prio = pl.col("_pp_prio")
     return df.with_columns(
-        pl.when(
-            (pl.col("State").str.to_lowercase() == "claimed")
-            & (pl.col("PrioritizedProjects") != "")
-            & (~pl.col("Name").str.to_lowercase().str.contains("backfill"))
-        )
-        .then(pl.lit(STATE_CODES["busy_prioritized"]))
-        .when(
-            (pl.col("State").str.to_lowercase() == "claimed")
-            & (~pl.col("Name").str.to_lowercase().str.contains("backfill"))
-        )
-        .then(pl.lit(STATE_CODES["busy_shared"]))
-        .when(
-            (pl.col("State").str.to_lowercase() == "claimed")
-            & (pl.col("Name").str.to_lowercase().str.contains("backfill"))
-        )
+        pl.when(claimed & is_bf)
         .then(pl.lit(STATE_CODES["busy_backfill"]))
-        .when(
-            (pl.col("State").str.to_lowercase() == "unclaimed")
-            & (pl.col("Name").str.to_lowercase().str.contains("backfill"))
-        )
+        .when(claimed & is_prio)
+        .then(pl.lit(STATE_CODES["busy_prioritized"]))
+        .when(claimed)
+        .then(pl.lit(STATE_CODES["busy_shared"]))
+        .when(unclaimed & is_bf)
         .then(pl.lit(STATE_CODES["idle_backfill"]))
-        .when((pl.col("State").str.to_lowercase() == "unclaimed") & (pl.col("PrioritizedProjects") != ""))
+        .when(unclaimed & is_prio)
         .then(pl.lit(STATE_CODES["idle_prioritized"]))
-        .when(pl.col("State").str.to_lowercase() == "unclaimed")
+        .when(unclaimed)
         .then(pl.lit(STATE_CODES["idle_shared"]))
         .otherwise(pl.lit(STATE_CODES["na"]))
         .alias("state_code")
     )
-
-
-def _dedup_and_bucket(df: pl.DataFrame, bucket_minutes: int) -> pl.DataFrame:
-    """Floor timestamps to buckets, rank duplicates, keep highest-priority entry."""
-    df = df.with_columns(pl.col("timestamp").dt.truncate(f"{bucket_minutes}m").alias("time_bucket"))
-
-    # Rank: claimed+primary(3) > claimed+backfill(2) > unclaimed+primary(1) > unclaimed+backfill(0)
-    is_claimed = pl.col("State").str.to_lowercase() == "claimed"
-    is_backfill = pl.col("Name").str.to_lowercase().str.contains("backfill")
-
-    df = df.with_columns(
-        pl.when(is_claimed & ~is_backfill)
-        .then(pl.lit(3))
-        .when(is_claimed & is_backfill)
-        .then(pl.lit(2))
-        .when(~is_claimed & ~is_backfill)
-        .then(pl.lit(1))
-        .otherwise(pl.lit(0))
-        .alias("_rank")
-    )
-
-    # Sort by rank descending so first row per group wins
-    df = df.sort(["time_bucket", "AssignedGPUs", "_rank"], descending=[False, False, True])
-    df = df.unique(subset=["time_bucket", "AssignedGPUs"], keep="first")
-    df = df.drop("_rank")
-
-    return df
 
 
 def _prepare_bucketed(
@@ -165,10 +202,10 @@ def _prepare_bucketed(
     bucket_minutes: int,
     base_dir: str,
     hours: int = 24,
-) -> tuple[pl.DataFrame, list, list[str]] | None:
+) -> tuple[pl.DataFrame, list, list[str], list[str]] | None:
     """Load, mask, dedup, bucket, and classify data.
 
-    Returns (df, all_buckets, bucket_strs) or None if no data is available.
+    Returns (df, all_buckets, bucket_strs, warnings) or None if no data is available.
     """
     if end is None:
         end = get_latest_timestamp_from_most_recent_db(base_dir)
@@ -181,22 +218,22 @@ def _prepare_bucketed(
     if not db_paths:
         return None
 
-    df = _query_dbs(db_paths, start, end)
+    df, warnings = _query_dbs(db_paths, start, end)
     if df.height == 0:
-        return None
+        return df, [], [], warnings
 
-    masked = _load_masked_hosts(base_dir)
-    if masked:
-        for host in masked:
-            df = df.filter(~pl.col("Machine").str.contains(host))
+    _set_host_exclusions(base_dir)
+    frames = prepare_frames(df.lazy(), bucket_minutes=bucket_minutes)
+    dedup = frames.dedup.collect()
+    if dedup.height == 0:
+        return dedup, [], [], warnings
 
-    df = _dedup_and_bucket(df, bucket_minutes)
-    df = _classify_states(df)
+    df = _map_state_codes(_collapse_to_bucket_winner(dedup))
 
     all_buckets = sorted(df["time_bucket"].unique().to_list())
     bucket_strs = [t.strftime("%Y-%m-%dT%H:%M") for t in all_buckets]
 
-    return df, all_buckets, bucket_strs
+    return df, all_buckets, bucket_strs, warnings
 
 
 def get_heatmap_data(
@@ -225,13 +262,18 @@ def get_heatmap_data(
     if prepared is None:
         return _empty_heatmap_response()
 
-    df, all_buckets, bucket_strs = prepared
+    df, all_buckets, bucket_strs, warnings = prepared
+    if df.height == 0:
+        return _empty_heatmap_response(warnings)
     bucket_index = {t: i for i, t in enumerate(all_buckets)}
 
-    # Build machine-grouped structure
+    # Build machine-grouped structure. Sort nulls last before taking one row per
+    # GPU so a bucket where GPUs_DeviceName happened to be unreported doesn't
+    # arbitrarily win over a bucket where it was (previously order-dependent).
     gpu_info = (
         df.select("Machine", "AssignedGPUs", "GPUs_DeviceName")
-        .unique(subset=["Machine", "AssignedGPUs"])
+        .sort("GPUs_DeviceName", nulls_last=True)
+        .unique(subset=["Machine", "AssignedGPUs"], keep="first")
         .sort(["Machine", "AssignedGPUs"])
     )
 
@@ -273,6 +315,7 @@ def get_heatmap_data(
         "machines": machines_list,
         "state_map": STATE_MAP,
         "state_colors": STATE_COLORS,
+        "warnings": warnings,
     }
 
 
@@ -301,8 +344,6 @@ def get_counts_data(
     -------
     dict with 'buckets' list and 'series' dict per category.
     """
-    # Resolve time range and load raw data (same steps as _prepare_bucketed,
-    # but we need the pre-dedup DataFrame for accurate backfill counts).
     if end is None:
         end = get_latest_timestamp_from_most_recent_db(base_dir)
         if end is None:
@@ -314,47 +355,47 @@ def get_counts_data(
     if not db_paths:
         return _empty_counts_response()
 
-    df_raw = _query_dbs(db_paths, start, end)
+    df_raw, warnings = _query_dbs(db_paths, start, end)
     if df_raw.height == 0:
-        return _empty_counts_response()
+        return _empty_counts_response(warnings)
 
-    masked = _load_masked_hosts(base_dir)
-    if masked:
-        for host in masked:
-            df_raw = df_raw.filter(~pl.col("Machine").str.contains(host))
+    _set_host_exclusions(base_dir)
+    frames = prepare_frames(df_raw.lazy(), bucket_minutes=bucket_minutes)
 
-    # Count all categories directly from raw (pre-dedup) slot rows.
+    # Count each slot type independently off pre-dedup, host-excluded rows.
     #
     # A GPU can appear in BOTH a primary slot and a backfill slot simultaneously.
     # Dedup merges these, causing GPUs to disappear from primary totals when
     # their backfill slot wins the rank competition (e.g. backfill-claimed > primary-idle).
     # Counting each slot type independently avoids this entirely.
-    df_raw_bucketed = df_raw.with_columns(pl.col("timestamp").dt.truncate(f"{bucket_minutes}m").alias("time_bucket"))
+    primary_df = frames.raw.filter(
+        ~pl.col("_excluded") & ~pl.col("_is_bf") & pl.col("AssignedGPUs").is_not_null()
+    ).collect()
+    backfill_df = frames.raw_bf.collect()
 
-    is_backfill = pl.col("Name").str.to_lowercase().str.contains("backfill")
-    is_claimed = pl.col("State").str.to_lowercase() == "claimed"
-    has_gpu = pl.col("AssignedGPUs").is_not_null()
-    has_priority = pl.col("PrioritizedProjects").is_not_null() & (pl.col("PrioritizedProjects") != "")
+    is_claimed = pl.col("State") == "Claimed"
+    has_priority = pl.col("_pp_prio")
 
-    primary_df = df_raw_bucketed.filter(~is_backfill & has_gpu)
-    backfill_df = df_raw_bucketed.filter(is_backfill & has_gpu)
-
-    all_buckets = sorted(df_raw_bucketed.filter(has_gpu)["time_bucket"].unique().to_list())
+    all_buckets = sorted(
+        pl.concat([primary_df.select("bucket"), backfill_df.select("bucket")], how="vertical")
+        .unique()["bucket"]
+        .to_list()
+    )
     bucket_strs = [t.strftime("%Y-%m-%dT%H:%M") for t in all_buckets]
-    buckets_df = pl.DataFrame({"time_bucket": all_buckets})
+    buckets_df = pl.DataFrame({"bucket": all_buckets})
 
     def _count_series(df: pl.DataFrame, total_mask: pl.Expr, claimed_mask: pl.Expr) -> dict[str, list]:
-        total_df = df.filter(total_mask).group_by("time_bucket").agg(pl.col("AssignedGPUs").n_unique().alias("total"))
+        total_df = df.filter(total_mask).group_by("bucket").agg(pl.col("AssignedGPUs").n_unique().alias("total"))
         claimed_df = (
             df.filter(total_mask & claimed_mask)
-            .group_by("time_bucket")
+            .group_by("bucket")
             .agg(pl.col("AssignedGPUs").n_unique().alias("claimed"))
         )
         merged = (
-            buckets_df.join(total_df, on="time_bucket", how="left")
-            .join(claimed_df, on="time_bucket", how="left")
+            buckets_df.join(total_df, on="bucket", how="left")
+            .join(claimed_df, on="bucket", how="left")
             .fill_null(0)
-            .sort("time_bucket")
+            .sort("bucket")
         )
         return {"total": merged["total"].to_list(), "claimed": merged["claimed"].to_list()}
 
@@ -364,15 +405,16 @@ def get_counts_data(
         "backfill": _count_series(backfill_df, pl.lit(True), is_claimed),
     }
 
-    return {"buckets": bucket_strs, "series": series}
+    return {"buckets": bucket_strs, "series": series, "warnings": warnings}
 
 
-def _empty_heatmap_response() -> dict:
+def _empty_heatmap_response(warnings: list[str] | None = None) -> dict:
     return {
         "time_buckets": [],
         "machines": [],
         "state_map": STATE_MAP,
         "state_colors": STATE_COLORS,
+        "warnings": warnings or [],
     }
 
 
@@ -392,96 +434,53 @@ def get_opencap_users_data(
     if end is None:
         end = get_latest_timestamp_from_most_recent_db(base_dir)
         if end is None:
-            return {"buckets": [], "series": {}}
+            return {"buckets": [], "series": {}, "warnings": []}
     if start is None:
         start = end - datetime.timedelta(hours=hours)
 
     db_paths = get_required_databases(start, end, base_dir)
     if not db_paths:
-        return {"buckets": [], "series": {}}
+        return {"buckets": [], "series": {}, "warnings": []}
 
-    cols = ["Name", "AssignedGPUs", "State", "PrioritizedProjects", "Machine", "RemoteOwner", "timestamp"]
-    col_select = ", ".join(f'"{c}"' for c in cols)
-    buffered_start = start - datetime.timedelta(seconds=1)
+    df_raw, warnings = _query_dbs(db_paths, start, end)
+    if df_raw.height == 0:
+        return {"buckets": [], "series": {}, "warnings": warnings}
 
-    frames = []
-    for db_path in db_paths:
-        try:
-            abs_path = str(Path(db_path).resolve())
-            query = f"""
-                SELECT {col_select} FROM gpu_state
-                WHERE timestamp BETWEEN '{buffered_start.strftime("%Y-%m-%d %H:%M:%S.%f")}'
-                  AND '{end.strftime("%Y-%m-%d %H:%M:%S.%f")}'
-                  AND AssignedGPUs IS NOT NULL AND AssignedGPUs != ''
-            """  # noqa: S608
-            df = pl.read_database_uri(query, f"sqlite:///{abs_path}")
-            if df.height > 0:
-                frames.append(df)
-        except Exception as e:
-            print(f"Warning: could not load {db_path}: {e}")
+    _set_host_exclusions(base_dir)
+    # bucket_minutes=1 keeps prepare_frames()'s internal "bucket" column at
+    # effectively raw-snapshot granularity (the collection interval is 5
+    # minutes) so per-snapshot GPU counts aren't merged before the
+    # peak-within-display-bucket step below.
+    frames = prepare_frames(df_raw.lazy(), bucket_minutes=1)
 
-    if not frames:
-        return {"buckets": [], "series": {}}
-
-    df = pl.concat(frames)
-    df = df.with_columns(pl.col("timestamp").cast(pl.Datetime("us")))
-    df = df.filter((pl.col("timestamp") >= start) & (pl.col("timestamp") <= end))
-
-    masked = _load_masked_hosts(base_dir)
-    if masked:
-        for host in masked:
-            df = df.filter(~pl.col("Machine").str.contains(host))
-
-    if df.height == 0:
-        return {"buckets": [], "series": {}}
-
-    # Dedup: one row per (timestamp, GPU), prefer claimed primary over backfill.
-    # Must dedup before filtering so a GPU isn't double-counted when it appears
-    # in both a primary and a backfill slot simultaneously.
-    is_backfill = pl.col("Name").str.to_lowercase().str.contains("backfill")
-    is_claimed = pl.col("State").str.to_lowercase() == "claimed"
-
-    df = df.with_columns(
-        pl.when(is_claimed & ~is_backfill)
-        .then(pl.lit(3))
-        .when(~is_claimed & ~is_backfill)
-        .then(pl.lit(2))
-        .when(is_claimed & is_backfill)
-        .then(pl.lit(1))
-        .otherwise(pl.lit(0))
-        .alias("_rank")
-    )
-    df = df.sort(["timestamp", "AssignedGPUs", "_rank"], descending=[False, False, True])
-    df = df.unique(subset=["timestamp", "AssignedGPUs"], keep="first")
-    df = df.drop("_rank")
-
-    # Filter to claimed open-cap slots with a known owner
-    has_priority = pl.col("PrioritizedProjects").is_not_null() & (pl.col("PrioritizedProjects") != "")
     has_owner = pl.col("RemoteOwner").is_not_null() & (pl.col("RemoteOwner") != "")
-    df = df.filter(is_claimed & ~is_backfill & ~has_priority & has_owner)
+    df = frames.dedup.filter(
+        (pl.col("State") == "Claimed") & ~pl.col("_is_bf") & ~pl.col("_pp_prio") & has_owner
+    ).collect()
 
     if df.height == 0:
-        return {"buckets": [], "series": {}}
+        return {"buckets": [], "series": {}, "warnings": warnings}
 
-    # Count distinct GPUs per (timestamp, owner) snapshot, then take max within bucket.
-    # Using max (not sum) matches the script: "peak snapshot within the window".
-    snap = (
-        df.group_by(["timestamp", "RemoteOwner"])
-        .agg(pl.col("AssignedGPUs").n_unique().alias("snap_count"))
-        .with_columns(pl.col("timestamp").dt.truncate(f"{bucket_minutes}m").alias("bucket"))
-    )
-    bucketed = snap.group_by(["bucket", "RemoteOwner"]).agg(pl.col("snap_count").max().alias("gpu_count"))
+    # Count distinct GPUs per (snapshot, owner), then take max within the
+    # requested display bucket. Using max (not sum) matches the script:
+    # "peak snapshot within the window".
+    snap = df.group_by(["bucket", "RemoteOwner"]).agg(pl.col("AssignedGPUs").n_unique().alias("snap_count"))
+    snap = snap.with_columns(pl.col("bucket").dt.truncate(f"{bucket_minutes}m").alias("display_bucket"))
+    bucketed = snap.group_by(["display_bucket", "RemoteOwner"]).agg(pl.col("snap_count").max().alias("gpu_count"))
+    bucketed = bucketed.rename({"display_bucket": "bucket"})
 
     all_buckets = sorted(bucketed["bucket"].unique().to_list())
     bucket_strs = [t.strftime("%Y-%m-%dT%H:%M") for t in all_buckets]
     bucket_index = {b: i for i, b in enumerate(all_buckets)}
     n_buckets = len(all_buckets)
 
-    # Rank users by peak GPU count; anonymize as "User 1", "User 2", …
+    # Rank users by peak GPU count; anonymize as "User 1", "User 2", … Break ties
+    # on RemoteOwner so equal-peak users get a deterministic (if arbitrary) label
+    # instead of one that depends on incidental row order upstream.
     top_users = (
         bucketed.group_by("RemoteOwner")
         .agg(pl.col("gpu_count").max().alias("peak"))
-        .sort("peak", descending=True)
+        .sort(["peak", "RemoteOwner"], descending=[True, False])
         .head(top_n)["RemoteOwner"]
         .to_list()
     )
@@ -494,10 +493,10 @@ def get_opencap_users_data(
         if bi is not None:
             series[label][bi] = row["gpu_count"]
 
-    return {"buckets": bucket_strs, "series": series}
+    return {"buckets": bucket_strs, "series": series, "warnings": warnings}
 
 
-def _empty_counts_response() -> dict:
+def _empty_counts_response(warnings: list[str] | None = None) -> dict:
     return {
         "buckets": [],
         "series": {
@@ -505,183 +504,5 @@ def _empty_counts_response() -> dict:
             "open_capacity": {"total": [], "claimed": []},
             "backfill": {"total": [], "claimed": []},
         },
+        "warnings": warnings or [],
     }
-
-
-# ---------------------------------------------------------------------------
-# Open-capacity jobs panel (AC #6-8 of task-29)
-# ---------------------------------------------------------------------------
-
-
-def _get_job_info_databases(start: datetime.datetime, end: datetime.datetime, base_dir: str) -> list[str]:
-    """Return job_info_YYYY-MM.db paths that overlap [start, end]."""
-    paths = []
-    current = start.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    end_month = end.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    while current <= end_month:
-        p = Path(base_dir) / f"job_info_{current.strftime('%Y-%m')}.db"
-        if p.exists():
-            paths.append(str(p))
-        if current.month == 12:
-            current = current.replace(year=current.year + 1, month=1)
-        else:
-            current = current.replace(month=current.month + 1)
-    return paths
-
-
-def _load_suspicious_criteria(base_dir: str) -> tuple[list[re.Pattern], float]:
-    """Load cmd patterns and min_runtime_hours from suspicious_jobs.yaml."""
-    path = Path(base_dir) / "suspicious_jobs.yaml"
-    if not path.exists():
-        return [], 0.0
-    with open(path) as f:
-        cfg = yaml.safe_load(f)
-    criteria = cfg.get("suspicious_jobs", {})
-    patterns = [re.compile(p) for p in criteria.get("cmd_patterns", [])]
-    min_hours = float(criteria.get("min_runtime_hours", 1))
-    return patterns, min_hours
-
-
-def _is_suspicious(cmd: str, qdate: int, patterns: list[re.Pattern], min_hours: float) -> bool:
-    """Return True when cmd basename matches a pattern AND runtime >= min_hours."""
-    if not patterns:
-        return False
-    basename = Path(cmd).name if cmd else ""
-    cmd_match = any(p.match(basename) for p in patterns)
-    if not cmd_match:
-        return False
-    runtime_hours = (datetime.datetime.now().timestamp() - qdate) / 3600
-    return runtime_hours >= min_hours
-
-
-def _fetch_job_info(job_ids: list[str], db_paths: list[str]) -> dict[str, dict]:
-    """Query job_info DBs for the given GlobalJobIds; return mapping id -> row dict."""
-    if not job_ids or not db_paths:
-        return {}
-    result: dict[str, dict] = {}
-    placeholders = ",".join("?" * len(job_ids))
-    for db_path in db_paths:
-        try:
-            conn = sqlite3.connect(db_path)
-            rows = conn.execute(
-                f"SELECT GlobalJobId, Cmd, Args, Owner, RequestGPUs, QDate "  # noqa: S608
-                f"FROM job_info WHERE GlobalJobId IN ({placeholders})",
-                job_ids,
-            ).fetchall()
-            conn.close()
-        except Exception as e:
-            print(f"Warning: could not read {db_path}: {e}")
-            continue
-        for row in rows:
-            gid, cmd, args, owner, req_gpus, qdate = row
-            result[gid] = {
-                "GlobalJobId": gid,
-                "Cmd": cmd or "",
-                "Args": args or "",
-                "Owner": owner or "",
-                "RequestGPUs": req_gpus or 0,
-                "QDate": qdate or 0,
-            }
-    return result
-
-
-def get_open_capacity_jobs_data(
-    base_dir: str = ".",
-) -> dict:
-    """Return recent jobs on claimed open-capacity slots, joined with job_info.
-
-    Looks at the latest gpu_state snapshot (most recent timestamp) to find
-    currently claimed open-capacity slots, then joins against job_info DBs
-    covering the current and previous month so jobs that started last month
-    are still resolved.
-
-    Returns a dict with keys:
-        jobs      - list of job dicts (machine, gpu_id, GlobalJobId, Owner,
-                    Cmd, Args, runtime_hours, suspicious)
-        criteria  - the loaded suspicious criteria for display
-    """
-    end = get_latest_timestamp_from_most_recent_db(base_dir)
-    if end is None:
-        return {"jobs": [], "criteria": {}}
-
-    # Use a tight 10-minute window around the latest timestamp so we see only
-    # the current snapshot, not hours of history.
-    start = end - datetime.timedelta(minutes=10)
-
-    db_paths = get_required_databases(start, end, base_dir)
-    if not db_paths:
-        return {"jobs": [], "criteria": {}}
-
-    col_select = ", ".join(
-        f'"{c}"'
-        for c in ["Name", "AssignedGPUs", "State", "PrioritizedProjects", "Machine", "GlobalJobId", "timestamp"]
-    )
-    frames = []
-    for db_path in db_paths:
-        try:
-            abs_path = str(Path(db_path).resolve())
-            query = f"""
-                SELECT {col_select} FROM gpu_state
-                WHERE timestamp BETWEEN '{start.strftime("%Y-%m-%d %H:%M:%S.%f")}'
-                  AND '{end.strftime("%Y-%m-%d %H:%M:%S.%f")}'
-            """  # noqa: S608
-            df = pl.read_database_uri(query, f"sqlite:///{abs_path}")
-            if df.height > 0:
-                frames.append(df)
-        except Exception as e:
-            print(f"Warning: could not load {db_path}: {e}")
-
-    if not frames:
-        return {"jobs": [], "criteria": {}}
-
-    df = pl.concat(frames)
-
-    # Filter to claimed, non-backfill, non-prioritized = open capacity
-    is_claimed = pl.col("State").str.to_lowercase() == "claimed"
-    is_backfill = pl.col("Name").str.to_lowercase().str.contains("backfill")
-    has_priority = pl.col("PrioritizedProjects").is_not_null() & (pl.col("PrioritizedProjects") != "")
-    df = df.filter(is_claimed & ~is_backfill & ~has_priority)
-
-    if df.height == 0:
-        return {"jobs": [], "criteria": {}}
-
-    # Deduplicate: one row per (Machine, AssignedGPUs) — take latest timestamp
-    df = df.sort("timestamp", descending=True).unique(subset=["Machine", "AssignedGPUs"], keep="first")
-
-    job_ids = df["GlobalJobId"].drop_nulls().unique().to_list()
-
-    # Query job_info DBs covering end's month and the month before (cross-month)
-    prev_month_start = (end.replace(day=1) - datetime.timedelta(days=1)).replace(day=1)
-    job_db_paths = _get_job_info_databases(prev_month_start, end, base_dir)
-    job_map = _fetch_job_info(job_ids, job_db_paths)
-
-    patterns, min_hours = _load_suspicious_criteria(base_dir)
-    path_criteria = {
-        "cmd_patterns": [p.pattern for p in patterns],
-        "min_runtime_hours": min_hours,
-    }
-
-    jobs = []
-    for row in df.iter_rows(named=True):
-        gid = row.get("GlobalJobId") or ""
-        info = job_map.get(gid, {})
-        cmd = info.get("Cmd", "")
-        qdate = info.get("QDate", 0)
-        runtime_hours = round((end.timestamp() - qdate) / 3600, 1) if qdate else None
-        jobs.append(
-            {
-                "machine": row["Machine"],
-                "gpu_id": row["AssignedGPUs"],
-                "GlobalJobId": gid,
-                "Owner": info.get("Owner", ""),
-                "Cmd": cmd,
-                "Args": info.get("Args", ""),
-                "RequestGPUs": info.get("RequestGPUs", 0),
-                "runtime_hours": runtime_hours,
-                "suspicious": _is_suspicious(cmd, qdate, patterns, min_hours),
-            }
-        )
-
-    jobs.sort(key=lambda j: (not j["suspicious"], j["machine"]))
-
-    return {"jobs": jobs, "criteria": path_criteria}

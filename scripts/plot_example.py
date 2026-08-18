@@ -11,8 +11,8 @@ from pathlib import Path
 
 from plot_usage_stats import create_device_usage_heatmap, create_summary_dashboard, create_usage_timeline_plot
 
-from stats_calculations import calculate_time_series_usage
-from stats_data import get_time_filtered_data
+from classify_slots import calculate_time_series_usage
+from read_data import get_time_filtered_data
 from usage_stats import run_analysis
 
 

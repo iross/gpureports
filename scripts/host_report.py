@@ -22,8 +22,8 @@ import typer
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from gpu_utils import filter_df_enhanced, get_most_recent_database, load_chtc_owned_hosts
-from stats_data import get_preprocessed_dataframe, get_time_filtered_data
+from classify_slots import filter_df_enhanced
+from read_data import get_preprocessed_dataframe, get_time_filtered_data, load_chtc_owned_hosts
 
 try:
     import seaborn as sns  # noqa: F401
@@ -455,7 +455,7 @@ def main(
         "", help="Substring filter on ChtcProjects / PrioritizedProjects. Inferred from --host if omitted."
     ),
     hours_back: int = typer.Option(168, help="Lookback window in hours (168 = 7 days)"),
-    db_path: str = typer.Option("", help="Path to gpu_state_*.db (auto-discovered if empty)"),
+    data_dir: str = typer.Option(".", help="Directory containing gpu_state_*.parquet files"),
     output_dir: str = typer.Option(".", help="Directory for report and figures/"),
     exclude_users: str = typer.Option("", help="Comma-separated usernames to exclude (e.g. 'admin1,admin2')"),
     backfill: bool = typer.Option(False, "--backfill", help="Include backfill slot usage section"),
@@ -474,15 +474,10 @@ def main(
     figures_dir = out / "figures"
     figures_dir.mkdir(parents=True, exist_ok=True)
 
-    base_dir = str(Path(db_path).parent) if db_path else "."
-    if not db_path:
-        db_path = get_most_recent_database(base_dir) or ""
-    if not db_path:
-        typer.echo("Error: no gpu_state_*.db found. Specify --db-path.", err=True)
-        raise typer.Exit(1)
+    base_dir = data_dir
 
     typer.echo(f"Loading GPU state ({hours_back}h back) ...")
-    df_raw = get_time_filtered_data(db_path, hours_back)
+    df_raw = get_time_filtered_data(data_dir, hours_back)
     if df_raw.empty:
         typer.echo("Error: no data for the specified time range.", err=True)
         raise typer.Exit(1)

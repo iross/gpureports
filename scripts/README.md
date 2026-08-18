@@ -11,7 +11,7 @@ These are kept working and used regularly:
 |--------|---------|
 | `plot_usage_stats.py` | Plot allocation usage over time |
 | `plot_gpu_availability.py` | GPU availability by category/type |
-| `weekly_allocation_plot.py` | Weekly allocation percentage trend |
+| `plot_weekly_allocation.py` | Weekly allocation percentage trend |
 | `weekly_summary.py` | Weekly GPU hours summary |
 | `gap_analysis.py` | Identify unused capacity windows |
 | `query.py` | Ad-hoc DB query helper |

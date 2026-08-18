@@ -1,31 +1,35 @@
 #!/usr/bin/env python3
 """
-GPU Usage Statistics - Calculation Functions
+Frozen pre-migration (pandas) baseline — test-only, do not import from application code.
 
-All calculate_* functions and GPU model analysis functions for computing
-allocation usage, performance metrics, time series data, and device breakdowns.
+Verbatim copy of stats_calculations.py as of commit c972c6c, the last commit
+before the polars lazy-scanning migration (task-40). Used by
+test_pandas_polars_parity.py to run the old pandas calculations side by side
+with the new polars ones on identical input and confirm the migration didn't
+change report output.
 """
 
 import datetime
-import sqlite3
 
+import duckdb
 import pandas as pd
+from legacy_stats_data import (
+    get_cached_filtered_dataframe,
+    get_latest_timestamp,
+    get_preprocessed_dataframe,
+    get_time_filtered_data,
+    parquet_glob,
+)
 
-import gpu_utils
-from device_name_mappings import get_memory_category_from_mb
-from gpu_utils import (
+import classify_slots
+from classify_slots import (
     BACKFILL_SLOT_TYPES,
     CLASS_ORDER,
     UTILIZATION_TYPES,
     filter_df,
     filter_df_enhanced,
-    get_latest_timestamp_from_most_recent_db,
 )
-from stats_data import (
-    get_cached_filtered_dataframe,
-    get_preprocessed_dataframe,
-    get_time_filtered_data,
-)
+from devices import get_memory_category_from_mb
 
 
 def calculate_allocation_usage(df: pd.DataFrame, host: str = "") -> dict:
@@ -1018,8 +1022,8 @@ def calculate_machines_with_zero_active_gpus(
     df["timestamp"] = pd.to_datetime(df["timestamp"])
 
     # Apply host exclusions if configured (respects masked_hosts.yaml)
-    if gpu_utils.HOST_EXCLUSIONS:
-        for excluded_host in gpu_utils.HOST_EXCLUSIONS.keys():
+    if classify_slots.HOST_EXCLUSIONS:
+        for excluded_host in classify_slots.HOST_EXCLUSIONS.keys():
             df = df[~df["Machine"].str.contains(excluded_host, case=False, na=False)]
 
     # Apply host filter if specified
@@ -1116,27 +1120,21 @@ def calculate_machines_with_zero_active_gpus(
     }
 
 
-def calculate_monthly_summary(db_path: str, end_time: datetime.datetime | None = None) -> dict:
+def calculate_monthly_summary(data_dir: str, end_time: datetime.datetime | None = None) -> dict:
     """
     Calculate complete monthly GPU usage summary for the previous month.
 
     Args:
-        db_path: Path to SQLite database (used to determine base directory)
+        data_dir: Directory containing gpu_state Parquet files
         end_time: Optional end time (defaults to latest data)
 
     Returns:
         Dictionary containing monthly usage statistics
     """
     import calendar
-    from pathlib import Path
 
-    # Get base directory from the provided db_path
-    db_path_obj = Path(db_path)
-    base_dir = str(db_path_obj.parent) if db_path_obj.parent != Path(".") else "."
-
-    # If end_time is not provided, use the latest timestamp from the most recent database
     if end_time is None:
-        end_time = get_latest_timestamp_from_most_recent_db(base_dir)
+        end_time = get_latest_timestamp(data_dir)
         if end_time is None:
             end_time = datetime.datetime.now()
 
@@ -1154,7 +1152,7 @@ def calculate_monthly_summary(db_path: str, end_time: datetime.datetime | None =
     print(f"Total hours in month: {total_hours}")
 
     # Get data for the entire previous month
-    df = get_time_filtered_data(db_path, total_hours, prev_month_end + datetime.timedelta(seconds=1))
+    df = get_time_filtered_data(data_dir, total_hours, prev_month_end + datetime.timedelta(seconds=1))
 
     if df.empty:
         return {
@@ -1187,46 +1185,47 @@ def calculate_monthly_summary(db_path: str, end_time: datetime.datetime | None =
     }
 
 
-def get_gpu_models_at_time(db_path: str, target_time: datetime.datetime, window_minutes: int = 5) -> list:
+def get_gpu_models_at_time(data_dir: str, target_time: datetime.datetime, window_minutes: int = 5) -> list:
     """
     Get all GPU models available at a specific time.
 
     Args:
-        db_path: Path to SQLite database
+        data_dir: Directory containing gpu_state_*.parquet files
         target_time: Time to query for GPU models
         window_minutes: Time window around target_time to search (default: 5 minutes)
 
     Returns:
         List of GPU model names available at the specified time
     """
-    conn = sqlite3.connect(db_path)
-
     # Define time window
     start_time = target_time - datetime.timedelta(minutes=window_minutes)
     end_time = target_time + datetime.timedelta(minutes=window_minutes)
 
-    query = """
-    SELECT DISTINCT GPUs_DeviceName
-    FROM gpu_state
-    WHERE GPUs_DeviceName IS NOT NULL
-    AND timestamp BETWEEN ? AND ?
-    ORDER BY GPUs_DeviceName
-    """
+    glob = parquet_glob(data_dir)
+    start_str = start_time.strftime("%Y-%m-%d %H:%M:%S")
+    end_str = end_time.strftime("%Y-%m-%d %H:%M:%S")
+    # Note: datetime strings are derived from internal datetime objects, not user input.
+    query = (
+        f"SELECT DISTINCT GPUs_DeviceName FROM parquet_scan('{glob}', hive_partitioning=false, union_by_name=true) "
+        f"WHERE GPUs_DeviceName IS NOT NULL AND timestamp BETWEEN '{start_str}' AND '{end_str}' "
+        "ORDER BY GPUs_DeviceName"
+    )
 
-    df = pd.read_sql_query(query, conn, params=[start_time, end_time])
-    conn.close()
+    con = duckdb.connect()
+    df = con.execute(query).df()
+    con.close()
 
     return df["GPUs_DeviceName"].tolist()
 
 
 def get_gpu_model_activity_at_time(
-    db_path: str, gpu_model: str, target_time: datetime.datetime, window_minutes: int = 5
+    data_dir: str, gpu_model: str, target_time: datetime.datetime, window_minutes: int = 5
 ) -> pd.DataFrame:
     """
     Get detailed activity for a specific GPU model at a specific time.
 
     Args:
-        db_path: Path to SQLite database
+        data_dir: Directory containing gpu_state_*.parquet files
         gpu_model: GPU model name (e.g., 'NVIDIA A100-SXM4-80GB')
         target_time: Time to query for activity
         window_minutes: Time window around target_time to search (default: 5 minutes)
@@ -1234,24 +1233,26 @@ def get_gpu_model_activity_at_time(
     Returns:
         DataFrame with detailed GPU activity information
     """
-    conn = sqlite3.connect(db_path)
-
     # Define time window
     start_time = target_time - datetime.timedelta(minutes=window_minutes)
     end_time = target_time + datetime.timedelta(minutes=window_minutes)
 
-    query = """
-    SELECT timestamp, Name, AssignedGPUs, State, GPUs_DeviceName,
-           GPUsAverageUsage, Machine, RemoteOwner, GlobalJobId,
-           PrioritizedProjects
-    FROM gpu_state
-    WHERE GPUs_DeviceName = ?
-    AND timestamp BETWEEN ? AND ?
-    ORDER BY timestamp DESC, Machine, AssignedGPUs
-    """
+    glob = parquet_glob(data_dir)
+    start_str = start_time.strftime("%Y-%m-%d %H:%M:%S")
+    end_str = end_time.strftime("%Y-%m-%d %H:%M:%S")
+    # Note: timestamps are derived from internal datetime objects; gpu_model is user input
+    # and is bound as a query parameter below.
+    query = (
+        "SELECT timestamp, Name, AssignedGPUs, State, GPUs_DeviceName, "
+        "GPUsAverageUsage, Machine, RemoteOwner, GlobalJobId, PrioritizedProjects "
+        f"FROM parquet_scan('{glob}', hive_partitioning=false, union_by_name=true) "
+        f"WHERE GPUs_DeviceName = ? AND timestamp BETWEEN '{start_str}' AND '{end_str}' "
+        "ORDER BY timestamp DESC, Machine, AssignedGPUs"
+    )
 
-    df = pd.read_sql_query(query, conn, params=[gpu_model, start_time, end_time])
-    conn.close()
+    con = duckdb.connect()
+    df = con.execute(query, [gpu_model]).df()
+    con.close()
 
     if len(df) > 0:
         df["timestamp"] = pd.to_datetime(df["timestamp"])
@@ -1260,13 +1261,13 @@ def get_gpu_model_activity_at_time(
 
 
 def analyze_gpu_model_at_time(
-    db_path: str, gpu_model: str, target_time: datetime.datetime, window_minutes: int = 5
+    data_dir: str, gpu_model: str, target_time: datetime.datetime, window_minutes: int = 5
 ) -> dict:
     """
     Analyze what's happening with a specific GPU model at a specific time.
 
     Args:
-        db_path: Path to SQLite database
+        data_dir: Directory containing gpu_state_*.parquet files
         gpu_model: GPU model name
         target_time: Time to analyze
         window_minutes: Time window to search
@@ -1274,7 +1275,7 @@ def analyze_gpu_model_at_time(
     Returns:
         Dictionary with analysis results
     """
-    df = get_gpu_model_activity_at_time(db_path, gpu_model, target_time, window_minutes)
+    df = get_gpu_model_activity_at_time(data_dir, gpu_model, target_time, window_minutes)
 
     if len(df) == 0:
         return {"error": f"No data found for {gpu_model} around {target_time.strftime('%Y-%m-%d %H:%M:%S')}"}
@@ -1369,6 +1370,127 @@ def analyze_gpu_model_at_time(
         "active_jobs": active_jobs.to_dict("records") if len(active_jobs) > 0 else [],
         "inactive_gpus": inactive_gpus.to_dict("records") if len(inactive_gpus) > 0 else [],
         "raw_data": snapshot_df,
+    }
+
+
+def calculate_prevent_jobs_stats(df: pd.DataFrame) -> dict:
+    """
+    Calculate summary statistics for GPUs with PreventJobsReason set.
+
+    Args:
+        df: Main GPU state DataFrame (full time window)
+
+    Returns:
+        Dictionary with per-host breakdown (including last_seen and whether the reason
+        is still active), reason groupings, and per-class counts: per_class_avg feeds
+        the Real Slots table Prevented (avg.) column. A GPU counts as Prevented only
+        when its representative slot (after duplicate cleanup) is idle with
+        PreventJobsReason set.
+    """
+    _CLASS_NAMES = [
+        "Priority-ResearcherOwned",
+        "Priority-CHTCOwned",
+        "Shared",
+        "Backfill-ResearcherOwned",
+        "Backfill-CHTCOwned",
+    ]
+    _empty = {
+        "has_prevent_jobs": False,
+        "num_hosts": 0,
+        "num_unique_gpus": 0,
+        "per_host": {},
+        "by_reason": {},
+        "per_class_avg": dict.fromkeys(_CLASS_NAMES, 0.0),
+        "per_class_device_avg": {c: {} for c in _CLASS_NAMES},
+        "pj_buckets": 0,
+        "total_buckets": 0,
+    }
+
+    if "PreventJobsReason" not in df.columns:
+        return _empty
+
+    filtered = df[df["PreventJobsReason"].notna() & (df["PreventJobsReason"].astype(str).str.strip() != "")].copy()
+
+    if filtered.empty:
+        return _empty
+
+    by_reason = {}
+    for reason, grp in filtered.groupby("PreventJobsReason"):
+        by_reason[str(reason)] = {
+            "num_hosts": grp["Machine"].nunique(),
+            "num_gpus": grp["AssignedGPUs"].nunique(),
+        }
+
+    df_bucketed = df.copy()
+    df_bucketed["timestamp"] = pd.to_datetime(df_bucketed["timestamp"])
+    df_bucketed["15min_bucket"] = df_bucketed["timestamp"].dt.floor("15min")
+    buckets = df_bucketed["15min_bucket"].unique()
+    num_buckets = len(buckets)
+
+    # Buckets that have any PreventJobsReason data at all (across all machines/classes).
+    # Used to assess data coverage and to decide whether a host's reason is still active.
+    pj_mask = df_bucketed["PreventJobsReason"].notna() & (
+        df_bucketed["PreventJobsReason"].astype(str).str.strip() != ""
+    )
+    pj_rows = df_bucketed[pj_mask]
+    pj_buckets_global = sorted(pj_rows["15min_bucket"].unique())
+    num_pj_buckets = len(pj_buckets_global)
+    last_pj_bucket = pj_buckets_global[-1] if pj_buckets_global else None
+
+    # A host is "active" if its reason is still set in the most recent bucket with PJ
+    # data; otherwise the reason was lifted partway through the window.
+    active_machines = (
+        set(pj_rows.loc[pj_rows["15min_bucket"] == last_pj_bucket, "Machine"]) if last_pj_bucket is not None else set()
+    )
+    per_host = {}
+    for machine, grp in pj_rows.groupby("Machine"):
+        per_host[machine] = {
+            "num_gpus": grp["AssignedGPUs"].nunique(),
+            "reasons": sorted(grp["PreventJobsReason"].dropna().unique().tolist()),
+            "last_seen": grp["timestamp"].max().strftime("%Y-%m-%d %H:%M"),
+            "active": machine in active_machines,
+        }
+
+    per_class_avg: dict[str, float] = {}
+    per_class_device_avg: dict[str, dict[str, float]] = {}
+
+    # PreventJobsReason does not evict running jobs — it only stops new ones, so only
+    # idle GPUs count as Prevented. The duplicate-cleanup ranking inside
+    # filter_df_enhanced resolves multi-slot GPUs: a Claimed slot outranks an idle
+    # prevented one, so a GPU still finishing a job surfaces here as Claimed (or, for
+    # a backfill-slot job, drops out of the primary class) and counts as Allocated.
+    for class_name in _CLASS_NAMES:
+        class_df = filter_df_enhanced(df_bucketed, class_name, "", "")
+        prevented = class_df[
+            class_df["PreventJobsReason"].notna()
+            & (class_df["PreventJobsReason"].astype(str).str.strip() != "")
+            & (class_df["State"] != "Claimed")
+        ]
+        if prevented.empty or num_buckets == 0:
+            per_class_avg[class_name] = 0.0
+            per_class_device_avg[class_name] = {}
+        else:
+            total = sum(prevented[prevented["15min_bucket"] == b]["AssignedGPUs"].nunique() for b in buckets)
+            per_class_avg[class_name] = total / num_buckets
+
+            # Per-device breakdown within this class (used for Flagship/Standard tier split)
+            device_avgs: dict[str, float] = {}
+            for device_type, dev_grp in prevented.groupby("GPUs_DeviceName"):
+                dev_total = sum(dev_grp[dev_grp["15min_bucket"] == b]["AssignedGPUs"].nunique() for b in buckets)
+                if dev_total > 0:
+                    device_avgs[str(device_type)] = dev_total / num_buckets
+            per_class_device_avg[class_name] = device_avgs
+
+    return {
+        "has_prevent_jobs": True,
+        "num_hosts": filtered["Machine"].nunique(),
+        "num_unique_gpus": filtered["AssignedGPUs"].nunique(),
+        "per_host": per_host,
+        "by_reason": by_reason,
+        "per_class_avg": per_class_avg,
+        "per_class_device_avg": per_class_device_avg,
+        "pj_buckets": num_pj_buckets,
+        "total_buckets": num_buckets,
     }
 
 

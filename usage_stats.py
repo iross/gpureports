@@ -3,19 +3,16 @@
 GPU Usage Statistics Calculator
 
 Thin orchestration layer that coordinates data loading, calculations,
-and reporting for GPU usage analysis. See stats_data, stats_calculations,
-and stats_reporting for the implementation details.
+and reporting for GPU usage analysis. See read_data, classify_slots,
+and reporting for the implementation details.
 """
 
 import datetime
-import os
 
-import pandas as pd
 import typer
 
-import gpu_utils
-from gpu_utils import load_host_exclusions
-from stats_calculations import (
+import classify_slots
+from classify_slots import (
     analyze_gpu_model_at_time,
     calculate_allocation_usage_by_device_enhanced,
     calculate_allocation_usage_by_memory,
@@ -25,11 +22,13 @@ from stats_calculations import (
     calculate_h200_user_breakdown,
     calculate_machines_with_zero_active_gpus,
     calculate_monthly_summary,
+    calculate_prevent_jobs_stats,
     calculate_time_series_usage,
     get_gpu_models_at_time,
+    prepare_frames,
 )
-from stats_data import get_draining_data, get_time_filtered_data
-from stats_reporting import (
+from read_data import get_draining_data, get_time_filtered_data, load_host_exclusions, scan_time_filtered
+from reporting import (
     generate_html_report,
     print_analysis_results,
     print_gpu_model_analysis,
@@ -38,7 +37,7 @@ from stats_reporting import (
 
 
 def run_analysis(
-    db_path: str,
+    data_dir: str,
     hours_back: int = 24,
     host: str = "",
     analysis_type: str = "allocation",
@@ -67,54 +66,63 @@ def run_analysis(
     analysis_start_datetime = datetime.datetime.now()
 
     # Set up host exclusions
-    gpu_utils.HOST_EXCLUSIONS = load_host_exclusions(exclude_hosts, exclude_hosts_yaml)
-    gpu_utils.FILTERED_HOSTS_INFO = []  # Reset tracking
+    classify_slots.HOST_EXCLUSIONS = load_host_exclusions(exclude_hosts, exclude_hosts_yaml)
+    classify_slots.FILTERED_HOSTS_INFO = []  # Reset tracking
 
-    # Get filtered data
-    df = get_time_filtered_data(db_path, hours_back, end_time)
+    # Prepare lazy frames over the Parquet window; the full window is never
+    # materialized as a pandas DataFrame
+    frames = prepare_frames(scan_time_filtered(data_dir, hours_back, end_time))
 
-    if len(df) == 0:
+    if frames.original_count == 0:
         return {"error": "No data found in the specified time range."}
 
-    # Calculate time buckets for interval counting
-    df_temp = df.copy()
-    df_temp["timestamp"] = pd.to_datetime(df_temp["timestamp"])
-    df_temp["15min_bucket"] = df_temp["timestamp"].dt.floor("15min")
-    num_intervals = df_temp["15min_bucket"].nunique()
+    filtered_hosts_info = []
+    if frames.excluded_count > 0:
+        filtered_hosts_info.append(
+            {
+                "original_count": frames.original_count,
+                "filtered_count": frames.original_count - frames.excluded_count,
+                "excluded_hosts": classify_slots.HOST_EXCLUSIONS,
+            }
+        )
 
     result = {
         "metadata": {
-            "start_time": df["timestamp"].min(),
-            "end_time": df["timestamp"].max(),
-            "num_intervals": num_intervals,
-            "total_records": len(df),
+            "start_time": frames.start_time,
+            "end_time": frames.end_time,
+            "num_intervals": frames.total_buckets,
+            "total_records": frames.original_count,
             "hours_back": hours_back,
-            "excluded_hosts": gpu_utils.HOST_EXCLUSIONS,
-            "filtered_hosts_info": gpu_utils.FILTERED_HOSTS_INFO,
+            "excluded_hosts": classify_slots.HOST_EXCLUSIONS,
+            "filtered_hosts_info": filtered_hosts_info,
         }
     }
 
     if analysis_type == "allocation":
         if group_by_device:
-            result["device_stats"] = calculate_allocation_usage_by_device_enhanced(df, host, all_devices)
-            result["memory_stats"] = calculate_allocation_usage_by_memory(df, host, all_devices)
-            result["h200_user_stats"] = calculate_h200_user_breakdown(df, host, hours_back)
-            result["backfill_user_stats"] = calculate_backfill_usage_by_user(df, host, hours_back, all_devices)
-            result["zero_active_machines"] = calculate_machines_with_zero_active_gpus(df, host, all_devices)
-            result["raw_data"] = df  # Pass raw data for unique cluster totals calculation
+            result["device_stats"] = calculate_allocation_usage_by_device_enhanced(frames, host, all_devices)
+            result["memory_stats"] = calculate_allocation_usage_by_memory(frames, host, all_devices)
+            result["h200_user_stats"] = calculate_h200_user_breakdown(frames, host, hours_back)
+            result["backfill_user_stats"] = calculate_backfill_usage_by_user(frames, host, hours_back, all_devices)
+            result["zero_active_machines"] = calculate_machines_with_zero_active_gpus(frames, host, all_devices)
             result["host_filter"] = host  # Pass host filter for consistency
         else:
+            df = get_time_filtered_data(data_dir, hours_back, end_time)
             result["allocation_stats"] = calculate_allocation_usage_enhanced(df, host)
+            # The pandas filters append per-call filtering counts to this list
+            result["metadata"]["filtered_hosts_info"] = classify_slots.FILTERED_HOSTS_INFO
 
     elif analysis_type == "timeseries":
+        df = get_time_filtered_data(data_dir, hours_back, end_time)
         result["timeseries_data"] = calculate_time_series_usage(df, bucket_minutes, host)
+        result["metadata"]["filtered_hosts_info"] = classify_slots.FILTERED_HOSTS_INFO
 
     elif analysis_type == "monthly":
-        result["monthly_stats"] = calculate_monthly_summary(db_path, end_time)
+        result["monthly_stats"] = calculate_monthly_summary(data_dir, end_time)
 
     # Add draining data to all analysis types
     try:
-        draining_df = get_draining_data(db_path, hours_back, end_time)
+        draining_df = get_draining_data(data_dir, hours_back, end_time)
         draining_stats = calculate_draining_stats(draining_df)
         if analysis_type == "monthly" and "monthly_stats" in result and "error" not in result["monthly_stats"]:
             result["monthly_stats"]["draining_stats"] = draining_stats
@@ -126,6 +134,21 @@ def run_analysis(
             result["monthly_stats"]["draining_stats"] = {"has_draining": False}
         else:
             result["draining_stats"] = {"has_draining": False}
+
+    # Add PreventJobsReason stats
+    try:
+        prevent_jobs_stats = calculate_prevent_jobs_stats(frames)
+        if analysis_type == "monthly" and "monthly_stats" in result and "error" not in result["monthly_stats"]:
+            result["monthly_stats"]["prevent_jobs_stats"] = prevent_jobs_stats
+        else:
+            result["prevent_jobs_stats"] = prevent_jobs_stats
+    except Exception as e:
+        print(f"Warning: Could not calculate PreventJobsReason stats: {e}", file=__import__("sys").stderr)
+        fallback = {"has_prevent_jobs": False, "num_hosts": 0, "num_unique_gpus": 0, "per_host": {}, "by_reason": {}}
+        if analysis_type == "monthly" and "monthly_stats" in result and "error" not in result["monthly_stats"]:
+            result["monthly_stats"]["prevent_jobs_stats"] = fallback
+        else:
+            result["prevent_jobs_stats"] = fallback
 
     # Add runtime information to metadata
     analysis_end_time = time.time()
@@ -141,7 +164,7 @@ def run_analysis(
 def main(
     hours_back: int = typer.Option(24, help="Number of hours to analyze (default: 24)"),
     host: str = typer.Option("", help="Host name to filter results"),
-    db_path: str | None = typer.Option(None, help="Path to SQLite database (defaults to current month)"),
+    data_dir: str = typer.Option(".", help="Directory containing gpu_state_*.parquet files"),
     analysis_type: str = typer.Option(
         "allocation", help="Type of analysis: allocation (% GPUs claimed), timeseries, gpu_model_snapshot, or monthly"
     ),
@@ -169,6 +192,7 @@ def main(
     smtp_port: int = typer.Option(25, help="SMTP server port (25 for standard SMTP, 587 for submission)"),
     email_timeout: int = typer.Option(30, help="SMTP connection timeout in seconds"),
     email_debug: bool = typer.Option(False, help="Enable SMTP debug output"),
+    email_subject_prefix: str = typer.Option("CHTC GPU Allocation", help="Prefix prepended to the email subject line"),
 ):
     """
     Calculate GPU usage statistics for Priority, Shared, and Backfill classes.
@@ -184,28 +208,6 @@ def main(
     # prioritize the explicit exclude_hosts option
     if exclude_hosts and exclude_hosts_yaml == "masked_hosts.yaml":
         exclude_hosts_yaml = None
-
-    # Auto-detect database path if not provided
-    if db_path is None:
-        current_date = datetime.datetime.now()
-        current_month_db = f"gpu_state_{current_date.strftime('%Y-%m')}.db"
-
-        # Check if current month database exists
-        if os.path.exists(current_month_db):
-            db_path = current_month_db
-            print(f"Using current month database: {db_path}")
-        else:
-            # Fall back to most recent database file
-            import glob
-
-            db_files = glob.glob("gpu_state_*.db")
-            if db_files:
-                # Sort by filename (which includes date) to get most recent
-                db_path = sorted(db_files)[-1]
-                print(f"Current month database not found, using most recent: {db_path}")
-            else:
-                print("Error: No database files found. Please specify --db-path.")
-                return
 
     # Parse end_time if provided
     parsed_end_time = None
@@ -231,11 +233,11 @@ def main(
 
         if gpu_model:
             # Analyze specific GPU model
-            analysis = analyze_gpu_model_at_time(db_path, gpu_model, parsed_snapshot_time, window_minutes)
+            analysis = analyze_gpu_model_at_time(data_dir, gpu_model, parsed_snapshot_time, window_minutes)
             print_gpu_model_analysis(analysis)
         else:
             # Show all available GPU models at that time
-            available_models = get_gpu_models_at_time(db_path, parsed_snapshot_time, window_minutes)
+            available_models = get_gpu_models_at_time(data_dir, parsed_snapshot_time, window_minutes)
             if not available_models:
                 print(f"No GPU models found around {parsed_snapshot_time.strftime('%Y-%m-%d %H:%M:%S')}")
                 return
@@ -252,7 +254,7 @@ def main(
     # Run the standard analysis
     try:
         results = run_analysis(
-            db_path=db_path,
+            data_dir=data_dir,
             hours_back=hours_back,
             host=host,
             analysis_type=analysis_type,
@@ -301,6 +303,7 @@ def main(
             from_email=email_from,
             smtp_server=smtp_server,
             smtp_port=smtp_port,
+            subject_prefix=email_subject_prefix,
             usage_percentages=usage_percentages,
             lookback_hours=hours_back,
             timeout=email_timeout,

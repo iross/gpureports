@@ -4,36 +4,37 @@ This system monitors GPU utilization across a compute cluster and provides detai
 
 ## Production deployment
 
-Running on a CHTC baremetal host as `iaross`. Data is collected every 5 minutes from the
-HTCondor collector and written to monthly SQLite databases. Email reports go out daily,
-weekly, and monthly via cron.
+Runs as containers on Kubernetes. Data is collected (intended: every 5 minutes) from
+the HTCondor collector and written to monthly Parquet files on a shared PVC. Email
+reports go out daily, weekly, and monthly.
 
 ```
-HTCondor → get_gpu_state.py → gpu_state_YYYY-MM.db → usage_stats.py → email
+HTCondor → collector.py → gpu_state_YYYY-MM.parquet → usage_stats.py → email
 ```
 
-See [OPERATIONS.md](OPERATIONS.md) for crontab entries, log locations, and troubleshooting.
+See [OPERATIONS.md](OPERATIONS.md) for the current architecture, schedule, and
+troubleshooting.
 
 ## Project Structure
 
 ```
-├── gpu_utils.py               # Core utilities for GPU data filtering and processing
-├── gpu_utils_polars.py        # Polars-based utilities for fast multi-DB loading
+├── read_data.py                # Canonical Parquet/SQLite loading, file discovery, host-config loading
+├── classify_slots.py           # Canonical dedup/classify pipeline (prepare_frames, filter_df/filter_df_enhanced)
+├── reporting.py                # HTML/text/email report generation
 ├── usage_stats.py             # Main analysis and reporting (full features, email)
-├── usage_stats_polars.py      # Polars-accelerated reporting (fast, basic features)
-├── get_gpu_state.py           # Data collection from HTCondor
-├── get_gpu_state_polars.py    # Polars-based data collection
+├── report.py                  # Ad-hoc CLI report (just last-day/last-hour), no email
+├── collector.py                # Data collection from HTCondor, writes Parquet
 ├── weekly_gpu_hours_analysis.py  # Weekly GPU hours trend analysis
 ├── check_unused_gpus.py       # Detect flagship/standard GPUs unused in last week
 ├── draining_report.py         # Report on draining GPU nodes
-├── device_name_mappings.py    # GPU device name normalization
+├── devices.py                  # GPU device name normalization
 ├── scripts/                   # Analysis and plotting scripts
 │   ├── analyze_evictions.py
 │   ├── plot_usage_stats.py
 │   ├── plot_wait_times.py
 │   ├── plot_gpu_availability.py
 │   ├── weekly_summary.py
-│   ├── weekly_allocation_plot.py
+│   ├── plot_weekly_allocation.py
 │   ├── gap_analysis.py
 │   └── query.py
 ├── dashboard/                 # FastAPI real-time GPU state dashboard [WIP — not yet deployed]
@@ -50,26 +51,30 @@ See [OPERATIONS.md](OPERATIONS.md) for crontab entries, log locations, and troub
 
 ## Core Modules
 
-### gpu_utils.py / gpu_utils_polars.py
-Centralized utilities for:
-- GPU data filtering by utilization type (Priority, Shared, Backfill)
-- Counting functions for different GPU categories
-- Host exclusion management
-- Database file discovery
+### read_data.py / classify_slots.py
+The canonical gpu_state pipeline, shared by usage_stats.py, report.py, and the
+dashboard: `scan_time_filtered()` lazily scans Parquet, `prepare_frames()`
+dedups/classifies once per window. See `classify_slots.slot_dedup_rank()` for
+the tie-breaking rule when a GPU has multiple concurrent slot rows. read_data.py
+also owns per-month gpu_state file discovery (`get_required_parquet_files`,
+`get_latest_timestamp_from_most_recent_parquet`, etc.), preferring Parquet with a
+SQLite fallback for months predating the Parquet migration, plus loading the
+host-exclusion/CHTC-owned-hosts config files. classify_slots.py also carries
+pandas `filter_df`/`filter_df_enhanced` -- the small-window classification
+implementation still used by a handful of scripts (`scripts/host_report.py`,
+`analysis/analyze_task7_troubleshoot.py`) and its own small-window pandas
+functions -- alongside the polars `prepare_frames()` path.
 
 ### usage_stats.py
 Full-featured analysis engine:
-- Time-filtered data retrieval across multiple database files
-- Allocation and performance usage calculations
+- Allocation and performance usage calculations via the canonical pipeline
 - HTML and text report generation
 - Email notification support
 - Monthly summaries and GPU model snapshots
 
-### usage_stats_polars.py
-Polars-accelerated version for large datasets:
-- 10-100x faster for multi-month queries
-- Same CLI interface for basic usage
-- Does not support email or monthly analysis (use usage_stats.py for those)
+### report.py
+Ad-hoc CLI report (`just last-day`/`last-hour`/`last-day-html`) — no automated
+caller, no email support. Same canonical pipeline as usage_stats.py.
 
 ## Usage
 
@@ -86,14 +91,14 @@ just dashboard          # Start real-time dashboard at localhost:8051
 ### Direct CLI
 
 ```bash
-# 24-hour report
-uv run usage_stats_polars.py --exclude-hosts-yaml masked_hosts.yaml --hours-back 24
+# 24-hour ad-hoc report, no email
+uv run report.py --exclude-hosts-yaml masked_hosts.yaml --hours-back 24
 
-# Weekly report (all months)
-uv run usage_stats_polars.py --exclude-hosts-yaml masked_hosts.yaml --hours-back 168
+# Weekly ad-hoc report (all months)
+uv run report.py --exclude-hosts-yaml masked_hosts.yaml --hours-back 168
 
 # Full-featured report with email
-uv run usage_stats.py --email-to admin@example.com --email-config smtp_config.yaml
+uv run usage_stats.py --exclude-hosts-yaml masked_hosts.yaml --hours-back 24 --group-by-device --email-to admin@example.com
 ```
 
 ## Testing

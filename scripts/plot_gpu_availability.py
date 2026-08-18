@@ -11,6 +11,7 @@ Supports filtering by host and a configurable time window (default: 1 week).
 """
 
 import argparse
+import re
 import sqlite3
 import sys
 from datetime import datetime, timedelta
@@ -27,10 +28,12 @@ except ImportError:
     MATPLOTLIB_AVAILABLE = False
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from gpu_utils_polars import (
-    HOST_EXCLUSIONS,
-    get_latest_timestamp_from_most_recent_db,
-    get_required_databases,
+import classify_slots
+from read_data import (
+    GPU_STATE_SCHEMA,
+    SCAN_CAST_OPTIONS,
+    get_latest_timestamp_from_most_recent_parquet,
+    get_required_parquet_files,
     load_chtc_owned_hosts,
     load_host_exclusions,
 )
@@ -69,26 +72,36 @@ CATEGORY_LABELS = {
 }
 
 
-def load_data(db_path: str, start_time: datetime, end_time: datetime) -> pl.DataFrame:
-    """Load needed columns from a single database file within the time range."""
+def load_data(db_path: str, fmt: str, start_time: datetime, end_time: datetime) -> pl.DataFrame:
+    """Load needed columns from a single Parquet or SQLite file within the time range."""
     if not Path(db_path).exists():
         print(f"Warning: {db_path} not found, skipping")
         return pl.DataFrame()
 
     try:
-        conn = sqlite3.connect(db_path)
-        query = (
-            f"SELECT {NEEDED_COLUMNS_SQL} FROM gpu_state "
-            f"WHERE timestamp >= '{start_time.strftime('%Y-%m-%d %H:%M:%S')}' "
-            f"AND timestamp <= '{end_time.strftime('%Y-%m-%d %H:%M:%S')}'"
-        )
-        df = pl.read_database(query, conn)
-        conn.close()
+        if fmt == "parquet":
+            df = (
+                pl.scan_parquet(
+                    db_path, schema=GPU_STATE_SCHEMA, missing_columns="insert", cast_options=SCAN_CAST_OPTIONS
+                )
+                .filter((pl.col("timestamp") >= start_time) & (pl.col("timestamp") <= end_time))
+                .select(NEEDED_COLUMNS)
+                .collect()
+            )
+        else:
+            conn = sqlite3.connect(db_path)
+            query = (
+                f"SELECT {NEEDED_COLUMNS_SQL} FROM gpu_state "
+                f"WHERE timestamp >= '{start_time.strftime('%Y-%m-%d %H:%M:%S')}' "
+                f"AND timestamp <= '{end_time.strftime('%Y-%m-%d %H:%M:%S')}'"
+            )
+            df = pl.read_database(query, conn)
+            conn.close()
+            if len(df) > 0 and df["timestamp"].dtype == pl.Utf8:
+                df = df.with_columns(pl.col("timestamp").str.to_datetime())
 
         if len(df) > 0:
             print(f"  Loaded {len(df):,} rows from {db_path}")
-            if df["timestamp"].dtype == pl.Utf8:
-                df = df.with_columns(pl.col("timestamp").str.to_datetime())
 
         return df
     except Exception as e:
@@ -142,8 +155,9 @@ def compute_bucket_stats(
         )
 
     # Apply global host exclusions
-    for excluded_host in HOST_EXCLUSIONS:
-        df = df.filter(~pl.col("Machine").str.contains(f"(?i){excluded_host}").fill_null(False))
+    if classify_slots.HOST_EXCLUSIONS:
+        excluded_pattern = "|".join(re.escape(excluded_host) for excluded_host in classify_slots.HOST_EXCLUSIONS)
+        df = df.filter(~pl.col("Machine").str.contains(f"(?i){excluded_pattern}").fill_null(False))
 
     # Apply user host filter (comma-separated list of substrings, OR logic)
     if host:
@@ -383,9 +397,7 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    import gpu_utils_polars
-
-    gpu_utils_polars.HOST_EXCLUSIONS = load_host_exclusions(yaml_file=args.exclusions_yaml)
+    classify_slots.HOST_EXCLUSIONS = load_host_exclusions(yaml_file=args.exclusions_yaml)
 
     # Resolve end time
     if args.end_time:
@@ -399,27 +411,27 @@ def main() -> None:
             print(f"Error: cannot parse --end-time '{args.end_time}'. Use YYYY-MM-DD or YYYY-MM-DD HH:MM:SS.")
             sys.exit(1)
     else:
-        end_time = get_latest_timestamp_from_most_recent_db(args.base_dir)
+        end_time = get_latest_timestamp_from_most_recent_parquet(args.base_dir)
         if end_time is None:
-            print("Error: no database files found and no --end-time specified.")
+            print("Error: no data files found and no --end-time specified.")
             sys.exit(1)
-        print(f"Using latest DB timestamp as end time: {end_time}")
+        print(f"Using latest data timestamp as end time: {end_time}")
 
     start_time = end_time - timedelta(days=args.days_back)
     print(f"Time range: {start_time} to {end_time}")
 
-    # Resolve database files
+    # Resolve data files
     if args.databases:
-        db_paths = args.databases
+        db_specs = [(db, "sqlite" if db.endswith(".db") else "parquet") for db in args.databases]
     else:
-        db_paths = get_required_databases(start_time, end_time, args.base_dir)
-        if not db_paths:
-            print(f"Error: no database files found in '{args.base_dir}' for this date range.")
+        db_specs = get_required_parquet_files(start_time, end_time, args.base_dir)
+        if not db_specs:
+            print(f"Error: no data files found in '{args.base_dir}' for this date range.")
             sys.exit(1)
-        print(f"Auto-detected databases: {db_paths}")
+        print(f"Auto-detected data files: {db_specs}")
 
     # Load data
-    frames = [load_data(db, start_time, end_time) for db in db_paths]
+    frames = [load_data(db, fmt, start_time, end_time) for db, fmt in db_specs]
     frames = [f for f in frames if len(f) > 0]
 
     if not frames:

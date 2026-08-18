@@ -1,5 +1,9 @@
 # get_gpu_state: Pandas vs Polars Comparison
 
+**Historical record (TASK-49.2):** `get_gpu_state.py` has been removed; its Parquet-writing
+successor is `collector.py`, not a same-named `get_gpu_state_polars.py` (that file was never
+committed). Kept for the design reasoning below.
+
 This document compares the original pandas implementation (`get_gpu_state.py`) with the Polars version (`get_gpu_state_polars.py`).
 
 ## Key Differences
