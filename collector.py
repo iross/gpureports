@@ -37,6 +37,7 @@ def get_gpus() -> pl.DataFrame:
         "RemoteOwner",
         "GlobalJobId",
         "PreventJobsReason",
+        "Disk",
     ]
 
     res = coll.query(htcondor.AdTypes.Startd, constraint="GPUs >= 1", projection=PROJ)

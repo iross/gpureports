@@ -42,6 +42,7 @@ GPU_STATE_SCHEMA = {
     "RemoteOwner": pl.Utf8,
     "GlobalJobId": pl.Utf8,
     "PreventJobsReason": pl.Utf8,
+    "Disk": pl.Int64,
     "timestamp": pl.Datetime("us"),
 }
 
