@@ -79,8 +79,8 @@ def _build_rows():
       backfill slot that flips Unclaimed->Claimed (exercises drained_percent
       and Backfill-ResearcherOwned via the researcher-machine join).
     - gpu2 (CHTC-owned, H200): primary stays Claimed by "bob" both buckets
-      (h200_user_stats), a backfill slot that flips Claimed->Unclaimed
-      (Backfill-CHTCOwned, a second user "dave").
+      (calculate_device_user_breakdown), a backfill slot that flips
+      Claimed->Unclaimed (Backfill-CHTCOwned, a second user "dave").
     - gpu3 (shared, old-GPU-type P100): two GPUs never claimed (zero-active
       machine) with PreventJobsReason set on one of them (prevent_jobs_stats).
     """
@@ -141,7 +141,7 @@ def _assert_deep_equal(a, b, path="root"):
 
 class TestDailyWeeklyParity:
     """emailer.sh's daily/weekly/test modes call run_analysis with
-    group_by_device=True, which drives device/memory/h200/backfill-user/
+    group_by_device=True, which drives device/memory/device-user/backfill-user/
     zero-active/prevent-jobs through prepare_frames(). Compare each against
     the frozen pandas baseline on identical input."""
 
@@ -166,9 +166,9 @@ class TestDailyWeeklyParity:
         new = calc.calculate_allocation_usage_by_memory(self.new_frames, "", include_all_devices)
         _assert_deep_equal(old, new)
 
-    def test_h200_user_stats_parity(self):
-        old = legacy_calc.calculate_h200_user_breakdown(self.old_df, "", self.HOURS_BACK)
-        new = calc.calculate_h200_user_breakdown(self.new_frames, "", self.HOURS_BACK)
+    def test_device_user_stats_parity(self):
+        old = legacy_calc.calculate_device_user_breakdown(self.old_df, "NVIDIA H200", "", self.HOURS_BACK)
+        new = calc.calculate_device_user_breakdown(self.new_frames, "NVIDIA H200", "", self.HOURS_BACK)
         _assert_deep_equal(old, new)
 
     def test_backfill_user_stats_parity(self):
@@ -204,7 +204,7 @@ class TestMonthlySummaryParity:
         assert old["total_hours"] == new["total_hours"]
         _assert_deep_equal(old["device_stats"], new["device_stats"])
         _assert_deep_equal(old["memory_stats"], new["memory_stats"])
-        _assert_deep_equal(old["h200_user_stats"], new["h200_user_stats"])
+        _assert_deep_equal(old["dgx_spark_user_stats"], new["dgx_spark_user_stats"])
 
         assert old["data_coverage"]["total_records"] == new["data_coverage"]["total_records"]
         assert old["data_coverage"]["start_time"] == new["data_coverage"]["start_time"]

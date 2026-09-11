@@ -459,32 +459,35 @@ def _finalize_user_stats(user_stats: dict) -> dict:
     return final_stats
 
 
-def calculate_h200_user_breakdown(frames: PreparedFrames, host: str = "", hours_back: int = 1) -> dict:
+def calculate_device_user_breakdown(
+    frames: PreparedFrames, device_name: str, host: str = "", hours_back: int = 1
+) -> dict:
     """
-    Calculate H200 usage breakdown by user and slot type.
+    Calculate single-device-type usage breakdown by user and slot type.
 
     Args:
         frames: Prepared window frames from prepare_frames()
+        device_name: Exact GPUs_DeviceName to filter to (e.g. "NVIDIA GB10")
         host: Optional host filter (matched against Machine, then slot Name)
         hours_back: Lookback period in hours
 
     Returns:
-        Dictionary with H200 usage statistics by user and slot type
+        Dictionary with usage statistics by user and slot type
     """
-    h200 = pl.col("GPUs_DeviceName") == "NVIDIA H200"
+    device = pl.col("GPUs_DeviceName") == device_name
     host_machine = pl.col("Machine").str.contains(f"(?i){re.escape(host)}").fill_null(False) if host else pl.lit(True)
 
-    # Denominator counts all intervals in the H200 dataset (pre-exclusion),
+    # Denominator counts all intervals in the device's dataset (pre-exclusion),
     # including those where a user has 0 GPUs
-    num_buckets = frames.raw.filter(h200 & host_machine).select(pl.col("bucket").n_unique()).collect().item()
+    num_buckets = frames.raw.filter(device & host_machine).select(pl.col("bucket").n_unique()).collect().item()
     if not num_buckets:
         return {}
 
-    researcher = _researcher_scope(frames, ["Machine"], device="NVIDIA H200")
+    researcher = _researcher_scope(frames, ["Machine"], device=device_name)
 
     user_stats: dict[str, dict[str, float]] = {}
     for slot_type in CLASS_ORDER:
-        frame = _class_frame(frames, slot_type, host, researcher).filter(h200 & host_machine)
+        frame = _class_frame(frames, slot_type, host, researcher).filter(device & host_machine)
         for user, total_gpus in _user_gpu_totals(frame).items():
             gpu_hours = (total_gpus / num_buckets) * hours_back
             if user not in user_stats:
@@ -860,7 +863,7 @@ def calculate_monthly_summary(data_dir: str, end_time: datetime.datetime | None 
         "total_hours": total_hours,
         "device_stats": calculate_allocation_usage_by_device_enhanced(frames, "", False),
         "memory_stats": calculate_allocation_usage_by_memory(frames, "", False),
-        "h200_user_stats": calculate_h200_user_breakdown(frames, "", total_hours),
+        "dgx_spark_user_stats": calculate_device_user_breakdown(frames, "NVIDIA GB10", "", total_hours),
         "data_coverage": {
             "start_time": frames.start_time,
             "end_time": frames.end_time,

@@ -716,34 +716,35 @@ def calculate_allocation_usage_by_memory(df: pd.DataFrame, host: str = "", inclu
     return stats
 
 
-def calculate_h200_user_breakdown(df: pd.DataFrame, host: str = "", hours_back: int = 1) -> dict:
+def calculate_device_user_breakdown(df: pd.DataFrame, device_name: str, host: str = "", hours_back: int = 1) -> dict:
     """
-    Calculate H200 usage breakdown by user and slot type.
+    Calculate single-device-type usage breakdown by user and slot type.
 
     Args:
         df: DataFrame with GPU state data
+        device_name: Exact GPUs_DeviceName to filter to (e.g. "NVIDIA GB10")
         host: Optional host filter
         hours_back: Lookback period in hours
 
     Returns:
-        Dictionary with H200 usage statistics by user and slot type
+        Dictionary with usage statistics by user and slot type
     """
-    # Filter for H200 GPUs only
-    h200_df = df[df["GPUs_DeviceName"] == "NVIDIA H200"].copy()
+    # Filter for the requested device type only
+    device_df = df[df["GPUs_DeviceName"] == device_name].copy()
 
-    if h200_df.empty:
+    if device_df.empty:
         return {}
 
-    # Use cached preprocessing for H200 data
+    # Use cached preprocessing for this device's data
     # Generate unified cache key based on DataFrame identity
     cache_key = (
-        f"preprocessed_{len(h200_df)}_{hash(str(h200_df['timestamp'].iloc[0])) if len(h200_df) > 0 else 'empty'}"
+        f"preprocessed_{len(device_df)}_{hash(str(device_df['timestamp'].iloc[0])) if len(device_df) > 0 else 'empty'}"
     )
-    h200_df = get_preprocessed_dataframe(h200_df, cache_key)
+    device_df = get_preprocessed_dataframe(device_df, cache_key)
 
     # Apply host filter if specified
     if host:
-        h200_df = h200_df[h200_df["Machine"].str.contains(host, case=False, na=False)]
+        device_df = device_df[device_df["Machine"].str.contains(host, case=False, na=False)]
 
     # Use the actual lookback period to match the device allocation method
     # (Device allocation uses averages across buckets multiplied by lookback period)
@@ -755,7 +756,7 @@ def calculate_h200_user_breakdown(df: pd.DataFrame, host: str = "", hours_back: 
     # For each slot type, analyze user usage using averaging approach like device allocation
     for slot_type in slot_types:
         # Get slots of this type
-        filtered_df = filter_df_enhanced(h200_df, slot_type, "", host)
+        filtered_df = filter_df_enhanced(device_df, slot_type, "", host)
 
         if filtered_df.empty:
             continue
@@ -769,9 +770,9 @@ def calculate_h200_user_breakdown(df: pd.DataFrame, host: str = "", hours_back: 
         # For each user, calculate their average GPU usage across buckets, then multiply by actual time
         user_bucket_totals = {}
 
-        # Get all possible buckets for this slot type (from the entire H200 dataset)
+        # Get all possible buckets for this slot type (from the entire device's dataset)
         # This ensures we count all time intervals, including those where user has 0 GPUs
-        all_buckets = sorted(h200_df["15min_bucket"].unique())
+        all_buckets = sorted(device_df["15min_bucket"].unique())
         num_buckets = len(all_buckets)
 
         for bucket in all_buckets:
@@ -1166,7 +1167,7 @@ def calculate_monthly_summary(data_dir: str, end_time: datetime.datetime | None 
     # Calculate statistics for the month
     device_stats = calculate_allocation_usage_by_device_enhanced(df, "", False)  # All devices, no host filter
     memory_stats = calculate_allocation_usage_by_memory(df, "", False)  # All devices, no host filter
-    h200_stats = calculate_h200_user_breakdown(df, "", total_hours)
+    dgx_spark_stats = calculate_device_user_breakdown(df, "NVIDIA GB10", "", total_hours)
 
     return {
         "month": prev_month_start.strftime("%B %Y"),
@@ -1175,7 +1176,7 @@ def calculate_monthly_summary(data_dir: str, end_time: datetime.datetime | None 
         "total_hours": total_hours,
         "device_stats": device_stats,
         "memory_stats": memory_stats,
-        "h200_user_stats": h200_stats,
+        "dgx_spark_user_stats": dgx_spark_stats,
         "data_coverage": {
             "start_time": df["timestamp"].min(),
             "end_time": df["timestamp"].max(),

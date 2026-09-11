@@ -41,7 +41,7 @@ def main(
         calculate_allocation_usage_by_device_enhanced,
         calculate_allocation_usage_by_memory,
         calculate_backfill_usage_by_user,
-        calculate_h200_user_breakdown,
+        calculate_device_user_breakdown,
         prepare_frames,
     )
     from read_data import load_host_exclusions, scan_time_filtered
@@ -97,7 +97,7 @@ def main(
     results["memory_stats"] = calculate_allocation_usage_by_memory(frames, host, all_devices)
 
     print("Calculating user statistics...")
-    results["h200_user_stats"] = calculate_h200_user_breakdown(frames, host, hours_back)
+    results["dgx_spark_user_stats"] = calculate_device_user_breakdown(frames, "NVIDIA GB10", host, hours_back)
     results["backfill_user_stats"] = calculate_backfill_usage_by_user(frames, host, hours_back, all_devices)
     results["host_filter"] = host
 
