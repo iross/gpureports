@@ -443,8 +443,8 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
             regular_results["device_stats"] = monthly_stats["device_stats"]
         if "memory_stats" in monthly_stats:
             regular_results["memory_stats"] = monthly_stats["memory_stats"]
-        if "h200_user_stats" in monthly_stats:
-            regular_results["h200_user_stats"] = monthly_stats["h200_user_stats"]
+        if "dgx_spark_user_stats" in monthly_stats:
+            regular_results["dgx_spark_user_stats"] = monthly_stats["dgx_spark_user_stats"]
         if "draining_stats" in monthly_stats:
             regular_results["draining_stats"] = monthly_stats["draining_stats"]
         if "prevent_jobs_stats" in monthly_stats:
@@ -802,17 +802,17 @@ def generate_html_report(results: dict, output_file: str | None = None) -> str:
         html_parts.append("</table>")
     # Device stats tables
     elif "device_stats" in results:
-        # H200 Usage by Slot Type (positioned after backfill slots, before device type details)
-        if "h200_user_stats" in results:
-            h200_stats = results["h200_user_stats"]
-            if h200_stats:
-                html_parts.append("<h2>H200 Usage by Slot Type and User</h2>")
+        # DGX Spark Usage by Slot Type (positioned after backfill slots, before device type details)
+        if "dgx_spark_user_stats" in results:
+            dgx_spark_stats = results["dgx_spark_user_stats"]
+            if dgx_spark_stats:
+                html_parts.append("<h2>DGX Spark Usage by Slot Type and User</h2>")
 
                 # First, aggregate data by slot type
                 slot_type_totals = {}
                 slot_type_users = {}
 
-                for user, user_data in h200_stats.items():
+                for user, user_data in dgx_spark_stats.items():
                     for slot_type, slot_data in user_data["slot_breakdown"].items():
                         if slot_type not in slot_type_totals:
                             slot_type_totals[slot_type] = 0
@@ -1470,8 +1470,8 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
             regular_results["device_stats"] = monthly_stats["device_stats"]
         if "memory_stats" in monthly_stats:
             regular_results["memory_stats"] = monthly_stats["memory_stats"]
-        if "h200_user_stats" in monthly_stats:
-            regular_results["h200_user_stats"] = monthly_stats["h200_user_stats"]
+        if "dgx_spark_user_stats" in monthly_stats:
+            regular_results["dgx_spark_user_stats"] = monthly_stats["dgx_spark_user_stats"]
         if "raw_data" in monthly_stats:
             regular_results["raw_data"] = monthly_stats["raw_data"]
         if "host_filter" in monthly_stats:
@@ -1648,18 +1648,18 @@ def print_analysis_results(results: dict, output_format: str = "text", output_fi
                         f"({allocated:.1f}/{stats['avg_total_available']:.1f} GPUs)"
                     )
 
-        # H200 Usage by Slot Type
-        if "h200_user_stats" in results:
-            h200_stats = results["h200_user_stats"]
-            if h200_stats:
-                print("\nH200 USAGE BY SLOT TYPE:")
+        # DGX Spark Usage by Slot Type
+        if "dgx_spark_user_stats" in results:
+            dgx_spark_stats = results["dgx_spark_user_stats"]
+            if dgx_spark_stats:
+                print("\nDGX SPARK USAGE BY SLOT TYPE:")
                 print(f"{'-' * 80}")
 
                 # Aggregate data by slot type (same logic as HTML)
                 slot_type_totals = {}
                 slot_type_users = {}
 
-                for user, user_data in h200_stats.items():
+                for user, user_data in dgx_spark_stats.items():
                     for slot_type, slot_data in user_data["slot_breakdown"].items():
                         if slot_type not in slot_type_totals:
                             slot_type_totals[slot_type] = 0

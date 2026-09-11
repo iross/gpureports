@@ -18,8 +18,8 @@ from classify_slots import (
     calculate_allocation_usage_by_memory,
     calculate_allocation_usage_enhanced,
     calculate_backfill_usage_by_user,
+    calculate_device_user_breakdown,
     calculate_draining_stats,
-    calculate_h200_user_breakdown,
     calculate_machines_with_zero_active_gpus,
     calculate_monthly_summary,
     calculate_prevent_jobs_stats,
@@ -102,7 +102,7 @@ def run_analysis(
         if group_by_device:
             result["device_stats"] = calculate_allocation_usage_by_device_enhanced(frames, host, all_devices)
             result["memory_stats"] = calculate_allocation_usage_by_memory(frames, host, all_devices)
-            result["h200_user_stats"] = calculate_h200_user_breakdown(frames, host, hours_back)
+            result["dgx_spark_user_stats"] = calculate_device_user_breakdown(frames, "NVIDIA GB10", host, hours_back)
             result["backfill_user_stats"] = calculate_backfill_usage_by_user(frames, host, hours_back, all_devices)
             result["zero_active_machines"] = calculate_machines_with_zero_active_gpus(frames, host, all_devices)
             result["host_filter"] = host  # Pass host filter for consistency
