@@ -1,29 +1,36 @@
 #!/usr/bin/env python3
 """
-Periodic snapshot of idle GPU job pressure in the HTCondor pool.
+Periodic snapshot of GPU job pressure and job-to-project attribution in the HTCondor pool.
 
-Queries all schedds for idle jobs requesting GPUs and records each idle
-period as a single row with first_seen / last_seen INTEGER timestamps (Unix
-seconds). Each poll extends last_seen for jobs still idle and opens a new
-row for newly-appeared jobs, so long-idle jobs that previously generated
-hundreds of identical rows now generate one.
+Queries schedds for idle and running jobs requesting GPUs and records each contiguous
+observation as a single row with first_seen / last_seen INTEGER timestamps (Unix seconds)
+in a monthly Parquet file, job_pressure_YYYY-MM.parquet. Each poll extends last_seen for
+jobs still in the same state and opens a new row for jobs newly seen in a state, so a
+long-idle job generates one row instead of hundreds. JobState is "idle" (queue pressure)
+or "running" (lets gpu_state's GlobalJobId be joined to the job's ChtcProjects group even
+for jobs that started before the next poll ever saw them idle).
 
-Schema change from the original: timestamp TEXT column is replaced by
-first_seen INTEGER and last_seen INTEGER; column order differs.
-Existing old-schema DBs are read by migrate_job_pressure.py.
+Storage mirrors collector.py: the month's file is read, updated, and atomically replaced
+through a dot-prefixed temp file, so concurrent readers globbing job_pressure_*.parquet
+never see a partial file. A per-month lock file serializes overlapping runs.
 
-Runs as a k8s CronJob (intended every 5 minutes), bundled in the same container
-image as collector.py -- see OPERATIONS.md.
+Runs as a k8s CronJob bundled in the same container image as collector.py -- see
+OPERATIONS.md. Old SQLite files are converted with migrate_job_pressure.py.
 """
 
 import datetime
-import sqlite3
+import fcntl
+import os
+import time
+from pathlib import Path
+from typing import Annotated
 
-import htcondor2 as htcondor
+import polars as pl
 import typer
 
-COLL = htcondor.Collector("cm.chtc.wisc.edu")
-TARGET_APS = ["ap2001.chtc.wisc.edu", "ap2002.chtc.wisc.edu"]
+from read_data import JOB_PRESSURE_SCHEMA
+
+COLLECTOR_HOST = "cm.chtc.wisc.edu"
 
 PROJ = [
     "GlobalJobId",
@@ -34,32 +41,18 @@ PROJ = [
     "RequestGPUMemory",
     "QDate",
     "ChtcProjects",
+    "JobStatus",
 ]
 
-CONSTRAINT = "RequestGPUs >= 1 && JobStatus == 1"
+# HTCondor JobStatus -> JobState
+JOB_STATES = {1: "idle", 2: "running"}
+CONSTRAINT = "RequestGPUs >= 1 && (JobStatus == 1 || JobStatus == 2)"
 
-# A job absent for longer than this is treated as a closed interval; the
-# next sighting opens a fresh row. Set to 3× the actual crontab interval.
-# Current crontab runs every 30 minutes → 3 × 1800 = 5400.
-_STALE_SECONDS = 5400
+# A job absent for longer than STALE_POLLS polls is treated as a closed interval; the
+# next sighting opens a fresh row. Tolerates a couple of missed polls.
+STALE_POLLS = 3
 
-_CREATE_TABLE = """
-    CREATE TABLE IF NOT EXISTS job_pressure (
-        GlobalJobId      TEXT NOT NULL,
-        ScheddName       TEXT,
-        Owner            TEXT,
-        RequestGPUs      REAL,
-        RequestCPUs      REAL,
-        RequestMemory    REAL,
-        RequestGPUMemory REAL,
-        QDate            INTEGER,
-        ChtcProjects     TEXT,
-        first_seen       INTEGER NOT NULL,
-        last_seen        INTEGER NOT NULL
-    )
-"""
-_CREATE_IDX_LAST = "CREATE INDEX IF NOT EXISTS idx_last_seen  ON job_pressure (last_seen)"
-_CREATE_IDX_FIRST = "CREATE INDEX IF NOT EXISTS idx_first_seen ON job_pressure (first_seen)"
+_KEY = ["GlobalJobId", "JobState"]
 
 
 def _eval_classad(val: object) -> object:
@@ -108,10 +101,35 @@ def _safe_int(val: object, default: int = 0) -> int:
         return default
 
 
-def collect_idle_gpu_jobs() -> list[dict]:
-    """Query all schedds for idle GPU jobs; return list of job attribute dicts."""
+def _safe_str(val: object) -> str:
+    val = _eval_classad(val)
+    return "" if val is None else str(val)
+
+
+# Schedds skipped by default (per requester decision). IceCube's job ads also carried no
+# ChtcProjects in the live check, so it would add no group attribution anyway.
+EXCLUDED_SCHEDDS = frozenset({"grid-submitter.icecube.wisc.edu"})
+
+
+def should_query_schedd(name: str, allowed: list[str] | None) -> bool:
+    """An explicit allow-list wins; otherwise every schedd not in EXCLUDED_SCHEDDS is queried."""
+    if allowed:
+        return name in allowed
+    return name not in EXCLUDED_SCHEDDS
+
+
+def collect_gpu_jobs(schedd_names: list[str] | None = None) -> list[dict]:
+    """Query schedds for idle and running GPU jobs; return list of job attribute dicts.
+
+    Every schedd the collector advertises is queried except EXCLUDED_SCHEDDS, unless
+    schedd_names is given, in which case exactly those are queried. A schedd that denies
+    or fails the query is skipped with a warning so one unreachable or unauthorized
+    submit host never blocks the rest.
+    """
+    import htcondor2 as htcondor
+
     try:
-        schedd_ads = COLL.locateAll(htcondor.DaemonTypes.Schedd)
+        schedd_ads = htcondor.Collector(COLLECTOR_HOST).locateAll(htcondor.DaemonTypes.Schedd)
     except Exception as e:
         print(f"Warning: could not query collector for schedds: {e}")
         return []
@@ -119,95 +137,122 @@ def collect_idle_gpu_jobs() -> list[dict]:
     jobs: list[dict] = []
     for schedd_ad in schedd_ads:
         schedd_name = schedd_ad.get("Name", "")
-        if schedd_name not in TARGET_APS:
+        if not should_query_schedd(schedd_name, schedd_names):
             continue
         try:
-            schedd = htcondor.Schedd(schedd_ad)
-            ads = schedd.query(constraint=CONSTRAINT, projection=PROJ)
+            ads = htcondor.Schedd(schedd_ad).query(constraint=CONSTRAINT, projection=PROJ)
         except Exception as e:
             print(f"Warning: query failed for schedd {schedd_name}: {e}")
             continue
 
         for ad in ads:
+            state = JOB_STATES.get(_safe_int(ad.get("JobStatus")))
+            if state is None:
+                continue
             jobs.append(
                 {
-                    "GlobalJobId": ad.get("GlobalJobId", ""),
+                    "GlobalJobId": _safe_str(ad.get("GlobalJobId")),
                     "ScheddName": schedd_name,
-                    "Owner": ad.get("Owner", ""),
+                    "Owner": _safe_str(ad.get("Owner")),
                     "RequestGPUs": _safe_float(ad.get("RequestGPUs")),
                     "RequestCPUs": _safe_float(ad.get("RequestCPUs")),
                     "RequestMemory": _safe_float(ad.get("RequestMemory")),
                     "RequestGPUMemory": _float_or_none(ad.get("RequestGPUMemory")),
                     "QDate": _safe_int(ad.get("QDate")),
-                    "ChtcProjects": ad.get("ChtcProjects", ""),
+                    "ChtcProjects": _safe_str(ad.get("ChtcProjects")),
+                    "JobState": state,
                 }
             )
 
     return jobs
 
 
-def update_intervals(jobs: list[dict], db_path: str, now_ts: int) -> None:
-    """Extend last_seen for continuing idle jobs; open new rows for new ones."""
-    conn = sqlite3.connect(db_path)
-    conn.execute(_CREATE_TABLE)
-    conn.execute(_CREATE_IDX_LAST)
-    conn.execute(_CREATE_IDX_FIRST)
+def update_intervals(existing: pl.DataFrame, jobs: list[dict], now_ts: int, stale_seconds: int) -> pl.DataFrame:
+    """Return existing with last_seen extended for continuing jobs and new rows for new ones.
 
-    # Open intervals: rows whose last_seen is recent enough to still be active.
-    open_rows = conn.execute(
-        "SELECT GlobalJobId, rowid FROM job_pressure WHERE last_seen >= ?",
-        (now_ts - _STALE_SECONDS,),
-    ).fetchall()
-    # If a GlobalJobId appears in multiple open rows (shouldn't happen), keep
-    # the most recently updated one.
-    open_map: dict[str, int] = {}
-    for gid, rowid in open_rows:
-        open_map[gid] = rowid
+    A row is "open" when its last_seen is within stale_seconds of now_ts. A job is
+    continuing when it has an open row with the same (GlobalJobId, JobState); if several
+    open rows share the key (shouldn't happen) the most recently seen one is extended.
+    """
+    current = (
+        pl.DataFrame(jobs, schema=JOB_PRESSURE_SCHEMA | {"first_seen": pl.Int64, "last_seen": pl.Int64}, strict=False)
+        .select([c for c in JOB_PRESSURE_SCHEMA if c not in ("first_seen", "last_seen")])
+        .unique(subset=_KEY, keep="last", maintain_order=True)
+    )
 
-    current_ids = {j["GlobalJobId"] for j in jobs}
+    existing = existing.cast(JOB_PRESSURE_SCHEMA).with_row_index("_row")
+    open_rows = (
+        existing.filter(pl.col("last_seen") >= now_ts - stale_seconds)
+        .sort("last_seen")
+        .group_by(_KEY)
+        .agg(pl.col("_row").last())
+    )
 
-    continuing = current_ids & open_map.keys()
-    if continuing:
-        conn.executemany(
-            "UPDATE job_pressure SET last_seen = ? WHERE rowid = ?",
-            [(now_ts, open_map[gid]) for gid in continuing],
+    matched = current.join(open_rows, on=_KEY, how="left")
+    continuing_rows = matched["_row"].drop_nulls()
+
+    extended = existing.with_columns(
+        pl.when(pl.col("_row").is_in(continuing_rows.implode()))
+        .then(now_ts)
+        .otherwise(pl.col("last_seen"))
+        .alias("last_seen")
+    ).drop("_row")
+
+    new_rows = (
+        matched.filter(pl.col("_row").is_null())
+        .drop("_row")
+        .with_columns(
+            pl.lit(now_ts, dtype=pl.Int64).alias("first_seen"), pl.lit(now_ts, dtype=pl.Int64).alias("last_seen")
         )
-
-    new_jobs = [j for j in jobs if j["GlobalJobId"] not in open_map]
-    if new_jobs:
-        conn.executemany(
-            "INSERT INTO job_pressure VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            [
-                (
-                    j["GlobalJobId"],
-                    j["ScheddName"],
-                    j["Owner"],
-                    j["RequestGPUs"],
-                    j["RequestCPUs"],
-                    j["RequestMemory"],
-                    j["RequestGPUMemory"],
-                    j["QDate"],
-                    j["ChtcProjects"],
-                    now_ts,
-                    now_ts,
-                )
-                for j in new_jobs
-            ],
-        )
-
-    conn.commit()
-    conn.close()
+        .select(list(JOB_PRESSURE_SCHEMA))
+    )
+    return pl.concat([extended, new_rows])
 
 
-def main(db_path: str = typer.Argument("/home/iaross/gpureports")) -> None:
-    now = datetime.datetime.now()
-    now_ts = int(now.timestamp())
-    month = now.strftime("%Y-%m")
+def _write_parquet_atomic(df: pl.DataFrame, parquet_path: Path) -> None:
+    """Replace parquet_path with df via a temp file readers' glob can never match.
 
-    jobs = collect_idle_gpu_jobs()
-    print(f"{now.isoformat()}: {len(jobs)} idle GPU jobs")
+    Dot-prefixed and suffixed `.tmp` (not `.parquet`), for the same reason as
+    collector._write_parquet_atomic: a name matching job_pressure_*.parquet could be
+    picked up half-written by a concurrent reader. Always written with
+    JOB_PRESSURE_SCHEMA -- an all-null column otherwise gets Parquet type Null, which
+    DuckDB cannot read.
+    """
+    tmp = parquet_path.with_name(f".{parquet_path.name}.tmp")
+    df.cast(JOB_PRESSURE_SCHEMA).write_parquet(str(tmp), compression="zstd")
+    os.replace(tmp, parquet_path)
+
+
+def record_jobs(jobs: list[dict], parquet_path: Path, now_ts: int, stale_seconds: int) -> None:
+    """Merge one poll's jobs into the month's Parquet file under an exclusive lock."""
+    lock_path = parquet_path.with_name(f".{parquet_path.name}.lock")
+    with open(lock_path, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if parquet_path.exists():
+            existing = pl.read_parquet(str(parquet_path))
+        else:
+            existing = pl.DataFrame(schema=JOB_PRESSURE_SCHEMA)
+        _write_parquet_atomic(update_intervals(existing, jobs, now_ts, stale_seconds), parquet_path)
+
+
+def main(
+    data_dir: str = typer.Argument("/home/iaross/gpureports"),
+    poll_interval: int = typer.Option(
+        1800, help="Seconds between runs of this script; a job unseen for 3x this is treated as gone"
+    ),
+    schedd: Annotated[
+        list[str] | None, typer.Option(help="Restrict to these schedd names (default: every advertised schedd)")
+    ] = None,
+) -> None:
+    """Record idle and running GPU jobs into the monthly job_pressure Parquet file."""
+    now_ts = int(time.time())
+    month = datetime.datetime.fromtimestamp(now_ts, datetime.UTC).strftime("%Y-%m")
+
+    jobs = collect_gpu_jobs(schedd or None)
+    n_idle = sum(j["JobState"] == "idle" for j in jobs)
+    print(f"{datetime.datetime.now().isoformat()}: {n_idle} idle, {len(jobs) - n_idle} running GPU jobs")
     if jobs:
-        update_intervals(jobs, f"{db_path}/job_pressure_{month}.db", now_ts)
+        record_jobs(jobs, Path(data_dir) / f"job_pressure_{month}.parquet", now_ts, STALE_POLLS * poll_interval)
 
 
 if __name__ == "__main__":

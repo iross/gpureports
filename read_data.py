@@ -51,6 +51,25 @@ GPU_STATE_SCHEMA = {
 # rather than erroring when scanning files from mixed sources.
 SCAN_CAST_OPTIONS = pl.ScanCastOptions(datetime_cast="nanosecond-downcast")
 
+# Schema of job_pressure Parquet files (get_job_pressure.py). One row per contiguous
+# observation interval of a job in one JobState ("idle" or "running"); first_seen and
+# last_seen are Unix seconds. Passed explicitly to scans so files resolve by name and an
+# empty frame can be built when no files exist.
+JOB_PRESSURE_SCHEMA = {
+    "GlobalJobId": pl.Utf8,
+    "ScheddName": pl.Utf8,
+    "Owner": pl.Utf8,
+    "RequestGPUs": pl.Float64,
+    "RequestCPUs": pl.Float64,
+    "RequestMemory": pl.Float64,
+    "RequestGPUMemory": pl.Float64,
+    "QDate": pl.Int64,
+    "ChtcProjects": pl.Utf8,
+    "JobState": pl.Utf8,
+    "first_seen": pl.Int64,
+    "last_seen": pl.Int64,
+}
+
 
 def load_chtc_owned_hosts(chtc_owned_file: str = "chtc_owned") -> set:
     """
@@ -391,3 +410,107 @@ def get_draining_data(data_dir: str, hours_back: int = 24, end_time: datetime.da
         .sort(["Machine", "timestamp"])
         .collect(engine="streaming")
     )
+
+
+def job_pressure_glob(base_dir: str) -> str:
+    return os.path.join(os.path.abspath(base_dir), "job_pressure_*.parquet")
+
+
+def _epoch_seconds(dt: datetime.datetime) -> int:
+    """Unix seconds for dt; naive datetimes are taken as UTC (the collectors' container timezone)."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.UTC)
+    return int(dt.timestamp())
+
+
+def load_job_pressure(
+    data_dir: str,
+    start_time: datetime.datetime,
+    end_time: datetime.datetime,
+    job_states: tuple[str, ...] | None = None,
+) -> pl.DataFrame:
+    """
+    Load job_pressure intervals overlapping [start_time, end_time] via DuckDB.
+
+    Args:
+        data_dir: Directory containing job_pressure_*.parquet files
+        start_time: Window start (naive datetimes are interpreted as UTC)
+        end_time: Window end
+        job_states: Restrict to these JobState values ("idle", "running"); None returns both
+
+    Returns:
+        DataFrame with JOB_PRESSURE_SCHEMA columns; empty if no files exist or none overlap
+    """
+    if not globlib.glob(job_pressure_glob(data_dir)):
+        return pl.DataFrame(schema=JOB_PRESSURE_SCHEMA)
+
+    columns = ", ".join(JOB_PRESSURE_SCHEMA)
+    query = f"SELECT {columns} FROM read_parquet(?, union_by_name=true) WHERE last_seen >= ? AND first_seen <= ?"  # noqa: S608
+    params: list = [job_pressure_glob(data_dir), _epoch_seconds(start_time), _epoch_seconds(end_time)]
+    if job_states:
+        query += f" AND JobState IN ({', '.join('?' for _ in job_states)})"
+        params.extend(job_states)
+
+    con = duckdb.connect()
+    try:
+        return pl.from_arrow(con.execute(query, params).to_arrow_table()).cast(JOB_PRESSURE_SCHEMA)
+    finally:
+        con.close()
+
+
+def attribute_claimed_jobs(data_dir: str, start_time: datetime.datetime, end_time: datetime.datetime) -> pl.DataFrame:
+    """
+    Join jobs holding a Claimed gpu_state slot in the window to their job_pressure record.
+
+    One DuckDB query joins the distinct claimed GlobalJobIds in gpu_state to the most
+    recently seen job_pressure record for that job (any JobState, any month, since a job
+    can be queued long before it runs).
+
+    Args:
+        data_dir: Directory containing gpu_state_*.parquet and job_pressure_*.parquet files
+        start_time: Window start (compared to gpu_state's naive timestamp column)
+        end_time: Window end
+
+    Returns:
+        DataFrame with GlobalJobId, RemoteOwner, ChtcProjects (comma-separated, null when
+        unmatched) and matched (True when job_pressure has a record for the job, even if
+        its ChtcProjects is empty)
+    """
+    if not globlib.glob(parquet_glob(data_dir)):
+        return pl.DataFrame(
+            schema={"GlobalJobId": pl.Utf8, "RemoteOwner": pl.Utf8, "ChtcProjects": pl.Utf8, "matched": pl.Boolean}
+        )
+
+    have_pressure = bool(globlib.glob(job_pressure_glob(data_dir)))
+    if have_pressure:
+        pressure_cte = (
+            "SELECT GlobalJobId, arg_max(ChtcProjects, last_seen) AS ChtcProjects "
+            "FROM read_parquet(?, union_by_name=true) GROUP BY GlobalJobId"
+        )
+    else:
+        pressure_cte = "SELECT NULL::VARCHAR AS GlobalJobId, NULL::VARCHAR AS ChtcProjects WHERE false"
+
+    query = f"""
+        WITH claimed AS (
+            SELECT DISTINCT GlobalJobId, RemoteOwner
+            FROM read_parquet(?, union_by_name=true)
+            WHERE State = 'Claimed' AND GlobalJobId IS NOT NULL
+              AND timestamp >= ?::TIMESTAMP AND timestamp <= ?::TIMESTAMP
+        ),
+        pressure AS ({pressure_cte})
+        SELECT c.GlobalJobId, c.RemoteOwner, p.ChtcProjects, p.GlobalJobId IS NOT NULL AS matched
+        FROM claimed c LEFT JOIN pressure p USING (GlobalJobId)
+    """  # noqa: S608
+    params: list = [
+        parquet_glob(data_dir),
+        start_time.strftime("%Y-%m-%d %H:%M:%S"),
+        end_time.strftime("%Y-%m-%d %H:%M:%S"),
+    ]
+    if have_pressure:
+        params.append(job_pressure_glob(data_dir))
+
+    con = duckdb.connect()
+    try:
+        return pl.from_arrow(con.execute(query, params).to_arrow_table())
+    finally:
+        con.close()

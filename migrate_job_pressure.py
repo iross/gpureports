@@ -1,30 +1,49 @@
 #!/usr/bin/env python3
 """
-Migrate old-schema job_pressure DBs to the interval schema, or re-merge
-an already-converted DB that was migrated with the wrong gap threshold.
+Convert SQLite job_pressure_YYYY-MM.db files to job_pressure_YYYY-MM.parquet.
 
-Old schema: one row per (snapshot, job) with a TEXT timestamp column.
-New schema: one row per idle period with INTEGER first_seen / last_seen.
+Handles both SQLite schemas the baremetal collector produced:
 
-For each GlobalJobId, consecutive sightings within gap_seconds of each
-other are merged into a single interval. Sightings separated by a longer
-gap produce separate intervals (job was matched/held then went idle again).
+  Old schema: one row per (snapshot, job) with a TEXT timestamp column.
+  Interval schema: one row per idle period with INTEGER first_seen / last_seen.
 
-The collection interval is auto-detected from the data; the merge threshold
-is set to 2× that interval.  Use --gap to override.
+Old-schema rows are merged per GlobalJobId: consecutive sightings within gap_seconds of
+each other become a single interval; a longer gap produces separate intervals (the job
+was matched or held, then went idle again). The collection interval is auto-detected and
+the merge threshold is set to 2x that interval. Interval-schema rows are already
+intervals and are copied as recorded; --gap re-merges them (or overrides the old-schema
+threshold).
+
+Every SQLite row was an idle observation, so output rows get JobState = "idle". The
+SQLite file is opened read-only and left in place. Output is written atomically with the
+schema get_job_pressure.py and read_data.load_job_pressure expect.
+
+Old-schema timestamps are naive local time written by the baremetal host; SQLite would
+read them as UTC, so --local-utc-offset (default 18000 s = CDT, which covers the whole
+Mar-Nov DST period the old files span) is added to convert them to true Unix seconds.
+Interval-schema files already hold true Unix seconds and are not shifted.
 
 Usage:
-    python migrate_job_pressure.py job_pressure_2026-04.db
-    python migrate_job_pressure.py job_pressure_2026-04.db job_pressure_2026-05.db
+    python migrate_job_pressure.py job_pressure_2026-05.db
+    python migrate_job_pressure.py --output-dir /data job_pressure_2026-05.db job_pressure_2026-06.db
     python migrate_job_pressure.py --gap 3600 job_pressure_2026-04.db
 """
 
 import argparse
+import os
 import sqlite3
 import statistics
 from pathlib import Path
 
-BATCH = 50_000
+import polars as pl
+
+from read_data import JOB_PRESSURE_SCHEMA
+
+BATCH = 500_000
+
+_ATTR_COLUMNS = (
+    "GlobalJobId, ScheddName, Owner, RequestGPUs, RequestCPUs, RequestMemory, RequestGPUMemory, QDate, ChtcProjects"
+)
 
 
 def _detect_interval_old(conn: sqlite3.Connection) -> int:
@@ -47,46 +66,10 @@ def _detect_interval_old(conn: sqlite3.Connection) -> int:
     return statistics.mode(g[0] for g in rows) if rows else 1800
 
 
-def _detect_interval_new(conn: sqlite3.Connection) -> int:
-    """Detect collection interval from new-schema DB using gaps between intervals."""
-    rows = conn.execute(
-        """
-        WITH gaps AS (
-            SELECT first_seen - LAG(last_seen) OVER (
-                PARTITION BY GlobalJobId ORDER BY first_seen
-            ) AS gap
-            FROM job_pressure
-        )
-        SELECT gap FROM gaps WHERE gap IS NOT NULL AND gap > 0
-        LIMIT 100000
-        """
-    ).fetchall()
-    return statistics.mode(g[0] for g in rows) if rows else 1800
-
-
-def _write_intervals(conn: sqlite3.Connection, intervals_iter) -> int:
-    """Write intervals from an iterable to job_pressure, returning count."""
-    pending: list[tuple] = []
-    n = 0
-
-    def _flush() -> None:
-        conn.executemany("INSERT INTO job_pressure VALUES (?,?,?,?,?,?,?,?,?,?,?)", pending)
-
-    for interval in intervals_iter:
-        pending.append(interval)
-        n += 1
-        if len(pending) >= BATCH:
-            _flush()
-            pending.clear()
-    if pending:
-        _flush()
-    return n
-
-
 def _merge_stream(cursor, gap_seconds: int):
     """Yield merged intervals from an ordered (GlobalJobId, ts_or_first_seen) cursor."""
-    # Each row: (GlobalJobId[0], ...attrs[1:9]..., ts_or_first[9], ts_or_last[10])
-    # For old schema rows[10] == rows[9] (single timestamp), for new schema rows[10] is last_seen.
+    # Each row: (GlobalJobId[0], ...attrs[1:9]..., first[9], last[10]); for old-schema
+    # rows first == last (a single timestamp).
     cur: list | None = None
     first_ts = 0
 
@@ -106,80 +89,27 @@ def _merge_stream(cursor, gap_seconds: int):
         yield (*cur[:9], first_ts, cur[10])
 
 
-def _migrate_old_schema(conn: sqlite3.Connection, gap_seconds: int) -> int:
-    """Migrate from TEXT-timestamp schema to interval schema. Returns interval count."""
-    conn.execute("BEGIN")
-    conn.execute("ALTER TABLE job_pressure RENAME TO job_pressure_old")
-    conn.execute(
-        """
-        CREATE TABLE job_pressure (
-            GlobalJobId TEXT NOT NULL, ScheddName TEXT, Owner TEXT,
-            RequestGPUs REAL, RequestCPUs REAL, RequestMemory REAL,
-            RequestGPUMemory REAL, QDate INTEGER, ChtcProjects TEXT,
-            first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL
-        )
-        """
-    )
-
-    cursor = conn.execute(
-        """
-        SELECT GlobalJobId, ScheddName, Owner,
-               RequestGPUs, RequestCPUs, RequestMemory, RequestGPUMemory,
-               QDate, ChtcProjects,
-               CAST(strftime('%s', timestamp) AS INTEGER) AS ts,
-               CAST(strftime('%s', timestamp) AS INTEGER) AS ts2
-        FROM job_pressure_old
-        ORDER BY GlobalJobId, ts
-        """
-    )
-    cursor.arraysize = 10_000
-
-    n = _write_intervals(conn, _merge_stream(cursor, gap_seconds))
-    conn.execute("DROP TABLE job_pressure_old")
-    return n
+def _intervals_to_frame(intervals: list[tuple]) -> pl.DataFrame:
+    columns = [c for c in JOB_PRESSURE_SCHEMA if c != "JobState"]
+    frame = pl.DataFrame(intervals, schema=columns, orient="row", infer_schema_length=None)
+    return frame.with_columns(pl.lit("idle").alias("JobState")).select(list(JOB_PRESSURE_SCHEMA))
 
 
-def _remerge_new_schema(conn: sqlite3.Connection, gap_seconds: int) -> int:
-    """Re-merge an already-converted interval table with a new gap threshold."""
-    conn.execute("BEGIN")
-    conn.execute("ALTER TABLE job_pressure RENAME TO job_pressure_old")
-    conn.execute(
-        """
-        CREATE TABLE job_pressure (
-            GlobalJobId TEXT NOT NULL, ScheddName TEXT, Owner TEXT,
-            RequestGPUs REAL, RequestCPUs REAL, RequestMemory REAL,
-            RequestGPUMemory REAL, QDate INTEGER, ChtcProjects TEXT,
-            first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL
-        )
-        """
-    )
-
-    cursor = conn.execute(
-        """
-        SELECT GlobalJobId, ScheddName, Owner,
-               RequestGPUs, RequestCPUs, RequestMemory, RequestGPUMemory,
-               QDate, ChtcProjects,
-               first_seen, last_seen
-        FROM job_pressure_old
-        ORDER BY GlobalJobId, first_seen
-        """
-    )
-    cursor.arraysize = 10_000
-
-    n = _write_intervals(conn, _merge_stream(cursor, gap_seconds))
-    conn.execute("DROP TABLE job_pressure_old")
-    return n
+def _write_parquet_atomic(df: pl.DataFrame, parquet_path: Path) -> None:
+    """Write via a dot-prefixed .tmp file so readers globbing job_pressure_*.parquet never see it half-written."""
+    tmp = parquet_path.with_name(f".{parquet_path.name}.tmp")
+    df.cast(JOB_PRESSURE_SCHEMA).write_parquet(str(tmp), compression="zstd")
+    os.replace(tmp, parquet_path)
 
 
-def _migrate(db_path: str, gap_override: int | None) -> None:
+def _migrate(db_path: str, output_dir: Path | None, gap_override: int | None, local_utc_offset: int) -> None:
     path = Path(db_path)
     if not path.exists():
         print(f"Skipping {db_path}: file not found")
         return
 
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     cols = {row[1] for row in conn.execute("PRAGMA table_info(job_pressure)")}
-
     has_old = "timestamp" in cols
     has_new = "first_seen" in cols
 
@@ -188,49 +118,73 @@ def _migrate(db_path: str, gap_override: int | None) -> None:
         conn.close()
         return
 
-    print(f"Migrating {db_path} …")
-    old_count = conn.execute("SELECT COUNT(*) FROM job_pressure").fetchone()[0]
-    print(f"  {old_count:,} rows in current schema ({'old' if has_old else 'new'})")
+    print(f"Converting {db_path} ...")
+    row_count = conn.execute("SELECT COUNT(*) FROM job_pressure").fetchone()[0]
+    print(f"  {row_count:,} rows in {'old snapshot' if has_old else 'interval'} schema")
 
+    gap_seconds: int | None
     if gap_override is not None:
         gap_seconds = gap_override
         print(f"  Using --gap {gap_seconds}s")
-    else:
-        detect_fn = _detect_interval_old if has_old else _detect_interval_new
-        interval = detect_fn(conn)
+    elif has_old:
+        interval = _detect_interval_old(conn)
         gap_seconds = interval * 2
-        print(f"  Detected collection interval: {interval}s → merge threshold: {gap_seconds}s")
+        print(f"  Detected collection interval: {interval}s -> merge threshold: {gap_seconds}s")
+    else:
+        gap_seconds = None
+        print("  Interval schema: copying intervals as recorded (pass --gap to re-merge)")
 
     if has_old:
-        n = _migrate_old_schema(conn, gap_seconds)
+        ts = f"CAST(strftime('%s', timestamp) AS INTEGER) + {int(local_utc_offset)}"
+        query = f"SELECT {_ATTR_COLUMNS}, {ts} AS first_ts, {ts} AS last_ts FROM job_pressure ORDER BY GlobalJobId, first_ts"  # noqa: S608
     else:
-        n = _remerge_new_schema(conn, gap_seconds)
+        query = f"SELECT {_ATTR_COLUMNS}, first_seen, last_seen FROM job_pressure ORDER BY GlobalJobId, first_seen"  # noqa: S608
+    cursor = conn.execute(query)
+    cursor.arraysize = 10_000
 
-    print(f"  → {n:,} intervals")
-
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_last_seen  ON job_pressure (last_seen)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_first_seen ON job_pressure (first_seen)")
-    conn.execute("COMMIT")
-    conn.execute("VACUUM")
+    frames: list[pl.DataFrame] = []
+    pending: list[tuple] = []
+    for interval in _merge_stream(cursor, gap_seconds) if gap_seconds is not None else map(tuple, cursor):
+        pending.append(interval)
+        if len(pending) >= BATCH:
+            frames.append(_intervals_to_frame(pending))
+            pending.clear()
+    if pending:
+        frames.append(_intervals_to_frame(pending))
     conn.close()
 
-    new_size = path.stat().st_size
-    print(f"  Done. File size now {new_size / 1e6:.1f} MB")
+    result = pl.concat(frames) if frames else pl.DataFrame(schema=JOB_PRESSURE_SCHEMA)
+    print(f"  -> {len(result):,} intervals")
+
+    out_dir = output_dir or path.parent
+    out_path = out_dir / f"{path.stem}.parquet"
+    _write_parquet_atomic(result, out_path)
+    print(f"  Wrote {out_path} ({out_path.stat().st_size / 1e6:.1f} MB)")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("dbs", nargs="+", metavar="DB")
     parser.add_argument(
         "--gap",
         type=int,
         default=None,
         metavar="SECONDS",
-        help="Merge threshold in seconds (default: 2× auto-detected collection interval)",
+        help="Merge threshold in seconds (default: 2x auto-detected collection interval)",
+    )
+    parser.add_argument(
+        "--output-dir", type=Path, default=None, help="Where to write .parquet files (default: next to each DB)"
+    )
+    parser.add_argument(
+        "--local-utc-offset",
+        type=int,
+        default=18000,
+        metavar="SECONDS",
+        help="Seconds to add to old-schema naive local timestamps to get UTC (default: 18000, CDT)",
     )
     args = parser.parse_args()
     for db in args.dbs:
-        _migrate(db, args.gap)
+        _migrate(db, args.output_dir, args.gap, args.local_utc_offset)
 
 
 if __name__ == "__main__":

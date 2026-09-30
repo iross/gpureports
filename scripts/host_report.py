@@ -11,7 +11,6 @@ Run from the project root:
 """
 
 import datetime
-import sqlite3
 import sys
 from pathlib import Path
 
@@ -23,7 +22,7 @@ import typer
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from classify_slots import filter_df_enhanced
-from read_data import get_preprocessed_dataframe, get_time_filtered_data, load_chtc_owned_hosts
+from read_data import get_preprocessed_dataframe, get_time_filtered_data, load_chtc_owned_hosts, load_job_pressure
 
 try:
     import seaborn as sns  # noqa: F401
@@ -96,59 +95,10 @@ def load_job_pressure_timeseries(
     [start_ts, end_ts] window.  Returns columns: [bucket, owner, queued_gpus].
     """
     exclude = exclude or set()
-    start_unix = int(start_ts.timestamp())
-    end_unix = int(end_ts.timestamp())
 
-    # Discover DB files for the time range (mirrors get_required_databases pattern)
-    db_files: list[str] = []
-    cur = start_ts.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    end_month = end_ts.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    while cur <= end_month:
-        p = Path(base_dir) / f"job_pressure_{cur.strftime('%Y-%m')}.db"
-        if p.exists():
-            db_files.append(str(p))
-        if cur.month == 12:
-            cur = cur.replace(year=cur.year + 1, month=1)
-        else:
-            cur = cur.replace(month=cur.month + 1)
-
-    if not db_files:
-        return pd.DataFrame(columns=["bucket", "owner", "queued_gpus"])
-
-    frames = []
-    for path in db_files:
-        conn = sqlite3.connect(path)
-        cols = {row[1] for row in conn.execute("PRAGMA table_info(job_pressure)")}
-        if "first_seen" in cols:
-            rows = pd.read_sql_query(
-                "SELECT Owner, RequestGPUs, ChtcProjects, first_seen, last_seen"
-                " FROM job_pressure WHERE last_seen >= ? AND first_seen <= ?",
-                conn,
-                params=(start_unix, end_unix),
-            )
-        elif "timestamp" in cols:
-            # Old snapshot schema: one row per collection tick; convert to unix ints
-            rows = pd.read_sql_query(
-                "SELECT Owner, RequestGPUs, ChtcProjects,"
-                " CAST(strftime('%s', timestamp) AS INTEGER) AS first_seen,"
-                " CAST(strftime('%s', timestamp) AS INTEGER) AS last_seen"
-                " FROM job_pressure"
-                " WHERE CAST(strftime('%s', timestamp) AS INTEGER) BETWEEN ? AND ?",
-                conn,
-                params=(start_unix, end_unix),
-            )
-        else:
-            conn.close()
-            typer.echo(f"Warning: unrecognised schema in {path}, skipping.", err=True)
-            continue
-        conn.close()
-        frames.append(rows)
-
-    frames = [f for f in frames if not f.empty]
-    if not frames:
-        return pd.DataFrame(columns=["bucket", "owner", "queued_gpus"])
-
-    jobs = pd.concat(frames, ignore_index=True)
+    # Idle intervals only: queued-job pressure. Naive timestamps are UTC, matching gpu_state.
+    pressure = load_job_pressure(base_dir, start_ts, end_ts, ("idle",))
+    jobs = pressure.select("Owner", "RequestGPUs", "ChtcProjects", "first_seen", "last_seen").to_pandas()
     if project:
         jobs = jobs[jobs["ChtcProjects"].str.contains(project, case=False, na=False)]
     if exclude:
