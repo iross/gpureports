@@ -1,13 +1,13 @@
 ---
 id: TASK-54
 title: >-
-  Revive job pressure collection on k8s: Parquet storage, running jobs, all
-  schedds, DuckDB reads
+  Revive job pressure collection on k8s: Parquet storage, running jobs, DuckDB
+  reads
 status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-09-29 15:03'
-updated_date: '2026-09-29 21:01'
+updated_date: '2026-09-30 17:10'
 labels:
   - reporting
   - collector
@@ -25,7 +25,7 @@ Job pressure data (per-job owner, GPU request, queue state and the ChtcProjects 
 <!-- AC:BEGIN -->
 - [ ] #1 get_job_pressure.py runs as a k8s CronJob writing to the shared data volume, and OPERATIONS.md describes what actually runs where
 - [x] #2 Job pressure is stored as monthly Parquet files written atomically so concurrent readers never see partial data; the SQLite writer is removed
-- [ ] #3 Collection covers idle and running GPU jobs across all schedds that run jobs on CHTC GPUs, and records ChtcProjects for each
+- [x] #3 Collection covers idle and running GPU jobs on ap2001 and ap2002 (the agreed schedd scope) and records ChtcProjects for each
 - [ ] #4 Existing SQLite job_pressure history, including the unmigrated old-schema May file, is converted to Parquet with no loss of idle-interval semantics
 - [x] #5 read_data provides a DuckDB-backed loader that returns job pressure for a time window and joins it to gpu_state on GlobalJobId; the sqlite3 code in host_report.py is replaced by it
 - [x] #6 Measured against gpu_state for a full month, at least 91% of distinct open-capacity claimed jobs have a project attribution, and the actual rate is reported
@@ -66,20 +66,20 @@ Plan:
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Done on branch task-54-job-pressure-parquet (uncommitted):
+Done on branch task-54-job-pressure-parquet (PR #30):
 
-- Spike (live, via linux/amd64 container with htcondor2, anonymous auth): running-job ads (JobStatus == 2) carry ChtcProjects, Owner, RequestGPUs and GlobalJobId exactly like idle ads (ap2001: 104/104 running with a project; ap2002: 189/189). ~38k idle + ~295 running GPU jobs per poll across ap2001/ap2002. Anonymous queries are DENIED by the HEP/physics schedds (SECMAN:2010) and several submit hosts (roy/mir/submit1.wid/glbrc/morgridge) are unreachable, so today only the CHTC APs contribute unless the k8s container gets credentials. grid-submitter.icecube.wisc.edu is excluded by default (requester decision; its ads also had no ChtcProjects). A full poll takes ~70s because of connection timeouts to the unreachable hosts.
-- get_job_pressure.py: rewritten to write job_pressure_YYYY-MM.parquet (zstd, always cast to read_data.JOB_PRESSURE_SCHEMA -- an all-null column otherwise becomes Parquet type Null, which DuckDB cannot read). Schema = old columns + JobState ('idle'|'running'); one row per contiguous (GlobalJobId, JobState) interval. Read-modify-atomic-replace via dot-prefixed .tmp + os.replace, under flock on .job_pressure_YYYY-MM.parquet.lock. Stale window is 3 x --poll-interval (default 1800) instead of the hardcoded 5400. All advertised schedds are queried except EXCLUDED_SCHEDDS; --schedd gives an exact allow-list. Month file chosen by UTC month. SQLite writer removed. htcondor2 import is now lazy so the module is importable in tests.
+- Spike (live, via linux/amd64 container with htcondor2, anonymous auth): running-job ads (JobStatus == 2) carry ChtcProjects, Owner, RequestGPUs and GlobalJobId exactly like idle ads (ap2001: 104/104 running with a project; ap2002: 189/189). ~38k idle + ~295 running GPU jobs per poll across ap2001/ap2002. Anonymous queries are DENIED by the HEP/physics schedds (SECMAN:2010) and several submit hosts (roy/mir/submit1.wid/glbrc/morgridge) are unreachable; polling all advertised schedds takes ~70s because of those timeouts, versus ~10s for ap2001+ap2002 only. grid-submitter.icecube.wisc.edu ads carried no ChtcProjects.
+- get_job_pressure.py: rewritten to write job_pressure_YYYY-MM.parquet (zstd, always cast to read_data.JOB_PRESSURE_SCHEMA -- an all-null column otherwise becomes Parquet type Null, which DuckDB cannot read). Schema = old columns + JobState ('idle'|'running'); one row per contiguous (GlobalJobId, JobState) interval. Read-modify-atomic-replace via dot-prefixed .tmp + os.replace, under flock on .job_pressure_YYYY-MM.parquet.lock. Stale window is 3 x --poll-interval (default 1800) instead of the hardcoded 5400. Schedds: DEFAULT_SCHEDDS = ap2001 + ap2002; --schedd (repeatable) overrides. Month file chosen by UTC month. SQLite writer removed. htcondor2 import is now lazy so the module is importable in tests.
 - read_data.py: JOB_PRESSURE_SCHEMA, load_job_pressure() (DuckDB, interval-overlap window + optional JobState filter) and attribute_claimed_jobs() (one DuckDB query joining distinct Claimed gpu_state GlobalJobIds to the latest job_pressure record across all months). Naive datetimes are interpreted as UTC (k8s collectors run in UTC); note gpu_state history written by the baremetal collector used local naive time.
 - migrate_job_pressure.py: now converts SQLite -> Parquet read-only (source untouched). Old per-snapshot schema is merged into intervals (auto-detected interval, 2x threshold) with --local-utc-offset (default 18000 s, CDT) applied because those timestamps were naive local time; interval-schema files are copied AS RECORDED. Initial version re-merged interval files using a detected gap, which turned out to corrupt them (June: detected 28800 s 'interval', 358,494 -> 316,548 rows); re-merge now requires an explicit --gap. Local conversion results: 2026-05 old schema 10,209,023 rows -> 88,670 intervals (0.3 MB); 2026-06 358,494 -> 358,494; 2026-07 32,201 -> 32,201.
 - scripts/host_report.py: sqlite3 reader replaced by load_job_pressure(..., ('idle',)); smoke-run on Chemistry_Huang / June data produced the job pressure table.
 - OPERATIONS.md updated (data flow, file layout, converter, schedd auth caveats, that the k8s CronJob is not yet deployed).
 - Measured on June 2026 (converted Parquet, idle-only history): attribute_claimed_jobs matched 92.3% of all distinct claimed jobs (157,039 job ids, 0.06 s); the earlier open-capacity-only measurement was 91.4% (34,650 of 37,894). This is before running-job coverage, so expect it to improve once the new collector has run for a month.
 - Live end-to-end run (two polls 15 s apart, default schedd selection): 38,556 interval rows, schema identical to JOB_PRESSURE_SCHEMA, running rows present for ap2001/ap2002, last_seen extended on ~99.9% of rows, load_job_pressure read the file back.
-- Tests: tests/test_job_pressure.py (23) -- interval open/extend/stale-boundary/state-transition, atomic write + all-null column readable by DuckDB, window inclusivity and multi-month reads, GlobalJobId attribution edge cases, converter behavior (offset, no re-merge), schedd selection. Full suite: 104 passed (+9 parity).
+- Tests: tests/test_job_pressure.py -- interval open/extend/stale-boundary/state-transition, atomic write + all-null column readable by DuckDB, window inclusivity and multi-month reads, month boundary, GlobalJobId attribution edge cases, converter behavior (offset, no re-merge). Full suite passes.
 
 Not done / needs the requester:
 - AC #1: the k8s CronJob manifest lives outside this repo; needs to be added there (run get_job_pressure.py /data --poll-interval <period>, concurrencyPolicy Forbid recommended even though the flock guards overlap) and the baremetal cron retired after a month boundary.
-- AC #3: HEP/physics schedds need authentication that the anonymous container lacks; needs credentials (IDTOKEN) decision. Also consider quieting the ~25 per-poll warnings.
+- Schedd scope: per requester decision only ap2001.chtc.wisc.edu and ap2002.chtc.wisc.edu are polled (DEFAULT_SCHEDDS). Jobs from other submit hosts (e.g. HEP, icecube, glbrc, wright/oconnor) therefore stay unattributed; widening would need credentials for the schedds that deny anonymous queries.
 - AC #4: the tool is ready and verified on local copies, but the production history on the baremetal host (and months after the Jul 3 sync) still has to be converted and copied to the PVC.
 <!-- SECTION:NOTES:END -->

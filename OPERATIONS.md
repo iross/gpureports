@@ -19,7 +19,7 @@ HTCondor collector
     → usage_stats.py (via emailer.sh)
     → email report
 
-HTCondor schedds (all readable ones except IceCube)
+HTCondor schedds (ap2001, ap2002)
     → get_job_pressure.py (intended: every 30 min; run today from a baremetal cron -- see below)
     → job_pressure_YYYY-MM.parquet (one file per calendar month)
 ```
@@ -117,11 +117,11 @@ caller; it's for manual spot-checks.
 
 **`get_job_pressure.py` reports 0 jobs unexpectedly**
 - Confirm schedd discovery works: `python -c "import htcondor2 as h; c=h.Collector('cm.chtc.wisc.edu'); print(len(c.locateAll(h.DaemonTypes.Schedd)), 'schedds found')"`
-- The script logs `Warning: query failed for schedd ...` for every schedd it cannot read. Anonymous
-  queries are denied by the HEP/physics schedds (`SECMAN:2010 ... DENIED`) and some submit hosts are
-  unreachable, so only the CHTC APs (`ap2001`, `ap2002`, `wright-ap4000`, ...) contribute jobs unless
-  the container is given credentials. `grid-submitter.icecube.wisc.edu` is skipped deliberately
-  (`EXCLUDED_SCHEDDS`).
+- Only `ap2001.chtc.wisc.edu` and `ap2002.chtc.wisc.edu` are queried (`DEFAULT_SCHEDDS` in the script;
+  override with `--schedd <name>`, repeatable). A schedd that cannot be read is logged as
+  `Warning: query failed for schedd ...` and skipped. Other schedds were not included because the
+  HEP/physics ones deny anonymous queries (`SECMAN:2010 ... DENIED`) and several submit hosts are
+  unreachable, so polling them would only add timeouts.
 
 ## Dependencies
 

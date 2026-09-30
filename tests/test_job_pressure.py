@@ -13,7 +13,7 @@ import polars as pl
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from get_job_pressure import record_jobs, should_query_schedd, update_intervals  # noqa: E402
+from get_job_pressure import record_jobs, update_intervals  # noqa: E402
 from migrate_job_pressure import _merge_stream, _migrate  # noqa: E402
 from read_data import JOB_PRESSURE_SCHEMA, attribute_claimed_jobs, load_job_pressure  # noqa: E402
 
@@ -298,18 +298,6 @@ class TestMigrate:
         _migrate(str(db), None, None, 18000)
         out = pl.read_parquet(tmp_path / "job_pressure_2026-06.parquet")
         assert rows(out) == {("ap1#1.0#1", "idle", T0, T0 + 900), ("ap1#1.0#1", "idle", T0 + 20_000, T0 + 21_000)}
-
-
-class TestScheddSelection:
-    def test_default_skips_icecube_and_queries_the_rest(self):
-        assert not should_query_schedd("grid-submitter.icecube.wisc.edu", None)
-        assert should_query_schedd("ap2001.chtc.wisc.edu", None)
-        assert should_query_schedd("wright-ap4000.chtc.wisc.edu", [])
-
-    def test_explicit_allow_list_is_exact(self):
-        assert should_query_schedd("ap2001.chtc.wisc.edu", ["ap2001.chtc.wisc.edu"])
-        assert not should_query_schedd("ap2002.chtc.wisc.edu", ["ap2001.chtc.wisc.edu"])
-        assert should_query_schedd("grid-submitter.icecube.wisc.edu", ["grid-submitter.icecube.wisc.edu"])
 
 
 class TestMonthBoundary:

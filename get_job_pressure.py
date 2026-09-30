@@ -106,25 +106,16 @@ def _safe_str(val: object) -> str:
     return "" if val is None else str(val)
 
 
-# Schedds skipped by default (per requester decision). IceCube's job ads also carried no
-# ChtcProjects in the live check, so it would add no group attribution anyway.
-EXCLUDED_SCHEDDS = frozenset({"grid-submitter.icecube.wisc.edu"})
+# Schedds queried by default: the CHTC access points. Other advertised schedds either deny
+# anonymous queries (HEP/physics) or are unreachable, and every poll would wait out their timeouts.
+DEFAULT_SCHEDDS = ("ap2001.chtc.wisc.edu", "ap2002.chtc.wisc.edu")
 
 
-def should_query_schedd(name: str, allowed: list[str] | None) -> bool:
-    """An explicit allow-list wins; otherwise every schedd not in EXCLUDED_SCHEDDS is queried."""
-    if allowed:
-        return name in allowed
-    return name not in EXCLUDED_SCHEDDS
+def collect_gpu_jobs(schedd_names: list[str]) -> list[dict]:
+    """Query the named schedds for idle and running GPU jobs; return list of job attribute dicts.
 
-
-def collect_gpu_jobs(schedd_names: list[str] | None = None) -> list[dict]:
-    """Query schedds for idle and running GPU jobs; return list of job attribute dicts.
-
-    Every schedd the collector advertises is queried except EXCLUDED_SCHEDDS, unless
-    schedd_names is given, in which case exactly those are queried. A schedd that denies
-    or fails the query is skipped with a warning so one unreachable or unauthorized
-    submit host never blocks the rest.
+    A schedd that denies or fails the query is skipped with a warning so one unreachable
+    or unauthorized submit host never blocks the rest.
     """
     import htcondor2 as htcondor
 
@@ -137,7 +128,7 @@ def collect_gpu_jobs(schedd_names: list[str] | None = None) -> list[dict]:
     jobs: list[dict] = []
     for schedd_ad in schedd_ads:
         schedd_name = schedd_ad.get("Name", "")
-        if not should_query_schedd(schedd_name, schedd_names):
+        if schedd_name not in schedd_names:
             continue
         try:
             ads = htcondor.Schedd(schedd_ad).query(constraint=CONSTRAINT, projection=PROJ)
@@ -241,14 +232,15 @@ def main(
         1800, help="Seconds between runs of this script; a job unseen for 3x this is treated as gone"
     ),
     schedd: Annotated[
-        list[str] | None, typer.Option(help="Restrict to these schedd names (default: every advertised schedd)")
+        list[str] | None,
+        typer.Option(help=f"Schedd names to query (default: {', '.join(DEFAULT_SCHEDDS)}); repeat for several"),
     ] = None,
 ) -> None:
     """Record idle and running GPU jobs into the monthly job_pressure Parquet file."""
     now_ts = int(time.time())
     month = datetime.datetime.fromtimestamp(now_ts, datetime.UTC).strftime("%Y-%m")
 
-    jobs = collect_gpu_jobs(schedd or None)
+    jobs = collect_gpu_jobs(schedd or list(DEFAULT_SCHEDDS))
     n_idle = sum(j["JobState"] == "idle" for j in jobs)
     print(f"{datetime.datetime.now().isoformat()}: {n_idle} idle, {len(jobs) - n_idle} running GPU jobs")
     if jobs:
