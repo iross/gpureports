@@ -94,6 +94,18 @@ bash emailer.sh test                                                      # exac
 spamming others. `report.py` (via `just last-day`/`last-hour`) has no automated
 caller; it's for manual spot-checks.
 
+## Testing the collectors locally
+
+```bash
+just smolvm-collectors            # scratch temp dir
+just smolvm-collectors /tmp/gpu   # or a directory of your choice
+```
+
+Runs `collector.py` once and `get_job_pressure.py` twice against the live pool inside a
+[smolvm](https://github.com/smol-machines/smolvm) microVM (repo mounted read-only at `/app`, output dir at
+`/data`, `htcondor` pip-installed in the guest), then checks the resulting Parquet files from the host: both
+non-empty, and the second job-pressure poll extended existing intervals. Takes about 45 s.
+
 ## Common failure modes
 
 **No email sent**
