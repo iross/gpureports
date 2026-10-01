@@ -13,7 +13,7 @@ set -euo pipefail
 # Runs as a k8s CronJob per mode (see OPERATIONS.md for the current deployment
 # and PVC details -- the manifests themselves live outside this repo).
 
-RECIPIENTS="chtc-reports@g-groups.wisc.edu,iaross@wisc.edu,gitter@biostat.wisc.edu"
+RECIPIENTS="chtc-reports@g-groups.wisc.edu,iaross@wisc.edu,gitter@biostat.wisc.edu,elinck@wisc.edu"
 TEST_RECIPIENT="iaross@wisc.edu"
 
 MODE="${1:-}"
