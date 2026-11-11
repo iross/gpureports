@@ -19,14 +19,25 @@ HTCondor collector
     → usage_stats.py (via emailer.sh)
     → email report
 
-HTCondor schedds (ap2001, ap2002)
+CHTC schedds (ap2001, ap2002)
     → get_job_pressure.py (intended: every 30 min; run today from a baremetal cron -- see below)
     → job_pressure_YYYY-MM.parquet (one file per calendar month)
+
+OSPool schedds (ap23.uc, ap40-ap43.uw .osg-htc.org)
+    → get_job_pressure.py --pool ospool (intended: every 30 min, its own CronJob)
+    → ospool_job_pressure_YYYY-MM.parquet (one file per calendar month)
 ```
 
-`get_job_pressure.py` is in the image but, as of this writing, the k8s CronJob for it is not deployed
-(the manifests live outside this repo); the baremetal cron still runs an older SQLite version until
-it is replaced.
+`get_job_pressure.py` is in the image but, as of this writing, the k8s CronJobs for it are not deployed
+(the manifests live outside this repo); the baremetal cron still runs an older SQLite version of the
+CHTC stream until it is replaced. The two streams are two CronJobs running the same image:
+
+```bash
+python get_job_pressure.py /data --poll-interval 1800                 # CHTC (default --pool chtc)
+python get_job_pressure.py /data --pool ospool --poll-interval 1800   # OSPool
+```
+
+Neither needs credentials: all whitelisted schedds answer anonymous queries.
 
 collector.py, get_job_pressure.py, and emailer.sh all read/write through a shared PVC
 (`gpu-stats-data-pvc`) mounted at `/data` in these containers -- see
@@ -53,18 +64,26 @@ subjects prefixed `[DEV]`.
 
 ```
 gpu_state_YYYY-MM.parquet     ← GPU slot state (collector.py), one per calendar month
-job_pressure_YYYY-MM.parquet  ← idle + running GPU job intervals with ChtcProjects (get_job_pressure.py), one per calendar month
+job_pressure_YYYY-MM.parquet         ← CHTC idle + running GPU job intervals (get_job_pressure.py), one per calendar month
+ospool_job_pressure_YYYY-MM.parquet  ← OSPool idle + running GPU job intervals (get_job_pressure.py --pool ospool), same schema
 ```
 
-Both scripts create a new file on the first run of each month (UTC).
+Each script (and each job pressure pool) creates a new file on the first run of each month (UTC).
 
-`job_pressure` has one row per contiguous interval a job spent in one `JobState` (`idle` or `running`),
+Both job pressure streams share one schema (`read_data.JOB_PRESSURE_SCHEMA`) with `ChtcProjects` and
+`ProjectName` per job; OSPool jobs have an empty `ChtcProjects`. Files written before `ProjectName` was
+collected read back with it null, and the next poll adds the column to the current month's file.
+Rows for jobs first seen before then also keep a null `ProjectName`.
+
+Each `job_pressure` file has one row per contiguous interval a job spent in one `JobState` (`idle` or `running`),
 with `first_seen`/`last_seen` in Unix seconds. Each run reads the month's file, extends or opens
 intervals, and atomically replaces it (dot-prefixed `.tmp` file + `os.replace`); an flock on
-`.job_pressure_YYYY-MM.parquet.lock` serializes overlapping runs. Run it with `--poll-interval <seconds>`
+`.<file>.lock` serializes overlapping runs of the same pool. Run it with `--poll-interval <seconds>`
 equal to the CronJob period (default 1800): a job unseen for 3 polls is treated as gone. Readers use
-`read_data.load_job_pressure()` (time-window intervals) and `read_data.attribute_claimed_jobs()`
-(joins claimed `gpu_state` jobs to their `ChtcProjects` on `GlobalJobId`).
+`read_data.load_job_pressure()` (time-window intervals; CHTC by default, the OSPool with
+`prefix=read_data.OSPOOL_JOB_PRESSURE_PREFIX`) and `read_data.attribute_claimed_jobs()` (joins claimed
+`gpu_state` jobs to their `ChtcProjects` on `GlobalJobId`; CHTC stream only). The `ospool_` prefix keeps
+OSPool files out of the CHTC glob `job_pressure_*.parquet`.
 
 ### Converting old SQLite job_pressure files
 
@@ -101,10 +120,10 @@ just smolvm-collectors            # scratch temp dir
 just smolvm-collectors /tmp/gpu   # or a directory of your choice
 ```
 
-Runs `collector.py` once and `get_job_pressure.py` twice against the live pool inside a
+Runs `collector.py` once and `get_job_pressure.py` twice per pool (CHTC and OSPool) against the live pools inside a
 [smolvm](https://github.com/smol-machines/smolvm) microVM (repo mounted read-only at `/app`, output dir at
-`/data`, `htcondor` pip-installed in the guest), then checks the resulting Parquet files from the host: both
-non-empty, and the second job-pressure poll extended existing intervals. Takes about 45 s.
+`/data`, `htcondor` pip-installed in the guest), then checks the resulting Parquet files from the host: all
+non-empty, and the second poll of each job pressure stream extended existing intervals. Takes about 45 s.
 
 ## Common failure modes
 
@@ -128,12 +147,17 @@ non-empty, and the second job-pressure poll extended existing intervals. Takes a
   not installable via plain `pip` outside that build step.
 
 **`get_job_pressure.py` reports 0 jobs unexpectedly**
-- Confirm schedd discovery works: `python -c "import htcondor2 as h; c=h.Collector('cm.chtc.wisc.edu'); print(len(c.locateAll(h.DaemonTypes.Schedd)), 'schedds found')"`
-- Only `ap2001.chtc.wisc.edu` and `ap2002.chtc.wisc.edu` are queried (`DEFAULT_SCHEDDS` in the script;
-  override with `--schedd <name>`, repeatable). A schedd that cannot be read is logged as
-  `Warning: query failed for schedd ...` and skipped. Other schedds were not included because the
-  HEP/physics ones deny anonymous queries (`SECMAN:2010 ... DENIED`) and several submit hosts are
-  unreachable, so polling them would only add timeouts.
+- Confirm schedd discovery works against the pool's collector (`cm.chtc.wisc.edu` for CHTC,
+  `cm-1.ospool.osg-htc.org` for the OSPool): `python -c "import htcondor2 as h; c=h.Collector('cm.chtc.wisc.edu'); print(len(c.locateAll(h.DaemonTypes.Schedd)), 'schedds found')"`
+- Only each pool's whitelisted schedds are queried (`POOLS` in the script; override with
+  `--schedd <name>`, repeatable). A schedd that cannot be read is logged as
+  `Warning: query failed for schedd ...` and skipped. A whitelisted schedd that is no longer
+  advertised (e.g. a retired OSPool AP) is silently absent, so check the collector's schedd list
+  when an AP's rows stop appearing.
+- CHTC: other schedds were not included because the HEP/physics ones deny anonymous queries
+  (`SECMAN:2010 ... DENIED`) and several submit hosts are unreachable, so polling them would only add
+  timeouts. OSPool: only the OSPool-operated APs are whitelisted; ap2001/ap2002 also advertise to the
+  OSPool collector but belong to the CHTC stream.
 
 ## Dependencies
 

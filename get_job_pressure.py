@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 """
-Periodic snapshot of GPU job pressure and job-to-project attribution in the HTCondor pool.
+Periodic snapshot of GPU job pressure and job-to-project attribution in an HTCondor pool.
 
-Queries schedds for idle and running jobs requesting GPUs and records each contiguous
-observation as a single row with first_seen / last_seen INTEGER timestamps (Unix seconds)
-in a monthly Parquet file, job_pressure_YYYY-MM.parquet. Each poll extends last_seen for
-jobs still in the same state and opens a new row for jobs newly seen in a state, so a
-long-idle job generates one row instead of hundreds. JobState is "idle" (queue pressure)
+Queries a whitelist of schedds in one pool (--pool: "chtc" or "ospool") for idle and running
+jobs requesting GPUs and records each contiguous observation as a single row with first_seen /
+last_seen INTEGER timestamps (Unix seconds) in a monthly Parquet file per pool:
+job_pressure_YYYY-MM.parquet for CHTC, ospool_job_pressure_YYYY-MM.parquet for the OSPool.
+Each poll extends last_seen for jobs still in the same state and opens a new row for jobs
+newly seen in a state, so a long-idle job generates one row instead of hundreds. JobState is "idle" (queue pressure)
 or "running" (lets gpu_state's GlobalJobId be joined to the job's ChtcProjects group even
 for jobs that started before the next poll ever saw them idle).
 
 Storage mirrors collector.py: the month's file is read, updated, and atomically replaced
 through a dot-prefixed temp file, so concurrent readers globbing job_pressure_*.parquet
-never see a partial file. A per-month lock file serializes overlapping runs.
+never see a partial file. A per-month lock file serializes overlapping runs. Each pool runs
+as its own instance; their files and locks never overlap.
 
 Runs as a k8s CronJob bundled in the same container image as collector.py -- see
 OPERATIONS.md. Old SQLite files are converted with migrate_job_pressure.py.
@@ -22,15 +24,14 @@ import datetime
 import fcntl
 import os
 import time
+from enum import StrEnum
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, NamedTuple
 
 import polars as pl
 import typer
 
-from read_data import JOB_PRESSURE_SCHEMA
-
-COLLECTOR_HOST = "cm.chtc.wisc.edu"
+from read_data import CHTC_JOB_PRESSURE_PREFIX, JOB_PRESSURE_SCHEMA, OSPOOL_JOB_PRESSURE_PREFIX
 
 PROJ = [
     "GlobalJobId",
@@ -41,6 +42,7 @@ PROJ = [
     "RequestGPUMemory",
     "QDate",
     "ChtcProjects",
+    "ProjectName",
     "JobStatus",
 ]
 
@@ -106,12 +108,44 @@ def _safe_str(val: object) -> str:
     return "" if val is None else str(val)
 
 
-# Schedds queried by default: the CHTC access points. Other advertised schedds either deny
-# anonymous queries (HEP/physics) or are unreachable, and every poll would wait out their timeouts.
-DEFAULT_SCHEDDS = ("ap2001.chtc.wisc.edu", "ap2002.chtc.wisc.edu")
+class Pool(NamedTuple):
+    """Where one job_pressure stream comes from and where it is written."""
+
+    collector: str
+    schedds: tuple[str, ...]
+    file_prefix: str
 
 
-def collect_gpu_jobs(schedd_names: list[str]) -> list[dict]:
+class PoolName(StrEnum):
+    CHTC = "chtc"
+    OSPOOL = "ospool"
+
+
+# Whitelisted access points per pool. CHTC: other schedds advertised to cm.chtc.wisc.edu either
+# deny anonymous queries (HEP/physics) or are unreachable, and every poll would wait out their
+# timeouts. OSPool: the OSPool-operated APs, which allow anonymous queries; ap2001/ap2002 also
+# advertise to the OSPool collector but belong to the CHTC stream.
+POOLS = {
+    PoolName.CHTC: Pool(
+        collector="cm.chtc.wisc.edu",
+        schedds=("ap2001.chtc.wisc.edu", "ap2002.chtc.wisc.edu"),
+        file_prefix=CHTC_JOB_PRESSURE_PREFIX,
+    ),
+    PoolName.OSPOOL: Pool(
+        collector="cm-1.ospool.osg-htc.org",
+        schedds=(
+            "ap23.uc.osg-htc.org",
+            "ap40.uw.osg-htc.org",
+            "ap41.uw.osg-htc.org",
+            "ap42.uw.osg-htc.org",
+            "ap43.uw.osg-htc.org",
+        ),
+        file_prefix=OSPOOL_JOB_PRESSURE_PREFIX,
+    ),
+}
+
+
+def collect_gpu_jobs(collector_host: str, schedd_names: list[str]) -> list[dict]:
     """Query the named schedds for idle and running GPU jobs; return list of job attribute dicts.
 
     A schedd that denies or fails the query is skipped with a warning so one unreachable
@@ -120,9 +154,9 @@ def collect_gpu_jobs(schedd_names: list[str]) -> list[dict]:
     import htcondor2 as htcondor
 
     try:
-        schedd_ads = htcondor.Collector(COLLECTOR_HOST).locateAll(htcondor.DaemonTypes.Schedd)
+        schedd_ads = htcondor.Collector(collector_host).locateAll(htcondor.DaemonTypes.Schedd)
     except Exception as e:
-        print(f"Warning: could not query collector for schedds: {e}")
+        print(f"Warning: could not query collector {collector_host} for schedds: {e}")
         return []
 
     jobs: list[dict] = []
@@ -151,6 +185,7 @@ def collect_gpu_jobs(schedd_names: list[str]) -> list[dict]:
                     "RequestGPUMemory": _float_or_none(ad.get("RequestGPUMemory")),
                     "QDate": _safe_int(ad.get("QDate")),
                     "ChtcProjects": _safe_str(ad.get("ChtcProjects")),
+                    "ProjectName": _safe_str(ad.get("ProjectName")),
                     "JobState": state,
                 }
             )
@@ -215,36 +250,48 @@ def _write_parquet_atomic(df: pl.DataFrame, parquet_path: Path) -> None:
 
 
 def record_jobs(jobs: list[dict], parquet_path: Path, now_ts: int, stale_seconds: int) -> None:
-    """Merge one poll's jobs into the month's Parquet file under an exclusive lock."""
+    """Merge one poll's jobs into the month's Parquet file under an exclusive lock.
+
+    Columns added to JOB_PRESSURE_SCHEMA after the file was written are read back as null.
+    """
     lock_path = parquet_path.with_name(f".{parquet_path.name}.lock")
     with open(lock_path, "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         if parquet_path.exists():
-            existing = pl.read_parquet(str(parquet_path))
+            existing = pl.read_parquet(str(parquet_path), schema=JOB_PRESSURE_SCHEMA, missing_columns="insert")
         else:
             existing = pl.DataFrame(schema=JOB_PRESSURE_SCHEMA)
         _write_parquet_atomic(update_intervals(existing, jobs, now_ts, stale_seconds), parquet_path)
 
 
+def month_path(data_dir: str, pool: Pool, now_ts: int) -> Path:
+    """Path of the pool's Parquet file for the UTC month containing now_ts."""
+    month = datetime.datetime.fromtimestamp(now_ts, datetime.UTC).strftime("%Y-%m")
+    return Path(data_dir) / f"{pool.file_prefix}_{month}.parquet"
+
+
 def main(
     data_dir: str = typer.Argument("/home/iaross/gpureports"),
+    pool: Annotated[
+        PoolName, typer.Option(help="Pool to poll; selects collector, schedd whitelist and file prefix")
+    ] = PoolName.CHTC,
     poll_interval: int = typer.Option(
         1800, help="Seconds between runs of this script; a job unseen for 3x this is treated as gone"
     ),
     schedd: Annotated[
         list[str] | None,
-        typer.Option(help=f"Schedd names to query (default: {', '.join(DEFAULT_SCHEDDS)}); repeat for several"),
+        typer.Option(help="Schedd names to query instead of the pool's whitelist; repeat for several"),
     ] = None,
 ) -> None:
-    """Record idle and running GPU jobs into the monthly job_pressure Parquet file."""
+    """Record idle and running GPU jobs into the pool's monthly job_pressure Parquet file."""
     now_ts = int(time.time())
-    month = datetime.datetime.fromtimestamp(now_ts, datetime.UTC).strftime("%Y-%m")
+    config = POOLS[pool]
 
-    jobs = collect_gpu_jobs(schedd or list(DEFAULT_SCHEDDS))
+    jobs = collect_gpu_jobs(config.collector, schedd or list(config.schedds))
     n_idle = sum(j["JobState"] == "idle" for j in jobs)
-    print(f"{datetime.datetime.now().isoformat()}: {n_idle} idle, {len(jobs) - n_idle} running GPU jobs")
+    print(f"{datetime.datetime.now().isoformat()}: {pool}: {n_idle} idle, {len(jobs) - n_idle} running GPU jobs")
     if jobs:
-        record_jobs(jobs, Path(data_dir) / f"job_pressure_{month}.parquet", now_ts, STALE_POLLS * poll_interval)
+        record_jobs(jobs, month_path(data_dir, config, now_ts), now_ts, STALE_POLLS * poll_interval)
 
 
 if __name__ == "__main__":

@@ -90,9 +90,12 @@ def _merge_stream(cursor, gap_seconds: int):
 
 
 def _intervals_to_frame(intervals: list[tuple]) -> pl.DataFrame:
-    columns = [c for c in JOB_PRESSURE_SCHEMA if c != "JobState"]
+    # The SQLite files predate JobState and ProjectName: every row was an idle sighting.
+    columns = [c for c in JOB_PRESSURE_SCHEMA if c not in ("JobState", "ProjectName")]
     frame = pl.DataFrame(intervals, schema=columns, orient="row", infer_schema_length=None)
-    return frame.with_columns(pl.lit("idle").alias("JobState")).select(list(JOB_PRESSURE_SCHEMA))
+    return frame.with_columns(
+        pl.lit("idle").alias("JobState"), pl.lit(None, dtype=pl.Utf8).alias("ProjectName")
+    ).select(list(JOB_PRESSURE_SCHEMA))
 
 
 def _write_parquet_atomic(df: pl.DataFrame, parquet_path: Path) -> None:
