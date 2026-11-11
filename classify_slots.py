@@ -124,6 +124,37 @@ def slot_dedup_rank(is_bf: pl.Expr, state: pl.Expr, prev_idle: pl.Expr) -> pl.Ex
     )
 
 
+def derive_columns(lf: pl.LazyFrame, bucket_minutes: int = 15) -> pl.LazyFrame:
+    """Add the derived classification columns to a raw gpu_state LazyFrame.
+
+    Adds bucket (timestamp truncated to bucket_minutes) and the boolean
+    columns _is_bf, _is_inter, _pp_prio, _pp_shared, _is_chtc, _excluded
+    (from HOST_EXCLUSIONS), _pj_set and _prev_idle. Nothing is collected.
+    """
+    has_pj = _PJ_COLUMN in lf.collect_schema().names()
+    state = pl.col("State")
+    if has_pj:
+        pj_set = pl.col(_PJ_COLUMN).is_not_null() & (pl.col(_PJ_COLUMN).str.strip_chars() != "")
+        prev_idle = pj_set & (state != "Claimed")
+    else:
+        pj_set = pl.lit(False)
+        prev_idle = pl.lit(False)
+
+    return lf.with_columns(
+        pl.col("timestamp").dt.truncate(f"{bucket_minutes}m").alias("bucket"),
+        pl.col("Name").str.contains("backfill").fill_null(False).alias("_is_bf"),
+        pl.col("Name").str.contains("interactive").fill_null(False).alias("_is_inter"),
+        # pandas object-dtype `!= ""` treats null as True and `== ""` as False;
+        # the fill_null values preserve that classification for null projects
+        (pl.col("PrioritizedProjects") != "").fill_null(True).alias("_pp_prio"),
+        (pl.col("PrioritizedProjects") == "").fill_null(False).alias("_pp_shared"),
+        pl.col("Machine").is_in(sorted(load_chtc_owned_hosts())).fill_null(False).alias("_is_chtc"),
+        _host_exclusion_expr(HOST_EXCLUSIONS).alias("_excluded"),
+        pj_set.alias("_pj_set"),
+        prev_idle.alias("_prev_idle"),
+    )
+
+
 def prepare_frames(lf: pl.LazyFrame, bucket_minutes: int = 15) -> PreparedFrames:
     """Derive classification columns and collect the shared dedup/backfill frames.
 
@@ -140,31 +171,10 @@ def prepare_frames(lf: pl.LazyFrame, bucket_minutes: int = 15) -> PreparedFrames
     exceeds the raw collection interval (see dashboard/data.py).
     """
     exclusions = HOST_EXCLUSIONS
-    chtc_hosts = load_chtc_owned_hosts()
     has_pj = _PJ_COLUMN in lf.collect_schema().names()
     bucket_str = f"{bucket_minutes}m"
-
     state = pl.col("State")
-    if has_pj:
-        pj_set = pl.col(_PJ_COLUMN).is_not_null() & (pl.col(_PJ_COLUMN).str.strip_chars() != "")
-        prev_idle = pj_set & (state != "Claimed")
-    else:
-        pj_set = pl.lit(False)
-        prev_idle = pl.lit(False)
-
-    raw = lf.with_columns(
-        pl.col("timestamp").dt.truncate(bucket_str).alias("bucket"),
-        pl.col("Name").str.contains("backfill").fill_null(False).alias("_is_bf"),
-        pl.col("Name").str.contains("interactive").fill_null(False).alias("_is_inter"),
-        # pandas object-dtype `!= ""` treats null as True and `== ""` as False;
-        # the fill_null values preserve that classification for null projects
-        (pl.col("PrioritizedProjects") != "").fill_null(True).alias("_pp_prio"),
-        (pl.col("PrioritizedProjects") == "").fill_null(False).alias("_pp_shared"),
-        pl.col("Machine").is_in(sorted(chtc_hosts)).fill_null(False).alias("_is_chtc"),
-        _host_exclusion_expr(exclusions).alias("_excluded"),
-        pj_set.alias("_pj_set"),
-        prev_idle.alias("_prev_idle"),
-    )
+    raw = derive_columns(lf, bucket_minutes)
 
     meta_q = raw.select(
         pl.len().alias("total"),
