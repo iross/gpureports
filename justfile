@@ -18,10 +18,10 @@ sync-dbs month=`date +%Y-%m`:
 isye-report hours="168" exclude="tvang9":
     uv run python scripts/host_report.py --host isye --hours-back {{hours}} --exclude-users {{exclude}}
 
-# Smoke-test both collectors (collector.py and get_job_pressure.py) against the live pool inside
-# a smolvm microVM, writing to a scratch dir (default: a fresh temp dir). Needs smolvm. The guest
-# is arm64 Linux on Apple Silicon; pip installs htcondor there. Job pressure is polled twice so
-# the second poll proves intervals are extended.
+# Smoke-test both collectors (collector.py and get_job_pressure.py for the CHTC and OSPool streams)
+# against the live pools inside a smolvm microVM, writing to a scratch dir (default: a fresh temp
+# dir). Needs smolvm. The guest is arm64 Linux on Apple Silicon; pip installs htcondor there. Job
+# pressure is polled twice per pool so the second poll proves intervals are extended.
 smolvm-collectors data_dir="":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -37,8 +37,10 @@ smolvm-collectors data_dir="":
         cd /app
         python collector.py /data
         python get_job_pressure.py /data
+        python get_job_pressure.py /data --pool ospool
         sleep 20
         python get_job_pressure.py /data
+        python get_job_pressure.py /data --pool ospool
     '
     uv run python - "$data" <<'EOF'
     import glob
@@ -48,13 +50,15 @@ smolvm-collectors data_dir="":
 
     d = sys.argv[1]
     gs = pl.read_parquet(glob.glob(f"{d}/gpu_state_*.parquet")[0])
-    jp = pl.read_parquet(glob.glob(f"{d}/job_pressure_*.parquet")[0])
-    extended = jp.filter(pl.col("last_seen") > pl.col("first_seen"))
     print(f"gpu_state: {gs.height} rows across {gs['Machine'].n_unique()} machines")
-    print(jp.group_by("JobState").agg(pl.len().alias("rows")).sort("JobState"))
-    print(f"job_pressure: {extended.height} of {jp.height} intervals extended by the second poll")
     assert gs.height > 0, "collector.py wrote no rows"
-    assert jp.height > 0, "get_job_pressure.py wrote no rows"
-    assert extended.height > 0, "second poll extended no intervals"
+    for prefix in ("job_pressure", "ospool_job_pressure"):
+        jp = pl.read_parquet(glob.glob(f"{d}/{prefix}_*.parquet")[0])
+        extended = jp.filter(pl.col("last_seen") > pl.col("first_seen"))
+        print(jp.group_by("ScheddName", "JobState").agg(pl.len().alias("rows")).sort("ScheddName", "JobState"))
+        print(f"{prefix}: {extended.height} of {jp.height} intervals extended by the second poll")
+        print(f"{prefix}: ProjectName non-empty on {(jp['ProjectName'] != '').sum()} of {jp.height} rows")
+        assert jp.height > 0, f"get_job_pressure.py wrote no {prefix} rows"
+        assert extended.height > 0, f"second poll extended no {prefix} intervals"
     print("OK")
     EOF

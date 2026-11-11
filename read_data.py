@@ -51,9 +51,10 @@ GPU_STATE_SCHEMA = {
 # rather than erroring when scanning files from mixed sources.
 SCAN_CAST_OPTIONS = pl.ScanCastOptions(datetime_cast="nanosecond-downcast")
 
-# Schema of job_pressure Parquet files (get_job_pressure.py). One row per contiguous
+# Schema of job_pressure Parquet files (get_job_pressure.py), shared by the CHTC
+# (job_pressure_*) and OSPool (ospool_job_pressure_*) streams. One row per contiguous
 # observation interval of a job in one JobState ("idle" or "running"); first_seen and
-# last_seen are Unix seconds. Passed explicitly to scans so files resolve by name and an
+# last_seen are Unix seconds. ProjectName is null in files written before it was collected. Passed explicitly to scans so files resolve by name and an
 # empty frame can be built when no files exist.
 JOB_PRESSURE_SCHEMA = {
     "GlobalJobId": pl.Utf8,
@@ -65,6 +66,7 @@ JOB_PRESSURE_SCHEMA = {
     "RequestGPUMemory": pl.Float64,
     "QDate": pl.Int64,
     "ChtcProjects": pl.Utf8,
+    "ProjectName": pl.Utf8,
     "JobState": pl.Utf8,
     "first_seen": pl.Int64,
     "last_seen": pl.Int64,
@@ -412,8 +414,12 @@ def get_draining_data(data_dir: str, hours_back: int = 24, end_time: datetime.da
     )
 
 
-def job_pressure_glob(base_dir: str) -> str:
-    return os.path.join(os.path.abspath(base_dir), "job_pressure_*.parquet")
+CHTC_JOB_PRESSURE_PREFIX = "job_pressure"
+OSPOOL_JOB_PRESSURE_PREFIX = "ospool_job_pressure"
+
+
+def job_pressure_glob(base_dir: str, prefix: str = CHTC_JOB_PRESSURE_PREFIX) -> str:
+    return os.path.join(os.path.abspath(base_dir), f"{prefix}_*.parquet")
 
 
 def _epoch_seconds(dt: datetime.datetime) -> int:
@@ -428,34 +434,44 @@ def load_job_pressure(
     start_time: datetime.datetime,
     end_time: datetime.datetime,
     job_states: tuple[str, ...] | None = None,
+    prefix: str = CHTC_JOB_PRESSURE_PREFIX,
 ) -> pl.DataFrame:
     """
     Load job_pressure intervals overlapping [start_time, end_time] via DuckDB.
 
     Args:
-        data_dir: Directory containing job_pressure_*.parquet files
+        data_dir: Directory containing {prefix}_*.parquet files
         start_time: Window start (naive datetimes are interpreted as UTC)
         end_time: Window end
         job_states: Restrict to these JobState values ("idle", "running"); None returns both
+        prefix: Stream to read: CHTC_JOB_PRESSURE_PREFIX or OSPOOL_JOB_PRESSURE_PREFIX
 
     Returns:
         DataFrame with JOB_PRESSURE_SCHEMA columns; empty if no files exist or none overlap
     """
-    if not globlib.glob(job_pressure_glob(data_dir)):
+    pattern = job_pressure_glob(data_dir, prefix)
+    if not globlib.glob(pattern):
         return pl.DataFrame(schema=JOB_PRESSURE_SCHEMA)
 
-    columns = ", ".join(JOB_PRESSURE_SCHEMA)
-    query = f"SELECT {columns} FROM read_parquet(?, union_by_name=true) WHERE last_seen >= ? AND first_seen <= ?"  # noqa: S608
-    params: list = [job_pressure_glob(data_dir), _epoch_seconds(start_time), _epoch_seconds(end_time)]
+    # SELECT * rather than naming JOB_PRESSURE_SCHEMA: a column added to the schema later
+    # (ProjectName) is absent from every older file, and DuckDB rejects it by name then.
+    query = "SELECT * FROM read_parquet(?, union_by_name=true) WHERE last_seen >= ? AND first_seen <= ?"
+    params: list = [pattern, _epoch_seconds(start_time), _epoch_seconds(end_time)]
     if job_states:
         query += f" AND JobState IN ({', '.join('?' for _ in job_states)})"
         params.extend(job_states)
 
     con = duckdb.connect()
     try:
-        return pl.from_arrow(con.execute(query, params).to_arrow_table()).cast(JOB_PRESSURE_SCHEMA)
+        found = pl.DataFrame(con.execute(query, params).to_arrow_table())
     finally:
         con.close()
+    missing = [
+        pl.lit(None, dtype=dtype).alias(name)
+        for name, dtype in JOB_PRESSURE_SCHEMA.items()
+        if name not in found.columns
+    ]
+    return found.with_columns(missing).select(list(JOB_PRESSURE_SCHEMA)).cast(JOB_PRESSURE_SCHEMA)
 
 
 def attribute_claimed_jobs(data_dir: str, start_time: datetime.datetime, end_time: datetime.datetime) -> pl.DataFrame:

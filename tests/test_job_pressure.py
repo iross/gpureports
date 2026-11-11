@@ -13,9 +13,14 @@ import polars as pl
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from get_job_pressure import record_jobs, update_intervals  # noqa: E402
+from get_job_pressure import POOLS, PoolName, month_path, record_jobs, update_intervals  # noqa: E402
 from migrate_job_pressure import _merge_stream, _migrate  # noqa: E402
-from read_data import JOB_PRESSURE_SCHEMA, attribute_claimed_jobs, load_job_pressure  # noqa: E402
+from read_data import (  # noqa: E402
+    JOB_PRESSURE_SCHEMA,
+    OSPOOL_JOB_PRESSURE_PREFIX,
+    attribute_claimed_jobs,
+    load_job_pressure,
+)
 
 STALE = 5400
 T0 = 1_780_000_000
@@ -32,6 +37,7 @@ def job(gid="ap1#1.0#1", state="idle", project="Proj_A", owner="alice", **extra)
         "RequestGPUMemory": None,
         "QDate": T0 - 100,
         "ChtcProjects": project,
+        "ProjectName": "OSG_Proj",
         "JobState": state,
     }
     return base | extra
@@ -111,7 +117,12 @@ def utc(ts):
 
 
 def pressure_row(gid, state, first, last, project="Proj_A"):
-    return (gid, "ap1", "alice", 1.0, 4.0, 8000.0, None, T0 - 100, project, state, first, last)
+    return (gid, "ap1", "alice", 1.0, 4.0, 8000.0, None, T0 - 100, project, "OSG_Proj", state, first, last)
+
+
+def write_pre_project_name(path, records):
+    """Write a job_pressure file as collected before ProjectName existed."""
+    pl.DataFrame(records, schema=JOB_PRESSURE_SCHEMA, orient="row").drop("ProjectName").write_parquet(path)
 
 
 class TestLoadJobPressure:
@@ -298,6 +309,72 @@ class TestMigrate:
         _migrate(str(db), None, None, 18000)
         out = pl.read_parquet(tmp_path / "job_pressure_2026-06.parquet")
         assert rows(out) == {("ap1#1.0#1", "idle", T0, T0 + 900), ("ap1#1.0#1", "idle", T0 + 20_000, T0 + 21_000)}
+
+
+class TestPools:
+    def test_streams_write_distinct_monthly_files(self):
+        chtc = month_path("/data", POOLS[PoolName.CHTC], T0)
+        ospool = month_path("/data", POOLS[PoolName.OSPOOL], T0)
+        assert chtc.name == "job_pressure_2026-05.parquet"
+        assert ospool.name == "ospool_job_pressure_2026-05.parquet"
+
+    def test_month_is_utc(self):
+        last_second_of_april = int(datetime.datetime(2026, 4, 30, 23, 59, 59, tzinfo=datetime.UTC).timestamp())
+        assert month_path("/d", POOLS[PoolName.CHTC], last_second_of_april).name == "job_pressure_2026-04.parquet"
+
+    def test_pools_have_separate_collectors_and_disjoint_whitelists(self):
+        chtc, ospool = POOLS[PoolName.CHTC], POOLS[PoolName.OSPOOL]
+        assert chtc.collector != ospool.collector
+        assert ospool.schedds
+        assert not set(chtc.schedds) & set(ospool.schedds)
+
+
+class TestStreamSeparation:
+    def test_default_loader_ignores_ospool_files_and_vice_versa(self, tmp_path):
+        write_pressure(tmp_path, [pressure_row("chtc", "idle", T0, T0)])
+        write_pressure(tmp_path, [pressure_row("osp", "idle", T0, T0)], "ospool_job_pressure_2026-09.parquet")
+
+        chtc = load_job_pressure(str(tmp_path), utc(T0), utc(T0))
+        ospool = load_job_pressure(str(tmp_path), utc(T0), utc(T0), prefix=OSPOOL_JOB_PRESSURE_PREFIX)
+        assert chtc["GlobalJobId"].to_list() == ["chtc"]
+        assert ospool["GlobalJobId"].to_list() == ["osp"]
+
+    def test_ospool_loader_with_only_chtc_files_is_empty(self, tmp_path):
+        write_pressure(tmp_path, [pressure_row("chtc", "idle", T0, T0)])
+        out = load_job_pressure(str(tmp_path), utc(T0), utc(T0), prefix=OSPOOL_JOB_PRESSURE_PREFIX)
+        assert out.is_empty()
+        assert out.schema == pl.Schema(JOB_PRESSURE_SCHEMA)
+
+    def test_attribution_ignores_ospool_files(self, tmp_path):
+        write_gpu_state(tmp_path, [("ap1#1.0#1", "alice@chtc.wisc.edu", "Claimed", NAIVE_T0)])
+        write_pressure(tmp_path, [pressure_row("ap1#1.0#1", "idle", T0, T0)], "ospool_job_pressure_2026-09.parquet")
+        out = attribute_claimed_jobs(str(tmp_path), NAIVE_T0, NAIVE_T0)
+        assert out["matched"].to_list() == [False]
+
+
+class TestPreProjectNameFiles:
+    def test_loader_reads_files_without_project_name_as_null(self, tmp_path):
+        write_pre_project_name(tmp_path / "job_pressure_2026-08.parquet", [pressure_row("old", "idle", T0, T0)])
+        out = load_job_pressure(str(tmp_path), utc(T0), utc(T0))
+        assert out.schema == pl.Schema(JOB_PRESSURE_SCHEMA)
+        assert out.select("GlobalJobId", "ProjectName").rows() == [("old", None)]
+
+    def test_loader_mixes_old_and_new_files(self, tmp_path):
+        write_pre_project_name(tmp_path / "job_pressure_2026-08.parquet", [pressure_row("old", "idle", T0, T0)])
+        write_pressure(tmp_path, [pressure_row("new", "idle", T0, T0)])
+        out = load_job_pressure(str(tmp_path), utc(T0), utc(T0)).sort("GlobalJobId")
+        assert out.select("GlobalJobId", "ProjectName").rows() == [("new", "OSG_Proj"), ("old", None)]
+
+    def test_poll_against_old_file_extends_it_and_adds_column(self, tmp_path):
+        path = tmp_path / "job_pressure_2026-09.parquet"
+        write_pre_project_name(path, [pressure_row("ap1#1.0#1", "idle", T0, T0)])
+        record_jobs([job(), job("ap1#2.0#1")], path, T0 + 1800, STALE)
+
+        out = pl.read_parquet(path)
+        assert out.schema == pl.Schema(JOB_PRESSURE_SCHEMA)
+        assert rows(out) == {("ap1#1.0#1", "idle", T0, T0 + 1800), ("ap1#2.0#1", "idle", T0 + 1800, T0 + 1800)}
+        projects = dict(out.select("GlobalJobId", "ProjectName").rows())
+        assert projects == {"ap1#1.0#1": None, "ap1#2.0#1": "OSG_Proj"}
 
 
 class TestMonthBoundary:
