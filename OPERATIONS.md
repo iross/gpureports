@@ -75,6 +75,14 @@ Both job pressure streams share one schema (`read_data.JOB_PRESSURE_SCHEMA`) wit
 collected read back with it null, and the next poll adds the column to the current month's file.
 Rows for jobs first seen before then also keep a null `ProjectName`.
 
+GPU memory requirements are recorded as `GPUsMinMemory` (MB, set by the `gpus_minimum_memory` submit
+command) and `RequireGPUs` (the job's GPU constraint expression as text, which also carries
+requirements written directly, e.g. `require_gpus = GlobalMemoryMB >= 40000`). Both are null when
+the job sets neither. Files written before 2026-11-11 have neither column (read back as null) and
+instead carry an always-null `RequestGPUMemory` column, which named a nonexistent job attribute;
+readers drop it and the next poll rewrites the current month's file without it. As with
+`ProjectName`, an interval already open at that point keeps null values until the job opens a new one.
+
 Each `job_pressure` file has one row per contiguous interval a job spent in one `JobState` (`idle` or `running`),
 with `first_seen`/`last_seen` in Unix seconds. Each run reads the month's file, extends or opens
 intervals, and atomically replaces it (dot-prefixed `.tmp` file + `os.replace`); an flock on

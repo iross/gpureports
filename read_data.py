@@ -54,7 +54,9 @@ SCAN_CAST_OPTIONS = pl.ScanCastOptions(datetime_cast="nanosecond-downcast")
 # Schema of job_pressure Parquet files (get_job_pressure.py), shared by the CHTC
 # (job_pressure_*) and OSPool (ospool_job_pressure_*) streams. One row per contiguous
 # observation interval of a job in one JobState ("idle" or "running"); first_seen and
-# last_seen are Unix seconds. ProjectName is null in files written before it was collected. Passed explicitly to scans so files resolve by name and an
+# last_seen are Unix seconds. ProjectName, GPUsMinMemory and RequireGPUs are null in files written before they were
+# collected; GPUsMinMemory (MB) comes from gpus_minimum_memory, RequireGPUs is the job's GPU
+# constraint expression as text. Passed explicitly to scans so files resolve by name and an
 # empty frame can be built when no files exist.
 JOB_PRESSURE_SCHEMA = {
     "GlobalJobId": pl.Utf8,
@@ -63,7 +65,8 @@ JOB_PRESSURE_SCHEMA = {
     "RequestGPUs": pl.Float64,
     "RequestCPUs": pl.Float64,
     "RequestMemory": pl.Float64,
-    "RequestGPUMemory": pl.Float64,
+    "GPUsMinMemory": pl.Float64,
+    "RequireGPUs": pl.Utf8,
     "QDate": pl.Int64,
     "ChtcProjects": pl.Utf8,
     "ProjectName": pl.Utf8,

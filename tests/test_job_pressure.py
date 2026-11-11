@@ -13,7 +13,7 @@ import polars as pl
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from get_job_pressure import POOLS, PoolName, month_path, record_jobs, update_intervals  # noqa: E402
+from get_job_pressure import POOLS, PROJ, PoolName, job_row, month_path, record_jobs, update_intervals  # noqa: E402
 from migrate_job_pressure import _merge_stream, _migrate  # noqa: E402
 from read_data import (  # noqa: E402
     JOB_PRESSURE_SCHEMA,
@@ -34,7 +34,8 @@ def job(gid="ap1#1.0#1", state="idle", project="Proj_A", owner="alice", **extra)
         "RequestGPUs": 1.0,
         "RequestCPUs": 4.0,
         "RequestMemory": 8000.0,
-        "RequestGPUMemory": None,
+        "GPUsMinMemory": None,
+        "RequireGPUs": None,
         "QDate": T0 - 100,
         "ChtcProjects": project,
         "ProjectName": "OSG_Proj",
@@ -100,7 +101,7 @@ class TestRecordJobs:
         assert sorted(p.name for p in tmp_path.glob("job_pressure_*.parquet")) == [path.name]
 
     def test_all_null_column_stays_readable_by_duckdb(self, tmp_path):
-        # RequestGPUMemory is null for every job here; polars would type the column Null,
+        # GPUsMinMemory and RequireGPUs are null for every job here; polars would type them Null,
         # which DuckDB's Parquet reader rejects.
         record_jobs([job()], tmp_path / "job_pressure_2026-09.parquet", T0, STALE)
         out = load_job_pressure(str(tmp_path), utc(T0 - 10), utc(T0 + 10))
@@ -117,12 +118,51 @@ def utc(ts):
 
 
 def pressure_row(gid, state, first, last, project="Proj_A"):
-    return (gid, "ap1", "alice", 1.0, 4.0, 8000.0, None, T0 - 100, project, "OSG_Proj", state, first, last)
+    return (gid, "ap1", "alice", 1.0, 4.0, 8000.0, None, None, T0 - 100, project, "OSG_Proj", state, first, last)
 
 
 def write_pre_project_name(path, records):
     """Write a job_pressure file as collected before ProjectName existed."""
     pl.DataFrame(records, schema=JOB_PRESSURE_SCHEMA, orient="row").drop("ProjectName").write_parquet(path)
+
+
+class TestJobRow:
+    AD = {
+        "GlobalJobId": "ap40#1.0#1",
+        "Owner": "alice",
+        "RequestGPUs": 1,
+        "RequestCPUs": 2,
+        "RequestMemory": 20000,
+        "GPUsMinMemory": 40000,
+        "RequireGPUs": "GlobalMemoryMB >= GPUsMinMemory",
+        "QDate": T0,
+        "ProjectName": "OSG_Proj",
+        "JobStatus": 1,
+    }
+
+    def test_gpu_memory_requirements_are_recorded(self):
+        row = job_row(self.AD, "ap40")
+        assert row is not None
+        assert row["GPUsMinMemory"] == 40000.0
+        assert row["RequireGPUs"] == "GlobalMemoryMB >= GPUsMinMemory"
+
+    def test_row_columns_match_schema(self):
+        row = job_row(self.AD, "ap40")
+        assert row is not None
+        assert set(row) == set(JOB_PRESSURE_SCHEMA) - {"first_seen", "last_seen"}
+
+    def test_absent_gpu_requirements_are_null(self):
+        ad = {k: v for k, v in self.AD.items() if k not in ("GPUsMinMemory", "RequireGPUs")}
+        row = job_row(ad, "ap40")
+        assert row is not None
+        assert (row["GPUsMinMemory"], row["RequireGPUs"], row["ChtcProjects"]) == (None, None, "")
+
+    def test_every_attribute_read_is_projected(self):
+        # The schedd only returns projected attributes; one missing here would be silently null.
+        assert set(self.AD) <= set(PROJ)
+
+    def test_untracked_state_is_skipped(self):
+        assert job_row(self.AD | {"JobStatus": 5}, "ap40") is None
 
 
 class TestLoadJobPressure:
@@ -375,6 +415,32 @@ class TestPreProjectNameFiles:
         assert rows(out) == {("ap1#1.0#1", "idle", T0, T0 + 1800), ("ap1#2.0#1", "idle", T0 + 1800, T0 + 1800)}
         projects = dict(out.select("GlobalJobId", "ProjectName").rows())
         assert projects == {"ap1#1.0#1": None, "ap1#2.0#1": "OSG_Proj"}
+
+
+class TestRequestGPUMemoryFiles:
+    """Files written while the collector projected the nonexistent RequestGPUMemory attribute."""
+
+    @staticmethod
+    def write(path, records):
+        df = pl.DataFrame(records, schema=JOB_PRESSURE_SCHEMA, orient="row")
+        df.drop("GPUsMinMemory", "RequireGPUs").with_columns(
+            pl.lit(None, dtype=pl.Float64).alias("RequestGPUMemory")
+        ).write_parquet(path)
+
+    def test_loader_drops_old_column_and_nulls_new_ones(self, tmp_path):
+        self.write(tmp_path / "job_pressure_2026-09.parquet", [pressure_row("old", "idle", T0, T0)])
+        out = load_job_pressure(str(tmp_path), utc(T0), utc(T0))
+        assert out.schema == pl.Schema(JOB_PRESSURE_SCHEMA)
+        assert out.select("GPUsMinMemory", "RequireGPUs").rows() == [(None, None)]
+
+    def test_poll_against_old_file_rewrites_it_with_current_schema(self, tmp_path):
+        path = tmp_path / "job_pressure_2026-09.parquet"
+        self.write(path, [pressure_row("ap1#1.0#1", "idle", T0, T0)])
+        record_jobs([job(GPUsMinMemory=40000.0)], path, T0 + 1800, STALE)
+
+        out = pl.read_parquet(path)
+        assert out.schema == pl.Schema(JOB_PRESSURE_SCHEMA)
+        assert rows(out) == {("ap1#1.0#1", "idle", T0, T0 + 1800)}
 
 
 class TestMonthBoundary:

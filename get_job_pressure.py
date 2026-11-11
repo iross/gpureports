@@ -24,6 +24,7 @@ import datetime
 import fcntl
 import os
 import time
+from collections.abc import Mapping
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, NamedTuple
@@ -39,7 +40,8 @@ PROJ = [
     "RequestGPUs",
     "RequestCPUs",
     "RequestMemory",
-    "RequestGPUMemory",
+    "GPUsMinMemory",
+    "RequireGPUs",
     "QDate",
     "ChtcProjects",
     "ProjectName",
@@ -108,6 +110,33 @@ def _safe_str(val: object) -> str:
     return "" if val is None else str(val)
 
 
+def _expr_text_or_none(val: object) -> str | None:
+    """Return a ClassAd expression's source text, unevaluated; RequireGPUs references GPU
+    attributes that only exist in a slot, so evaluating it in the job ad is meaningless."""
+    return None if val is None else str(val)
+
+
+def job_row(ad: Mapping[str, object], schedd_name: str) -> dict | None:
+    """Convert one projected job ad into a job_pressure row; None for states not tracked."""
+    state = JOB_STATES.get(_safe_int(ad.get("JobStatus")))
+    if state is None:
+        return None
+    return {
+        "GlobalJobId": _safe_str(ad.get("GlobalJobId")),
+        "ScheddName": schedd_name,
+        "Owner": _safe_str(ad.get("Owner")),
+        "RequestGPUs": _safe_float(ad.get("RequestGPUs")),
+        "RequestCPUs": _safe_float(ad.get("RequestCPUs")),
+        "RequestMemory": _safe_float(ad.get("RequestMemory")),
+        "GPUsMinMemory": _float_or_none(ad.get("GPUsMinMemory")),
+        "RequireGPUs": _expr_text_or_none(ad.get("RequireGPUs")),
+        "QDate": _safe_int(ad.get("QDate")),
+        "ChtcProjects": _safe_str(ad.get("ChtcProjects")),
+        "ProjectName": _safe_str(ad.get("ProjectName")),
+        "JobState": state,
+    }
+
+
 class Pool(NamedTuple):
     """Where one job_pressure stream comes from and where it is written."""
 
@@ -170,25 +199,7 @@ def collect_gpu_jobs(collector_host: str, schedd_names: list[str]) -> list[dict]
             print(f"Warning: query failed for schedd {schedd_name}: {e}")
             continue
 
-        for ad in ads:
-            state = JOB_STATES.get(_safe_int(ad.get("JobStatus")))
-            if state is None:
-                continue
-            jobs.append(
-                {
-                    "GlobalJobId": _safe_str(ad.get("GlobalJobId")),
-                    "ScheddName": schedd_name,
-                    "Owner": _safe_str(ad.get("Owner")),
-                    "RequestGPUs": _safe_float(ad.get("RequestGPUs")),
-                    "RequestCPUs": _safe_float(ad.get("RequestCPUs")),
-                    "RequestMemory": _safe_float(ad.get("RequestMemory")),
-                    "RequestGPUMemory": _float_or_none(ad.get("RequestGPUMemory")),
-                    "QDate": _safe_int(ad.get("QDate")),
-                    "ChtcProjects": _safe_str(ad.get("ChtcProjects")),
-                    "ProjectName": _safe_str(ad.get("ProjectName")),
-                    "JobState": state,
-                }
-            )
+        jobs.extend(row for ad in ads if (row := job_row(ad, schedd_name)) is not None)
 
     return jobs
 
@@ -252,13 +263,16 @@ def _write_parquet_atomic(df: pl.DataFrame, parquet_path: Path) -> None:
 def record_jobs(jobs: list[dict], parquet_path: Path, now_ts: int, stale_seconds: int) -> None:
     """Merge one poll's jobs into the month's Parquet file under an exclusive lock.
 
-    Columns added to JOB_PRESSURE_SCHEMA after the file was written are read back as null.
+    Columns added to JOB_PRESSURE_SCHEMA after the file was written are read back as null;
+    columns since dropped from it (RequestGPUMemory) are discarded on rewrite.
     """
     lock_path = parquet_path.with_name(f".{parquet_path.name}.lock")
     with open(lock_path, "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         if parquet_path.exists():
-            existing = pl.read_parquet(str(parquet_path), schema=JOB_PRESSURE_SCHEMA, missing_columns="insert")
+            existing = pl.scan_parquet(
+                str(parquet_path), schema=JOB_PRESSURE_SCHEMA, missing_columns="insert", extra_columns="ignore"
+            ).collect()
         else:
             existing = pl.DataFrame(schema=JOB_PRESSURE_SCHEMA)
         _write_parquet_atomic(update_intervals(existing, jobs, now_ts, stale_seconds), parquet_path)
