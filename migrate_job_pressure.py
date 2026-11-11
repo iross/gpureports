@@ -41,8 +41,11 @@ from read_data import JOB_PRESSURE_SCHEMA
 
 BATCH = 500_000
 
+# The SQLite files' RequestGPUMemory column named a nonexistent job attribute and is always
+# null, so GPUsMinMemory is null rather than copied from it.
 _ATTR_COLUMNS = (
-    "GlobalJobId, ScheddName, Owner, RequestGPUs, RequestCPUs, RequestMemory, RequestGPUMemory, QDate, ChtcProjects"
+    "GlobalJobId, ScheddName, Owner, RequestGPUs, RequestCPUs, RequestMemory, NULL AS GPUsMinMemory, QDate,"
+    " ChtcProjects"
 )
 
 
@@ -90,11 +93,13 @@ def _merge_stream(cursor, gap_seconds: int):
 
 
 def _intervals_to_frame(intervals: list[tuple]) -> pl.DataFrame:
-    # The SQLite files predate JobState and ProjectName: every row was an idle sighting.
-    columns = [c for c in JOB_PRESSURE_SCHEMA if c not in ("JobState", "ProjectName")]
+    # The SQLite files predate JobState, ProjectName and RequireGPUs: every row was an idle sighting.
+    columns = [c for c in JOB_PRESSURE_SCHEMA if c not in ("JobState", "ProjectName", "RequireGPUs")]
     frame = pl.DataFrame(intervals, schema=columns, orient="row", infer_schema_length=None)
     return frame.with_columns(
-        pl.lit("idle").alias("JobState"), pl.lit(None, dtype=pl.Utf8).alias("ProjectName")
+        pl.lit("idle").alias("JobState"),
+        pl.lit(None, dtype=pl.Utf8).alias("ProjectName"),
+        pl.lit(None, dtype=pl.Utf8).alias("RequireGPUs"),
     ).select(list(JOB_PRESSURE_SCHEMA))
 
 

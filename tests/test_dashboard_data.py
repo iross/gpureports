@@ -9,9 +9,9 @@ SCAN_CAST_OPTIONS combination exists to tolerate.
 
 Dashboard's dedup/classify used to be its own hand-rolled implementation (removed in
 TASK-49.1 in favor of classify_slots.prepare_frames()); _collapse_to_bucket_winner
-is the one piece of dashboard-specific logic that remains -- picking a single row per
-display bucket when prepare_frames()'s per-raw-timestamp dedup leaves more than one
-winner in the same bucket -- and it must agree with the canonical rank tiers.
+is the one piece of dashboard-specific logic that remains -- picking the single slot row
+a heatmap cell shows. It deliberately differs from the canonical rank: a claimed backfill
+slot beats an unclaimed primary, since the primary stays Unclaimed while backfill runs.
 """
 
 import datetime
@@ -19,11 +19,18 @@ import sys
 from pathlib import Path
 
 import polars as pl
+import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from classify_slots import slot_dedup_rank  # noqa: E402
-from dashboard.data import STATE_CODES, _collapse_to_bucket_winner, _map_state_codes, _query_dbs  # noqa: E402
+import classify_slots  # noqa: E402
+from dashboard.data import (  # noqa: E402
+    STATE_CODES,
+    _collapse_to_bucket_winner,
+    _map_state_codes,
+    _query_dbs,
+    get_heatmap_data,
+)
 
 
 def test_query_dbs_tolerates_reordered_and_missing_columns(tmp_path):
@@ -77,35 +84,68 @@ def test_query_dbs_tolerates_reordered_and_missing_columns(tmp_path):
     assert set(combined["Name"]) == {"slot1@gpu1.chtc.wisc.edu", "slot1@gpu2.chtc.wisc.edu"}
 
 
-def test_collapse_to_bucket_winner_matches_canonical_rank_on_backfill_vs_primary():
-    """A pre-task-47 4-tier rank picked claimed-backfill over unclaimed-primary
-    (backwards from classify_slots.slot_dedup_rank, which ranks unclaimed-primary(5)
-    above claimed-backfill(3)). Same GPU, same display bucket, one primary slot
-    Unclaimed and one backfill slot Claimed (as prepare_frames()'s per-timestamp dedup
-    would emit if both were the sole survivor of their own raw timestamp): the collapse
-    step must pick the primary row.
-    """
+def _slot_rows(names: list[str], states: list[str], pj_set: list[bool] | None = None) -> pl.DataFrame:
     bucket = datetime.datetime(2026, 5, 15, 10, 0, 0)
-    dedup = pl.DataFrame(
+    n = len(names)
+    return pl.DataFrame(
         {
-            "bucket": [bucket, bucket],
-            "AssignedGPUs": ["GPU-1A", "GPU-1A"],
-            "Name": ["slot1@gpu1.chtc.wisc.edu", "slot1_backfill@gpu1.chtc.wisc.edu"],
-            "State": ["Unclaimed", "Claimed"],
-            "_is_bf": [False, True],
-            "_pj_set": [False, False],
+            "bucket": [bucket] * n,
+            "AssignedGPUs": ["GPU-1A"] * n,
+            "Name": names,
+            "State": states,
+            "_is_bf": ["backfill" in name for name in names],
+            "_pj_set": pj_set or [False] * n,
         }
     )
 
-    result = _collapse_to_bucket_winner(dedup)
+
+PRIMARY = "slot1@gpu1.chtc.wisc.edu"
+BACKFILL = "slot1_backfill@gpu1.chtc.wisc.edu"
+
+
+@pytest.mark.parametrize(
+    ("primary_state", "primary_pj", "backfill_state", "winner"),
+    [
+        # A running backfill job leaves the GPU's primary slot Unclaimed; the
+        # heatmap must show the backfill job, not an idle GPU.
+        ("Unclaimed", False, "Claimed", BACKFILL),
+        ("Unclaimed", True, "Claimed", BACKFILL),
+        ("Drained", False, "Claimed", BACKFILL),
+        ("Claimed", False, "Claimed", PRIMARY),
+        ("Claimed", False, "Unclaimed", PRIMARY),
+        ("Unclaimed", False, "Unclaimed", PRIMARY),
+        ("Drained", False, "Unclaimed", PRIMARY),
+    ],
+)
+def test_collapse_to_bucket_winner_picks_displayed_slot(primary_state, primary_pj, backfill_state, winner):
+    rows = _slot_rows([PRIMARY, BACKFILL], [primary_state, backfill_state], [primary_pj, False])
+
+    result = _collapse_to_bucket_winner(rows)
 
     assert result.height == 1
-    assert result["Name"][0] == "slot1@gpu1.chtc.wisc.edu"
+    assert result["Name"][0] == winner
 
-    # Cross-check directly against the canonical rank tiers.
-    ranked = dedup.with_columns(slot_dedup_rank(pl.col("_is_bf"), pl.col("State"), pl.lit(False)).alias("_rank"))
-    assert ranked.filter(pl.col("Name") == "slot1@gpu1.chtc.wisc.edu")["_rank"][0] == 5
-    assert ranked.filter(pl.col("Name") == "slot1_backfill@gpu1.chtc.wisc.edu")["_rank"][0] == 3
+
+def test_heatmap_shows_busy_backfill_when_primary_slot_is_unclaimed(tmp_path, monkeypatch):
+    monkeypatch.setattr(classify_slots, "load_chtc_owned_hosts", lambda: set())
+    ts = datetime.datetime(2026, 5, 15, 10, 0, 0)
+    pl.DataFrame(
+        {
+            "Name": [PRIMARY, BACKFILL],
+            "AssignedGPUs": ["GPU-1A", "GPU-1A"],
+            "State": ["Unclaimed", "Claimed"],
+            "PrioritizedProjects": ["ProjA", "ProjA"],
+            "Machine": ["gpu1.chtc.wisc.edu"] * 2,
+            "GPUs_DeviceName": ["NVIDIA H200"] * 2,
+            "RemoteOwner": [None, "alice"],
+            "PreventJobsReason": [None, None],
+            "timestamp": [ts, ts],
+        }
+    ).write_parquet(str(tmp_path / "gpu_state_2026-05.parquet"))
+
+    data = get_heatmap_data(start=ts - datetime.timedelta(minutes=5), end=ts, bucket_minutes=15, base_dir=str(tmp_path))
+
+    assert data["machines"][0]["gpus"][0]["states"] == [STATE_CODES["busy_backfill"]]
 
 
 def test_map_state_codes_covers_all_six_states_and_na_fallback():

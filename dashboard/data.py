@@ -13,7 +13,7 @@ from pathlib import Path
 import polars as pl
 
 import classify_slots
-from classify_slots import prepare_frames, slot_dedup_rank
+from classify_slots import derive_columns, prepare_frames, slot_dedup_rank
 from read_data import (
     GPU_STATE_SCHEMA,
     SCAN_CAST_OPTIONS,
@@ -148,19 +148,30 @@ def _query_dbs(
     return combined, warnings
 
 
-def _collapse_to_bucket_winner(dedup: pl.DataFrame) -> pl.DataFrame:
-    """Pick one winning row per (bucket, AssignedGPUs).
+def _display_rank(is_bf: pl.Expr, state: pl.Expr, prev_idle: pl.Expr) -> pl.Expr:
+    """Rank for picking the one slot row a heatmap cell shows for a GPU.
 
-    prepare_frames() dedups at raw-timestamp granularity, so when the
-    requested bucket is wider than the raw collection interval, multiple
-    per-timestamp winners can still land in the same display bucket. Collapse
-    those using the same canonical rank, then rename to the "time_bucket"
-    label the rest of this module uses.
+    Same as classify_slots.slot_dedup_rank except a claimed backfill slot
+    outranks every primary slot that isn't itself claimed. While a backfill
+    job runs on a GPU, the GPU's primary slot still reports Unclaimed, so the
+    canonical rank (built for the reports, which count backfill separately
+    from raw_bf) would show every backfill-busy GPU as idle.
+    """
+    canonical_to_display = {6: 6, 3: 5, 5: 4, 4: 3, 2: 2, 1: 1, 0: 0}
+    return slot_dedup_rank(is_bf, state, prev_idle).replace_strict(canonical_to_display)
+
+
+def _collapse_to_bucket_winner(rows: pl.DataFrame) -> pl.DataFrame:
+    """Pick one winning row per (bucket, AssignedGPUs) using _display_rank,
+    then rename to the "time_bucket" label the rest of this module uses.
+
+    Takes raw (pre-dedup) slot rows, not prepare_frames().dedup: that frame has
+    already discarded claimed backfill rows in favor of unclaimed primaries.
     """
     prev_idle = pl.col("_pj_set") & (pl.col("State") != "Claimed")
-    rank = slot_dedup_rank(pl.col("_is_bf"), pl.col("State"), prev_idle)
+    rank = _display_rank(pl.col("_is_bf"), pl.col("State"), prev_idle)
     return (
-        dedup.with_columns(rank.alias("_rank"))
+        rows.with_columns(rank.alias("_rank"))
         .sort(["bucket", "AssignedGPUs", "_rank"], descending=[False, False, True])
         .unique(subset=["bucket", "AssignedGPUs"], keep="first")
         .drop("_rank")
@@ -223,12 +234,15 @@ def _prepare_bucketed(
         return df, [], [], warnings
 
     _set_host_exclusions(base_dir)
-    frames = prepare_frames(df.lazy(), bucket_minutes=bucket_minutes)
-    dedup = frames.dedup.collect()
-    if dedup.height == 0:
-        return dedup, [], [], warnings
+    rows = (
+        derive_columns(df.lazy(), bucket_minutes=bucket_minutes)
+        .filter(~pl.col("_excluded") & pl.col("AssignedGPUs").is_not_null())
+        .collect()
+    )
+    if rows.height == 0:
+        return rows, [], [], warnings
 
-    df = _map_state_codes(_collapse_to_bucket_winner(dedup))
+    df = _map_state_codes(_collapse_to_bucket_winner(rows))
 
     all_buckets = sorted(df["time_bucket"].unique().to_list())
     bucket_strs = [t.strftime("%Y-%m-%dT%H:%M") for t in all_buckets]

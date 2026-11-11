@@ -12,6 +12,8 @@ These are kept working and used regularly:
 | `plot_usage_stats.py` | Plot allocation usage over time |
 | `plot_gpu_availability.py` | GPU availability by category/type |
 | `plot_weekly_allocation.py` | Weekly allocation percentage trend |
+| `plot_backfill_fill.py` | Poster figures: prioritized GPU time by owner/backfill/idle (`--fleet open` for Open Capacity) |
+| `poster_stats.py` | Poster headline numbers: GPU-hours, jobs, users, fleet size, peak concurrency |
 | `weekly_summary.py` | Weekly GPU hours summary |
 | `gap_analysis.py` | Identify unused capacity windows |
 | `query.py` | Ad-hoc DB query helper |
